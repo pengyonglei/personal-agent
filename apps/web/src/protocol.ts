@@ -38,7 +38,15 @@ export interface RuntimeInfo {
   provider?: string;
   providerName?: string;
   model?: string;
-  models: Array<{ id: string; displayName: string; provider: string }>;
+  models: Array<{
+    id: string;
+    displayName: string;
+    provider: string;
+    providerName: string;
+    reasoningSupported: boolean;
+    reasoningEffort: ReasoningEffort;
+    reasoningOptions: ReasoningEffort[];
+  }>;
   reasoningSupported: boolean;
   reasoningEffort: ReasoningEffort;
   workingDirectory: string;
@@ -72,6 +80,7 @@ export interface TaskSummary {
   projectId: string;
   title: string;
   sessionId?: string;
+  permissionMode: PermissionMode;
   status: 'active' | 'archived';
   createdAt: string;
   updatedAt: string;

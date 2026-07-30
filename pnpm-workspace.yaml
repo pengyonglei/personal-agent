@@ -1,5 +1,7 @@
 packages:
-  - "packages/*"
-  - "apps/*"
+  - 'packages/*'
+  - 'apps/*'
 allowBuilds:
   esbuild: true
+minimumReleaseAgeExclude:
+  - '@vitejs/plugin-react@6.0.5'

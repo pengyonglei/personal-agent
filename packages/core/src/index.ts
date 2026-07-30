@@ -19,4 +19,9 @@ export {
   type PlanProgress,
   type CreatePlanInput,
 } from './plan-mode';
-export { ProjectManager, type Project, type ProjectTask } from './project';
+export {
+  ProjectManager,
+  type Project,
+  type ProjectTask,
+  type ProjectTaskPermissionMode,
+} from './project';

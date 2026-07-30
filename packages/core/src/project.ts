@@ -15,11 +15,14 @@ export interface Project {
   updatedAt: Date;
 }
 
+export type ProjectTaskPermissionMode = 'allow' | 'ask' | 'approval';
+
 export interface ProjectTask {
   id: string;
   projectId: string;
   title: string;
   sessionId?: string;
+  permissionMode: ProjectTaskPermissionMode;
   status: 'active' | 'archived';
   createdAt: Date;
   updatedAt: Date;
@@ -60,6 +63,7 @@ export class ProjectManager {
         if (!this.projects.has(task.projectId)) continue;
         this.tasks.set(task.id, {
           ...task,
+          permissionMode: normalizePermissionMode(task.permissionMode),
           status: task.status === 'archived' ? 'archived' : 'active',
           createdAt: new Date(task.createdAt),
           updatedAt: new Date(task.updatedAt),
@@ -126,6 +130,7 @@ export class ProjectManager {
       projectId: project.id,
       title: validateText(input.title, '任务标题', 200),
       sessionId: input.sessionId,
+      permissionMode: 'ask',
       status: 'active',
       createdAt: now,
       updatedAt: now,
@@ -167,6 +172,16 @@ export class ProjectManager {
     task.updatedAt = new Date();
     const project = this.projects.get(task.projectId);
     if (project) project.updatedAt = task.updatedAt;
+    await this.persist();
+    return cloneTask(task);
+  }
+
+  async setTaskPermissionMode(
+    taskId: string,
+    permissionMode: ProjectTaskPermissionMode,
+  ): Promise<ProjectTask> {
+    const task = this.requireTask(taskId);
+    task.permissionMode = normalizePermissionMode(permissionMode);
     await this.persist();
     return cloneTask(task);
   }
@@ -232,6 +247,10 @@ function validateText(value: string, label: string, maxLength: number): string {
   if (!normalized) throw new Error(`${label}不能为空`);
   if (normalized.length > maxLength) throw new Error(`${label}不能超过 ${maxLength} 个字符`);
   return normalized;
+}
+
+function normalizePermissionMode(value: unknown): ProjectTaskPermissionMode {
+  return value === 'allow' || value === 'approval' ? value : 'ask';
 }
 
 function samePath(left: string, right: string): boolean {

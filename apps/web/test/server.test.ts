@@ -24,6 +24,8 @@ test('web server exposes health and websocket readiness without a configured pro
     ),
     'utf-8',
   );
+  const browsableRoot = join(directory, 'browse-root');
+  await mkdir(browsableRoot);
 
   const instance = await createWebServer({
     host: '127.0.0.1',
@@ -43,14 +45,28 @@ test('web server exposes health and websocket readiness without a configured pro
     assert.equal(health.status, 'needs_configuration');
     assert.equal(health.runtime.configured, false);
 
-    const [markedResponse, domPurifyResponse] = await Promise.all([
-      fetch(`http://127.0.0.1:${instance.port}/vendor/marked.js`),
-      fetch(`http://127.0.0.1:${instance.port}/vendor/dompurify.js`),
-    ]);
-    assert.equal(markedResponse.status, 200);
-    assert.match(markedResponse.headers.get('content-type') ?? '', /javascript/);
-    assert.equal(domPurifyResponse.status, 200);
-    assert.match(domPurifyResponse.headers.get('content-type') ?? '', /javascript/);
+    const rootsResponse = await fetch(`http://127.0.0.1:${instance.port}/api/filesystem/directories`);
+    assert.equal(rootsResponse.status, 200);
+    const roots = (await rootsResponse.json()) as {
+      entries: Array<{ name: string; path: string; hasChildren: boolean }>;
+    };
+    assert.ok(roots.entries.length > 0);
+
+    const directoriesResponse = await fetch(
+      `http://127.0.0.1:${instance.port}/api/filesystem/directories?path=${encodeURIComponent(
+        directory,
+      )}`,
+    );
+    assert.equal(directoriesResponse.status, 200);
+    const directories = (await directoriesResponse.json()) as {
+      currentPath: string;
+      entries: Array<{ name: string; path: string; hasChildren: boolean }>;
+    };
+    assert.equal(directories.currentPath, directory);
+    assert.deepEqual(
+      directories.entries.find((entry) => entry.path === browsableRoot),
+      { name: 'browse-root', path: browsableRoot, hasChildren: true },
+    );
 
     const ready = await new Promise<Record<string, unknown>>((resolve, reject) => {
       const ws = new WebSocket(`ws://127.0.0.1:${instance.port}/ws`);
@@ -205,6 +221,7 @@ test('web server exposes health and websocket readiness without a configured pro
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           provider: 'deepseek',
+          activate: false,
           apiKey: 'test-deepseek-key',
           baseURL: 'https://api.deepseek.com',
           defaultModel: 'deepseek-v4-flash',
@@ -214,13 +231,46 @@ test('web server exposes health and websocket readiness without a configured pro
       },
     );
     assert.equal(configureDeepSeekResponse.status, 200);
+    const configuredDeepSeek = (await configureDeepSeekResponse.json()) as {
+      runtime: {
+        provider: string;
+        model: string;
+        models: Array<{
+          provider: string;
+          id: string;
+          reasoningSupported: boolean;
+          reasoningOptions: string[];
+        }>;
+      };
+      settings: { active: string; providers: Record<string, Record<string, unknown>> };
+    };
+    assert.equal(configuredDeepSeek.runtime.provider, 'openai');
+    assert.equal(configuredDeepSeek.runtime.model, 'custom-openai-model');
+    assert.equal(configuredDeepSeek.settings.active, 'openai');
+    assert.equal(configuredDeepSeek.settings.providers.deepseek.hasApiKey, true);
+    assert.deepEqual(
+      configuredDeepSeek.runtime.models.find(
+        (model) => model.provider === 'deepseek' && model.id === 'deepseek-v4-pro',
+      )?.reasoningOptions,
+      ['off', 'high', 'max'],
+    );
+    assert.equal(
+      configuredDeepSeek.runtime.models.find(
+        (model) => model.provider === 'openai' && model.id === 'custom-openai-model',
+      )?.reasoningSupported,
+      false,
+    );
 
     const switchDeepSeekResponse = await fetch(
       `http://127.0.0.1:${instance.port}/api/runtime/model`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: 'deepseek-v4-pro', reasoningEffort: 'max' }),
+        body: JSON.stringify({
+          provider: 'deepseek',
+          model: 'deepseek-v4-pro',
+          reasoningEffort: 'max',
+        }),
       },
     );
     assert.equal(switchDeepSeekResponse.status, 200);
@@ -249,6 +299,117 @@ test('web server exposes health and websocket readiness without a configured pro
 
 test('remote listening requires an explicit access token', async () => {
   await assert.rejects(createWebServer({ host: '0.0.0.0', port: 0 }), /PERSONAL_AGENT_WEB_TOKEN/);
+});
+
+test('task permission mode is persisted and restored when switching tasks', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'personal-agent-web-permission-'));
+  const workspace = join(directory, 'workspace');
+  const projectStoragePath = join(directory, 'projects.json');
+  const configPath = join(directory, 'config.yaml');
+  await mkdir(workspace);
+  await writeFile(
+    configPath,
+    [
+      'providers:',
+      '  active: openai',
+      '  openai:',
+      '    apiKey: test-local-key',
+      '    defaultModel: gpt-4o-mini',
+      'memory:',
+      '  enabled: false',
+      'plugins:',
+      '  enabled: false',
+      'mcp:',
+      '  servers: []',
+    ].join('\n'),
+    'utf8',
+  );
+
+  const instance = await createWebServer({
+    host: '127.0.0.1',
+    port: 0,
+    workingDirectory: workspace,
+    configPath,
+    projectStoragePath,
+  });
+
+  try {
+    const taskIds = await new Promise<{ firstTaskId: string; secondTaskId: string }>(
+      (resolve, reject) => {
+        const ws = new WebSocket(`ws://127.0.0.1:${instance.port}/ws`);
+        let stage: 'ready' | 'allow' | 'second' | 'approval' | 'restore' = 'ready';
+        let projectId: string | undefined;
+        let firstTaskId: string | undefined;
+        let secondTaskId: string | undefined;
+        const timeout = setTimeout(() => {
+          ws.close();
+          reject(new Error(`Timed out while waiting for permission stage: ${stage}`));
+        }, 10_000);
+        const finish = () => {
+          clearTimeout(timeout);
+          ws.close();
+          resolve({ firstTaskId: firstTaskId!, secondTaskId: secondTaskId! });
+        };
+
+        ws.once('error', (error) => {
+          clearTimeout(timeout);
+          reject(error);
+        });
+        ws.on('message', (data) => {
+          const message = JSON.parse(data.toString()) as Record<string, unknown>;
+          if (message.type === 'ready' && stage === 'ready') {
+            projectId = message.activeProjectId as string;
+            firstTaskId = message.activeTaskId as string;
+            stage = 'allow';
+            ws.send(JSON.stringify({ type: 'set_permission_mode', mode: 'allow' }));
+            return;
+          }
+          if (message.type === 'permission_mode' && message.mode === 'allow' && stage === 'allow') {
+            stage = 'second';
+            ws.send(JSON.stringify({ type: 'create_task', projectId }));
+            return;
+          }
+          if (message.type === 'task_changed' && stage === 'second') {
+            secondTaskId = (message.task as { id: string }).id;
+            stage = 'approval';
+            ws.send(JSON.stringify({ type: 'set_permission_mode', mode: 'approval' }));
+            return;
+          }
+          if (
+            message.type === 'permission_mode' &&
+            message.mode === 'approval' &&
+            stage === 'approval'
+          ) {
+            stage = 'restore';
+            ws.send(JSON.stringify({ type: 'open_task', taskId: firstTaskId }));
+            return;
+          }
+          if (
+            message.type === 'permission_mode' &&
+            message.mode === 'allow' &&
+            stage === 'restore'
+          ) {
+            finish();
+          }
+        });
+      },
+    );
+
+    const saved = JSON.parse(await readFile(projectStoragePath, 'utf8')) as {
+      tasks: Array<{ id: string; permissionMode?: string }>;
+    };
+    assert.equal(
+      saved.tasks.find((task) => task.id === taskIds.firstTaskId)?.permissionMode,
+      'allow',
+    );
+    assert.equal(
+      saved.tasks.find((task) => task.id === taskIds.secondTaskId)?.permissionMode,
+      'approval',
+    );
+  } finally {
+    await instance.close();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('refresh restores the last opened task and its persisted conversation history', async () => {

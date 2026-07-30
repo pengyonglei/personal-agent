@@ -56,17 +56,18 @@
 
 ### 技术栈
 
-| 类别        | 选择                         |
-| ----------- | ---------------------------- |
-| **架构**    | pnpm monorepo + Turborepo    |
-| **语言**    | TypeScript 5.7 (strict mode) |
-| **运行时**  | Node.js ≥ 20                 |
-| **LLM SDK** | @anthropic-ai/sdk, openai    |
-| **构建**    | tsup (esbuild)               |
-| **TUI**     | Ink 5.x + React 18           |
-| **配置**    | Zod + YAML                   |
-| **Web UI**  | Express 5 + WebSocket        |
-| **测试**    | Node.js test runner          |
+| 类别         | 选择                             |
+| ------------ | -------------------------------- |
+| **架构**     | pnpm monorepo + Turborepo        |
+| **语言**     | TypeScript 5.7 (strict mode)     |
+| **运行时**   | Node.js ≥ 20                     |
+| **LLM SDK**  | @anthropic-ai/sdk, openai        |
+| **构建**     | tsup (esbuild)                   |
+| **TUI**      | Ink 5.x + React 18               |
+| **配置**     | Zod + YAML                       |
+| **Web UI**   | React 18 + Vite 8 + Ant Design 6 |
+| **Web 服务** | Express 5 + WebSocket            |
+| **测试**     | Node.js test runner              |
 
 ### 包结构
 
@@ -162,7 +163,7 @@ pnpm cli -p openai -m gpt-4o "解释这个项目"
 ### 4. 启动 Web UI
 
 ```bash
-# 开发模式；默认只监听 127.0.0.1:3456
+# 开发模式；Express 集成 Vite HMR，默认只监听 127.0.0.1:3456
 pnpm web
 
 # 或先构建，再运行构建产物

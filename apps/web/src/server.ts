@@ -1,8 +1,10 @@
 import express from 'express';
+import { readdir, stat } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
-import { createRequire } from 'node:module';
-import { dirname, join, resolve } from 'node:path';
+import { homedir } from 'node:os';
+import { basename, dirname, join, parse, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { ViteDevServer } from 'vite';
 import { WebSocket, WebSocketServer } from 'ws';
 import { generateId } from '@personal-agent/shared';
 import {
@@ -22,14 +24,19 @@ import {
 const VERSION = '0.1.0';
 const UNTITLED_TASK_TITLE = '新任务';
 const sourceDirectory = dirname(fileURLToPath(import.meta.url));
-const publicDirectory = resolve(sourceDirectory, '..', 'public');
-const require = createRequire(import.meta.url);
-const markedClientPath = join(dirname(require.resolve('marked')), 'marked.esm.js');
-const domPurifyClientPath = join(dirname(require.resolve('dompurify')), 'purify.es.mjs');
+const webDirectory = resolve(sourceDirectory, '..');
+const clientBuildDirectory = resolve(webDirectory, 'dist/client');
+const viteConfigPath = resolve(webDirectory, 'vite.config.ts');
 
 interface PendingPermission {
   resolve: (answer: { approved: boolean; remember?: boolean }) => void;
   timeout: ReturnType<typeof setTimeout>;
+}
+
+interface DirectoryEntry {
+  name: string;
+  path: string;
+  hasChildren: boolean;
 }
 
 export interface WebServerOptions {
@@ -40,6 +47,7 @@ export interface WebServerOptions {
   configPath?: string;
   projectStoragePath?: string;
   sessionsDirectory?: string;
+  viteDev?: boolean;
 }
 
 export async function createWebServer(options: WebServerOptions = {}): Promise<{
@@ -51,7 +59,7 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
   close: () => Promise<void>;
 }> {
   const host = options.host ?? process.env.PERSONAL_AGENT_WEB_HOST ?? '127.0.0.1';
-  const port = options.port ?? Number(process.env.PORT ?? 3456);
+  const port = options.port ?? Number(process.env.PORT ?? 5678);
   const authToken = options.authToken ?? process.env.PERSONAL_AGENT_WEB_TOKEN;
 
   if (!isLoopback(host) && !authToken) {
@@ -70,6 +78,7 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
   const app = express();
   const server = createServer(app);
   const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
+  let viteDevServer: ViteDevServer | undefined;
 
   app.disable('x-powered-by');
   app.use((_req, res, next) => {
@@ -78,18 +87,11 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader(
       'Content-Security-Policy',
-      "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' ws: wss:; font-src 'self'; frame-ancestors 'none'",
+      `default-src 'self'; script-src 'self'${options.viteDev ? " 'unsafe-inline'" : ''}; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; font-src 'self' data:; frame-ancestors 'none'`,
     );
     next();
   });
   app.use(express.json({ limit: '64kb' }));
-  app.get('/vendor/marked.js', (_req, res) =>
-    res.sendFile(markedClientPath, { dotfiles: 'allow' }),
-  );
-  app.get('/vendor/dompurify.js', (_req, res) =>
-    res.sendFile(domPurifyClientPath, { dotfiles: 'allow' }),
-  );
-  app.use(express.static(publicDirectory, { extensions: ['html'] }));
 
   app.get('/api/health', (_req, res) => {
     const info = runtime.getRuntimeInfo();
@@ -152,12 +154,51 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
     }
   });
 
-  app.use((_req, res) => {
-    res.sendFile(join(publicDirectory, 'index.html'));
+  app.get('/api/filesystem/directories', async (req, res) => {
+    if (!isAuthorized(req.headers.authorization, req.query.token, authToken)) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    try {
+      const directoryPath = parseDirectoryQuery(req.query.path);
+      if (!directoryPath) {
+        res.json({ entries: await listDirectoryRoots(runtime.workingDirectory) });
+        return;
+      }
+      const resolvedPath = resolve(directoryPath);
+      const info = await stat(resolvedPath);
+      if (!info.isDirectory()) throw new Error(`路径不是目录: ${resolvedPath}`);
+      res.json({
+        currentPath: resolvedPath,
+        parentPath: getParentDirectory(resolvedPath),
+        entries: await listChildDirectories(resolvedPath),
+      });
+    } catch (error) {
+      res.status(400).json({ error: formatError(error) });
+    }
   });
+
+  if (options.viteDev) {
+    const { createServer: createViteServer } = await import('vite');
+    viteDevServer = await createViteServer({
+      configFile: viteConfigPath,
+      server: {
+        middlewareMode: true,
+        hmr: { server },
+      },
+      appType: 'spa',
+    });
+    app.use(viteDevServer.middlewares);
+  } else {
+    app.use(express.static(clientBuildDirectory, { extensions: ['html'] }));
+    app.use((_req, res) => {
+      res.sendFile(join(clientBuildDirectory, 'index.html'));
+    });
+  }
 
   server.on('upgrade', (request, socket, head) => {
     const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`);
+    if (url.pathname !== '/ws' && options.viteDev) return;
     if (
       url.pathname !== '/ws' ||
       !isAuthorized(request.headers.authorization, url.searchParams.get('token'), authToken)
@@ -398,6 +439,10 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
           break;
         case 'set_permission_mode':
           conversation.setPermissionMode(message.mode);
+          if (activeTaskId) {
+            await runtime.projects.setTaskPermissionMode(activeTaskId, message.mode);
+            sendProjectState();
+          }
           break;
         case 'approve_plan':
           conversation.setPlanMode(false);
@@ -450,10 +495,13 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
       } else {
         send({ type: 'history', sessionId: task.sessionId ?? '', messages: [] });
       }
-      send({
-        type: 'permission_mode',
-        mode: conversation?.getPermissionMode() ?? 'ask',
-      });
+      const activatedTask = runtime.projects.getTask(task.id) ?? task;
+      const permissionMode = activatedTask.permissionMode ?? 'ask';
+      if (conversation) {
+        conversation.setPermissionMode(permissionMode);
+      } else {
+        send({ type: 'permission_mode', mode: permissionMode });
+      }
 
       if (announce) {
         send({ type: 'project_changed', project: serializeProject(project) });
@@ -524,6 +572,7 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
       await new Promise<void>((resolveClose, rejectClose) =>
         server.close((error) => (error ? rejectClose(error) : resolveClose())),
       );
+      await viteDevServer?.close();
       await runtime.dispose();
     },
   };
@@ -535,6 +584,15 @@ function parseProviderSettings(value: unknown): ProviderSettingsInput {
   }
   const input = value as Record<string, unknown>;
   if (
+    input.provider !== undefined &&
+    input.provider !== 'anthropic' &&
+    input.provider !== 'openai' &&
+    input.provider !== 'ollama' &&
+    input.provider !== 'deepseek'
+  ) {
+    throw new Error('provider 格式无效。');
+  }
+  if (
     input.provider !== 'anthropic' &&
     input.provider !== 'openai' &&
     input.provider !== 'ollama' &&
@@ -544,6 +602,10 @@ function parseProviderSettings(value: unknown): ProviderSettingsInput {
   }
 
   const result: ProviderSettingsInput = { provider: input.provider };
+  if (input.activate !== undefined) {
+    if (typeof input.activate !== 'boolean') throw new Error('activate 格式无效。');
+    result.activate = input.activate;
+  }
   for (const field of ['apiKey', 'baseURL', 'defaultModel'] as const) {
     const fieldValue = input[field];
     if (fieldValue === undefined || fieldValue === null) continue;
@@ -573,21 +635,27 @@ function parseRuntimeModelSettings(value: unknown): RuntimeModelSettingsInput {
     throw new Error('模型运行配置格式无效。');
   }
   const input = value as Record<string, unknown>;
+  if (
+    input.provider !== undefined &&
+    input.provider !== 'anthropic' &&
+    input.provider !== 'openai' &&
+    input.provider !== 'ollama' &&
+    input.provider !== 'deepseek'
+  ) {
+    throw new Error('provider 格式无效。');
+  }
   if (typeof input.model !== 'string' || input.model.length > 256) {
     throw new Error('model 格式无效。');
   }
   return {
+    provider: input.provider as RuntimeModelSettingsInput['provider'],
     model: input.model,
     reasoningEffort:
-      input.reasoningEffort === undefined
-        ? undefined
-        : parseReasoningEffort(input.reasoningEffort),
+      input.reasoningEffort === undefined ? undefined : parseReasoningEffort(input.reasoningEffort),
   };
 }
 
-function parseReasoningEffort(
-  value: unknown,
-): 'off' | 'low' | 'medium' | 'high' | 'max' {
+function parseReasoningEffort(value: unknown): 'off' | 'low' | 'medium' | 'high' | 'max' {
   if (
     value !== 'off' &&
     value !== 'low' &&
@@ -605,6 +673,91 @@ async function sendSessionList(
   send: (message: ServerMessage) => void,
 ): Promise<void> {
   send({ type: 'session_list', sessions: await runtime.listSessions() });
+}
+
+function parseDirectoryQuery(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string' || value.length > 4096) {
+    throw new Error('目录路径格式无效。');
+  }
+  const trimmed = value.trim();
+  return trimmed || undefined;
+}
+
+async function listDirectoryRoots(workingDirectory: string): Promise<DirectoryEntry[]> {
+  const candidates = new Map<string, string>();
+  const addRoot = (value: string | undefined): void => {
+    if (!value) return;
+    const root = parse(resolve(value)).root;
+    if (!root) return;
+    candidates.set(normalizePathKey(root), root);
+  };
+
+  addRoot(workingDirectory);
+  addRoot(process.cwd());
+  addRoot(homedir());
+
+  if (process.platform === 'win32') {
+    const systemDrive = process.env.SystemDrive;
+    if (systemDrive) addRoot(`${systemDrive.replace(/[\\\/]+$/, '')}\\`);
+    for (let code = 65; code <= 90; code += 1) {
+      addRoot(`${String.fromCharCode(code)}:\\`);
+    }
+  } else {
+    addRoot('/');
+  }
+
+  const entries: DirectoryEntry[] = [];
+  for (const directoryPath of candidates.values()) {
+    try {
+      const info = await stat(directoryPath);
+      if (!info.isDirectory()) continue;
+      entries.push({
+        name: directoryPath,
+        path: directoryPath,
+        hasChildren: true,
+      });
+    } catch {
+      // Ignore inaccessible or unmounted roots.
+    }
+  }
+  return sortDirectoryEntries(entries);
+}
+
+async function listChildDirectories(directoryPath: string): Promise<DirectoryEntry[]> {
+  const entries = await readdir(directoryPath, { withFileTypes: true });
+  const directories: DirectoryEntry[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+    const childPath = join(directoryPath, entry.name);
+    try {
+      const info = await stat(childPath);
+      if (!info.isDirectory()) continue;
+      directories.push({
+        name: entry.name,
+        path: childPath,
+        hasChildren: true,
+      });
+    } catch {
+      // Skip directories that cannot be inspected by the current process.
+    }
+  }
+  return sortDirectoryEntries(directories);
+}
+
+function sortDirectoryEntries(entries: DirectoryEntry[]): DirectoryEntry[] {
+  return entries.sort((left, right) =>
+    left.name.localeCompare(right.name, undefined, { numeric: true, sensitivity: 'base' }),
+  );
+}
+
+function getParentDirectory(directoryPath: string): string | undefined {
+  const parent = dirname(directoryPath);
+  return normalizePathKey(parent) === normalizePathKey(directoryPath) ? undefined : parent;
+}
+
+function normalizePathKey(value: string): string {
+  return process.platform === 'win32' ? value.toLowerCase() : value;
 }
 
 function serializeProject(project: {
@@ -626,12 +779,14 @@ function serializeTask(task: {
   projectId: string;
   title: string;
   sessionId?: string;
+  permissionMode?: TaskSummary['permissionMode'];
   status: 'active' | 'archived';
   createdAt: Date;
   updatedAt: Date;
 }): TaskSummary {
   return {
     ...task,
+    permissionMode: task.permissionMode ?? 'ask',
     createdAt: task.createdAt.toISOString(),
     updatedAt: task.updatedAt.toISOString(),
   };
@@ -667,7 +822,7 @@ const isEntrypoint =
   resolve(process.argv[1]).toLowerCase() === fileURLToPath(import.meta.url).toLowerCase();
 
 if (isEntrypoint) {
-  createWebServer()
+  createWebServer({ viteDev: basename(sourceDirectory) === 'src' })
     .then(({ host, port, runtime, close }) => {
       const configured = runtime.getRuntimeInfo().configured ? 'ready' : 'needs configuration';
       console.log(`personal-agent Web UI: http://${host}:${port} (${configured})`);

@@ -11,6 +11,7 @@ export type ProviderId = (typeof PROVIDER_IDS)[number];
 
 export interface ProviderSettingsUpdate {
   provider: ProviderId;
+  activate?: boolean;
   apiKey?: string;
   baseURL?: string | null;
   defaultModel?: string | null;
@@ -54,7 +55,7 @@ export async function saveProviderSettings(
       ? (existingProviders[update.provider] as Record<string, unknown>)
       : {};
 
-  existingProviders.active = update.provider;
+  if (update.activate !== false) existingProviders.active = update.provider;
   if (update.apiKey !== undefined) existingProvider.apiKey = update.apiKey;
   setOptionalField(existingProvider, 'baseURL', update.baseURL);
   setOptionalField(existingProvider, 'defaultModel', update.defaultModel);

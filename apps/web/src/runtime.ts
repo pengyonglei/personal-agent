@@ -19,7 +19,7 @@ import { MCPClientManager } from '@personal-agent/mcp';
 import { FileSystemMemoryStore } from '@personal-agent/memory';
 import { PluginLoader } from '@personal-agent/plugin';
 import { ProviderRegistry, type LLMProvider } from '@personal-agent/provider';
-import type { AgentEvent, ReasoningEffort, ToolResult } from '@personal-agent/shared';
+import type { AgentEvent, ModelInfo, ReasoningEffort, ToolResult } from '@personal-agent/shared';
 import { createLogger, ProviderFeature } from '@personal-agent/shared';
 import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -58,6 +58,7 @@ export type PermissionRequester = (
 
 export interface ProviderSettingsInput {
   provider: ProviderId;
+  activate?: boolean;
   apiKey?: string;
   baseURL?: string;
   defaultModel?: string;
@@ -66,6 +67,7 @@ export interface ProviderSettingsInput {
 }
 
 export interface RuntimeModelSettingsInput {
+  provider?: ProviderId;
   model: string;
   reasoningEffort?: ReasoningEffort;
 }
@@ -294,13 +296,28 @@ export class WebAgentRuntime {
       providerName: this.provider?.displayName,
       model: this.provider?.getModel(),
       models: providers.flatMap((provider) =>
-        provider.getModelList().map((model) => ({
-          id: model.id,
-          displayName: model.displayName,
-          provider: provider.providerId,
-        })),
+        provider.getModelList().map((model) => {
+          const providerId = provider.providerId as ProviderId;
+          const reasoningSupported = supportsRuntimeReasoning(providerId, model);
+          return {
+            id: model.id,
+            displayName: model.displayName,
+            provider: provider.providerId,
+            providerName: provider.displayName,
+            reasoningSupported,
+            reasoningEffort: reasoningSupported
+              ? resolveProviderReasoningEffort(providerId, this.config.providers[providerId])
+              : 'off',
+            reasoningOptions: reasoningSupported ? reasoningOptionsForProvider(providerId) : ['off'],
+          };
+        }),
       ),
-      reasoningSupported: this.provider?.supportsFeature(ProviderFeature.Thinking) ?? false,
+      reasoningSupported: this.provider
+        ? supportsRuntimeReasoning(
+            this.provider.providerId as ProviderId,
+            this.provider.getModelList().find((model) => model.id === this.provider?.getModel()),
+          )
+        : false,
       reasoningEffort: this.getReasoningEffort(),
       workingDirectory: this.workingDirectory,
       toolCount: this.toolRegistry.listAll().length,
@@ -370,8 +387,10 @@ export class WebAgentRuntime {
       ),
       defaultModel,
     );
-    const thinkingEffort =
-      input.provider === 'deepseek' ? (input.thinkingEffort ?? defaults.thinkingEffort) : 'off';
+    const thinkingEffort = normalizeRuntimeReasoningEffort(
+      input.provider,
+      input.provider === 'deepseek' ? (input.thinkingEffort ?? defaults.thinkingEffort) : 'off',
+    );
     const nextConfigValue = structuredClone(this.config) as unknown as Record<string, unknown>;
     const providers = nextConfigValue.providers as Record<string, unknown>;
     const current =
@@ -381,7 +400,9 @@ export class WebAgentRuntime {
         ? { ...(providers[input.provider] as Record<string, unknown>) }
         : {};
 
-    providers.active = input.provider;
+    const shouldActivate = input.activate !== false || this.provider === null;
+    const shouldPersistActive = shouldActivate || !providers.active;
+    if (shouldPersistActive) providers.active = input.provider;
     if (apiKey) current.apiKey = apiKey;
     if (baseURL) current.baseURL = baseURL;
     else delete current.baseURL;
@@ -396,16 +417,20 @@ export class WebAgentRuntime {
 
     const nextConfig = appConfigSchema.parse(nextConfigValue);
     const nextRegistry = await ProviderRegistry.fromConfig(nextConfig);
-    const nextProvider = nextRegistry.get(input.provider);
-    if (!nextProvider) {
+    const savedProvider = nextRegistry.get(input.provider);
+    if (!savedProvider) {
       await nextRegistry.disposeAll();
       throw new Error(`无法启用 ${providerLabel(input.provider)}。`);
     }
+    if (shouldActivate) nextRegistry.setActive(input.provider);
+    const nextProvider =
+      nextRegistry.getActiveProviderId() !== null ? nextRegistry.getActive() : savedProvider;
 
     try {
       await saveProviderSettings(
         {
           provider: input.provider,
+          activate: shouldPersistActive,
           apiKey: apiKey || undefined,
           baseURL: baseURL || null,
           defaultModel,
@@ -436,20 +461,28 @@ export class WebAgentRuntime {
       throw new Error('Agent 正在运行，请等待当前请求完成后再切换模型。');
     }
     if (!this.provider) throw new Error(this.initializationError ?? '未配置 LLM Provider。');
+    if (!this.providerRegistry) throw new Error(this.initializationError ?? '未配置 LLM Provider。');
+    const registry = this.providerRegistry;
 
     const model = input.model.trim();
     if (!model) throw new Error('模型 ID 不能为空。');
-    if (!this.provider.getModelList().some((candidate) => candidate.id === model)) {
+    const providerId = input.provider ?? (this.provider.providerId as ProviderId);
+    const provider = registry.get(providerId);
+    if (!provider) throw new Error(`${providerLabel(providerId)} 尚未配置或不可用。`);
+    const modelInfo = provider.getModelList().find((candidate) => candidate.id === model);
+    if (!modelInfo) {
       throw new Error(`模型 ${model} 不在当前供应商的已配置模型列表中。`);
     }
 
-    const providerId = this.provider.providerId as ProviderId;
     const current = this.config.providers[providerId];
     if (!current) throw new Error('当前供应商配置不存在。');
-    const reasoningEffort =
-      providerId === 'deepseek'
-        ? (input.reasoningEffort ?? current.thinkingEffort ?? 'high')
-        : 'off';
+    const reasoningSupported = supportsRuntimeReasoning(providerId, modelInfo);
+    const reasoningEffort = reasoningSupported
+      ? normalizeRuntimeReasoningEffort(
+          providerId,
+          input.reasoningEffort ?? resolveProviderReasoningEffort(providerId, current),
+        )
+      : 'off';
     const nextConfigValue = structuredClone(this.config);
     const nextProviderConfig = nextConfigValue.providers[providerId];
     if (!nextProviderConfig) throw new Error('当前供应商配置不存在。');
@@ -461,6 +494,7 @@ export class WebAgentRuntime {
     await saveProviderSettings(
       {
         provider: providerId,
+        activate: true,
         defaultModel: model,
         thinkingEffort: reasoningEffort,
       },
@@ -468,16 +502,18 @@ export class WebAgentRuntime {
     );
 
     this.config = nextConfig;
-    this.provider.setModel(model);
+    provider.setModel(model);
+    registry.setActive(providerId);
+    this.provider = provider;
     for (const conversation of this.conversations.values()) {
-      await conversation.replaceProvider(this.provider);
+      await conversation.replaceProvider(provider);
     }
   }
 
   getReasoningEffort(): ReasoningEffort {
     if (!this.provider) return 'off';
     const provider = this.config.providers[this.provider.providerId as ProviderId];
-    return provider?.thinkingEffort ?? (this.provider.providerId === 'deepseek' ? 'high' : 'off');
+    return resolveProviderReasoningEffort(this.provider.providerId as ProviderId, provider);
   }
 
   async listSessions(): Promise<SessionSummary[]> {
@@ -1199,6 +1235,31 @@ function getProviderDefaults(provider: ProviderId): {
         thinkingEffort: 'high',
       };
   }
+}
+
+function supportsRuntimeReasoning(providerId: ProviderId, model?: ModelInfo): boolean {
+  return providerId === 'deepseek' && Boolean(model?.features.includes(ProviderFeature.Thinking));
+}
+
+function reasoningOptionsForProvider(providerId: ProviderId): ReasoningEffort[] {
+  return providerId === 'deepseek' ? ['off', 'high', 'max'] : ['off'];
+}
+
+function resolveProviderReasoningEffort(
+  providerId: ProviderId,
+  providerConfig: AppConfig['providers'][ProviderId],
+): ReasoningEffort {
+  if (providerId !== 'deepseek') return 'off';
+  return normalizeRuntimeReasoningEffort(providerId, providerConfig?.thinkingEffort ?? 'high');
+}
+
+function normalizeRuntimeReasoningEffort(
+  providerId: ProviderId,
+  effort: ReasoningEffort,
+): ReasoningEffort {
+  if (providerId !== 'deepseek') return 'off';
+  if (effort === 'off' || effort === 'max') return effort;
+  return 'high';
 }
 
 function normalizeModelList(models: string[], defaultModel: string): string[] {
