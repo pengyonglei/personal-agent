@@ -162,23 +162,55 @@
 
         <footer class="composer-wrap">
           <div class="composer" id="composer">
+            <div class="composer-header">
+              <div class="composer-context" title="当前项目根目录">
+                <span class="context-dot"></span>
+                <span id="composer-context">当前工作区</span>
+              </div>
+            </div>
             <textarea
               id="prompt-input"
               rows="1"
-              placeholder="给 personal-agent 发送消息…"
+              placeholder="给 personal-agent 发送消息…（Enter 发送，Shift+Enter 换行）"
               aria-label="消息"
             ></textarea>
             <div class="composer-bottom">
               <div class="composer-controls">
-                <button
-                  class="mode-button composer-mode-button"
+                <label class="permission-mode-control" title="设置当前任务的工具权限">
+                  <span>权限</span>
+                  <select id="permission-mode" aria-label="设置工具权限" disabled>
+                    <option value="allow" title="自动批准所有工具调用">allow · 完全访问</option>
+                    <option value="ask" title="仅检测到风险操作时请求审批" selected>
+                      ask · 替我审批
+                    </option>
+                    <option value="approval" title="所有工具调用都请求审批">
+                      Approval · 请求审批
+                    </option>
+                  </select>
+                </label>
+                <div
+                  class="composer-mode-switch"
                   id="plan-mode"
-                  aria-pressed="false"
-                  title="Plan 模式仅允许只读工具"
+                  role="radiogroup"
+                  aria-label="Agent 工作模式"
                 >
-                  <span class="mode-icon" aria-hidden="true">◇</span>
-                  Plan
-                </button>
+                  <label title="允许 Agent 使用工具执行任务">
+                    <input
+                      id="mode-execute"
+                      type="radio"
+                      name="agent-mode"
+                      value="execute"
+                      checked
+                    />
+                    <span>执行</span>
+                  </label>
+                  <label title="仅规划任务并限制为只读工具">
+                    <input id="mode-plan" type="radio" name="agent-mode" value="plan" />
+                    <span>计划</span>
+                  </label>
+                </div>
+              </div>
+              <div class="composer-actions">
                 <label class="runtime-select-control" title="切换当前模型">
                   <span>模型</span>
                   <select id="model-switcher" aria-label="切换当前模型" disabled>
@@ -197,13 +229,14 @@
                     <option value="max">Max</option>
                   </select>
                 </label>
-              </div>
-              <div class="composer-actions">
-                <div class="composer-context">
-                  <span class="context-dot"></span>
-                  <span id="composer-context">当前工作区</span>
-                </div>
-                <span class="shortcut-hint">Shift Enter 换行</span>
+                <span
+                  class="execution-timer hidden"
+                  id="execution-timer"
+                  role="timer"
+                  aria-label="本次任务执行时间"
+                >
+                  执行中 00:00.0
+                </span>
                 <button class="stop-button hidden" id="stop-button" title="停止生成">■</button>
                 <button class="send-button" id="send-button" aria-label="发送消息" disabled>
                   <span>↑</span>
@@ -350,30 +383,6 @@
           <button value="default" class="approve-button" id="create-project-submit">
             创建项目
           </button>
-        </div>
-      </form>
-    </dialog>
-
-    <dialog class="form-dialog" id="task-dialog">
-      <form method="dialog" id="task-form">
-        <div class="form-dialog-heading">
-          <span class="eyebrow">NEW TASK</span>
-          <h2>创建任务</h2>
-          <p>新任务会继承当前项目的根目录，并拥有独立、可恢复的 Agent 会话。</p>
-        </div>
-        <label class="form-field">
-          <span>任务名称</span>
-          <input
-            id="task-title-input"
-            name="title"
-            autocomplete="off"
-            placeholder="今天要完成什么？"
-            required
-          />
-        </label>
-        <div class="form-dialog-actions">
-          <button type="button" class="deny-button" id="cancel-task">取消</button>
-          <button value="default" class="approve-button" id="create-task-submit">创建任务</button>
         </div>
       </form>
     </dialog>

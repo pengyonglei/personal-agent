@@ -28,6 +28,7 @@ test('projects and tasks persist with independent workspace roots and sessions',
       sessionId: 'session-beta',
     });
     await manager.attachSession(alphaTask.id, 'session-alpha-updated');
+    await manager.renameTask(alphaTask.id, '实现登录与注册');
 
     const restored = new ProjectManager(storagePath);
     await restored.initialize();
@@ -35,6 +36,7 @@ test('projects and tasks persist with independent workspace roots and sessions',
     assert.equal(restored.listTasks(alpha.id).length, 1);
     assert.equal(restored.listTasks(beta.id).length, 1);
     assert.equal(restored.getTask(alphaTask.id)?.sessionId, 'session-alpha-updated');
+    assert.equal(restored.getTask(alphaTask.id)?.title, '实现登录与注册');
     assert.notEqual(
       restored.getProject(alpha.id)?.rootPath,
       restored.getProject(beta.id)?.rootPath,

@@ -481,10 +481,16 @@ program
       },
       requestPermission: async (toolName: string, params: Record<string, unknown>) => {
         const tool = toolRegistry.get(toolName);
-        if (tool && !tool.requiresPermission && !tool.isDangerous) return true;
         const decision = permissionManager.check(toolName, params);
         if (decision === 'allow') return true;
-        if (decision === 'deny') return false;
+        if (
+          decision === 'ask' &&
+          tool &&
+          !tool.requiresPermission &&
+          !tool.isDangerous
+        ) {
+          return true;
+        }
         return promptUserPermission(toolName, params);
       },
     });
@@ -722,7 +728,7 @@ interface TuiModeOptions {
   session: SessionManager;
   contextAssembler: ContextAssembler;
   permissionManager: {
-    addRule(r: { tool: string; action: 'allow' | 'deny' | 'ask'; scope: string }): void;
+    addRule(r: { tool: string; action: 'allow' | 'ask' | 'approval'; scope: string }): void;
     getRules(): Array<{ tool: string; action: string; scope: string }>;
   };
   autoApprove: boolean;
@@ -1036,7 +1042,7 @@ interface CommandContext {
     dispose(): Promise<void>;
   };
   permissionManager: {
-    addRule(r: { tool: string; action: 'allow' | 'deny' | 'ask'; scope: string }): void;
+    addRule(r: { tool: string; action: 'allow' | 'ask' | 'approval'; scope: string }): void;
     getRules(): Array<{ tool: string; action: string; scope: string }>;
   };
   session: SessionManager;
@@ -1072,7 +1078,7 @@ async function handleSlashCommand(
         '  /sessions          List saved sessions',
         '  /permissions       Show permission rules',
         '  /allow <tool>      Allow a tool (session)',
-        '  /deny <tool>       Deny a tool (session)',
+        '  /approval <tool>   Require approval for a tool (session)',
         '  /exit, /quit       Exit',
         '',
         'Keyboard shortcuts:',
@@ -1198,7 +1204,7 @@ Execute this plan in dependency order. Call update_plan_step before starting eac
     case 'permissions': {
       const out: string[] = ['Permission Rules:'];
       for (const rule of ctx.permissionManager.getRules()) {
-        const icon = rule.action === 'allow' ? '✓' : rule.action === 'deny' ? '✗' : '?';
+        const icon = rule.action === 'allow' ? '✓' : rule.action === 'approval' ? '!' : '?';
         out.push(`  ${icon} ${rule.tool}: ${rule.action} [${rule.scope}]`);
       }
       return { status: 'ok', output: out.join('\n') };
@@ -1211,12 +1217,16 @@ Execute this plan in dependency order. Call update_plan_step before starting eac
       }
       return { status: 'ok', output: 'Usage: /allow <tool>' };
 
-    case 'deny':
+    case 'approval':
       if (args[0]) {
-        ctx.permissionManager.addRule({ tool: args[0], action: 'deny', scope: 'session' });
-        return { status: 'ok', output: `Denied: ${args[0]}` };
+        ctx.permissionManager.addRule({
+          tool: args[0],
+          action: 'approval',
+          scope: 'session',
+        });
+        return { status: 'ok', output: `Approval required: ${args[0]}` };
       }
-      return { status: 'ok', output: 'Usage: /deny <tool>' };
+      return { status: 'ok', output: 'Usage: /approval <tool>' };
 
     default:
       return {

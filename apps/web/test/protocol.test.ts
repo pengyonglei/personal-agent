@@ -29,6 +29,19 @@ test('parseClientMessage validates permission responses', () => {
   );
 });
 
+test('parseClientMessage validates permission modes', () => {
+  for (const mode of ['allow', 'ask', 'approval']) {
+    assert.deepEqual(parseClientMessage(JSON.stringify({ type: 'set_permission_mode', mode })), {
+      type: 'set_permission_mode',
+      mode,
+    });
+  }
+  assert.throws(
+    () => parseClientMessage('{"type":"set_permission_mode","mode":"deny"}'),
+    /mode 无效/,
+  );
+});
+
 test('parseClientMessage validates project and task commands', () => {
   assert.deepEqual(
     parseClientMessage(
@@ -41,10 +54,17 @@ test('parseClientMessage validates project and task commands', () => {
     },
   );
   assert.deepEqual(
-    parseClientMessage('{"type":"create_task","projectId":" project-1 ","title":" 修复构建 "}'),
+    parseClientMessage('{"type":"create_task","projectId":" project-1 "}'),
     {
       type: 'create_task',
       projectId: 'project-1',
+    },
+  );
+  assert.deepEqual(
+    parseClientMessage('{"type":"rename_task","taskId":" task-1 ","title":" 修复构建 "}'),
+    {
+      type: 'rename_task',
+      taskId: 'task-1',
       title: '修复构建',
     },
   );

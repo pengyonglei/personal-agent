@@ -161,6 +161,16 @@ export class ProjectManager {
     return cloneTask(task);
   }
 
+  async renameTask(taskId: string, title: string): Promise<ProjectTask> {
+    const task = this.requireTask(taskId);
+    task.title = validateText(title, '任务标题', 200);
+    task.updatedAt = new Date();
+    const project = this.projects.get(task.projectId);
+    if (project) project.updatedAt = task.updatedAt;
+    await this.persist();
+    return cloneTask(task);
+  }
+
   async touchTask(taskId: string): Promise<void> {
     const task = this.requireTask(taskId);
     task.updatedAt = new Date();

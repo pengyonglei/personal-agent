@@ -26,7 +26,7 @@ const sandboxSchema = z.object({
 const permissionRuleSchema = z.object({
   tool: z.string(),
   pattern: z.string().optional(),
-  action: z.enum(['allow', 'deny', 'ask']),
+  action: z.enum(['allow', 'ask', 'approval']),
   scope: z.enum(['session', 'project', 'global']),
 });
 

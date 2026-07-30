@@ -6,6 +6,8 @@ import type {
   UsageInfo,
 } from '@personal-agent/shared';
 
+export type PermissionMode = 'allow' | 'ask' | 'approval';
+
 export type ClientMessage =
   | { type: 'prompt'; text: string }
   | { type: 'interrupt' }
@@ -21,9 +23,11 @@ export type ClientMessage =
   | { type: 'list_projects' }
   | { type: 'create_project'; name: string; rootPath: string }
   | { type: 'select_project'; projectId: string }
-  | { type: 'create_task'; projectId: string; title: string }
+  | { type: 'create_task'; projectId: string }
+  | { type: 'rename_task'; taskId: string; title: string }
   | { type: 'open_task'; taskId: string }
   | { type: 'archive_task'; taskId: string }
+  | { type: 'set_permission_mode'; mode: PermissionMode }
   | { type: 'set_plan_mode'; enabled: boolean }
   | { type: 'approve_plan' }
   | { type: 'ping' };
@@ -96,6 +100,7 @@ export type ServerMessage =
     }
   | { type: 'project_changed'; project: ProjectSummary }
   | { type: 'task_changed'; task: TaskSummary }
+  | { type: 'task_renamed'; task: TaskSummary }
   | { type: 'history'; sessionId: string; messages: UnifiedMessage[] }
   | { type: 'session_list'; sessions: SessionSummary[] }
   | { type: 'session_changed'; sessionId: string; isNew: boolean }
@@ -119,6 +124,7 @@ export type ServerMessage =
   | { type: 'turn_end'; turnNumber: number; usage: UsageInfo | null }
   | { type: 'done'; totalTurns: number; totalUsage: UsageInfo }
   | { type: 'interrupted' }
+  | { type: 'permission_mode'; mode: PermissionMode }
   | { type: 'plan'; active: boolean; plan: Plan | null; progress: PlanProgress }
   | { type: 'notice'; message: string }
   | { type: 'error'; message: string; code?: string }
@@ -181,17 +187,25 @@ export function parseClientMessage(raw: string): ClientMessage {
       }
       return { type: 'select_project', projectId: message.projectId.trim() };
     case 'create_task':
-      if (
-        typeof message.projectId !== 'string' ||
-        !message.projectId.trim() ||
-        typeof message.title !== 'string' ||
-        !message.title.trim()
-      ) {
-        throw new Error('create_task 需要 projectId 和 title');
+      if (typeof message.projectId !== 'string' || !message.projectId.trim()) {
+        throw new Error('create_task.projectId 不能为空');
       }
       return {
         type: 'create_task',
         projectId: message.projectId.trim(),
+      };
+    case 'rename_task':
+      if (
+        typeof message.taskId !== 'string' ||
+        !message.taskId.trim() ||
+        typeof message.title !== 'string' ||
+        !message.title.trim()
+      ) {
+        throw new Error('rename_task 需要 taskId 和 title');
+      }
+      return {
+        type: 'rename_task',
+        taskId: message.taskId.trim(),
         title: message.title.trim(),
       };
     case 'open_task':
@@ -205,6 +219,11 @@ export function parseClientMessage(raw: string): ClientMessage {
         throw new Error('set_plan_mode.enabled 必须是布尔值');
       }
       return { type: 'set_plan_mode', enabled: message.enabled };
+    case 'set_permission_mode':
+      if (message.mode !== 'allow' && message.mode !== 'ask' && message.mode !== 'approval') {
+        throw new Error('set_permission_mode.mode 无效');
+      }
+      return { type: 'set_permission_mode', mode: message.mode };
     case 'interrupt':
     case 'list_sessions':
     case 'list_projects':

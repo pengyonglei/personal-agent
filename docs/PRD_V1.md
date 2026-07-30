@@ -34,9 +34,9 @@
 | **多模型支持**    | 统一接口适配 Anthropic (Claude)、OpenAI (GPT)、Ollama (本地模型)            | P0     | ✅ 已完成 |
 | **Agent Loop**    | 完整的 输入→上下文组装→LLM调用→工具执行→结果→循环 引擎                      | P0     | ✅ 已完成 |
 | **工具系统**      | 内置文件读写/编辑、Shell 执行、Glob/Grep 搜索、Web 抓取/搜索、任务管理      | P0     | ✅ 已完成 |
-| **权限/沙箱**     | 工具调用前的权限检查（allow/deny/ask），文件路径和命令的沙箱限制            | P1     | ✅ 已完成 |
+| **权限/沙箱**     | 工具调用前的权限检查（allow/ask/approval），文件路径和命令的沙箱限制        | P1     | ✅ 已完成 |
 | **流式输出**      | 文本和工具调用参数均流式传输                                                | P0     | ✅ 已完成 |
-| **Slash 命令**    | /help, /clear, /model, /permissions, /allow, /deny 等                       | P1     | ✅ 已完成 |
+| **Slash 命令**    | /help, /clear, /model, /permissions, /allow, /approval 等                   | P1     | ✅ 已完成 |
 | **TUI 界面**      | 基于 Ink/React 的终端 UI，支持流式输出、内联工具状态、Diff 预览、键盘快捷键 | P1     | ✅ 已完成 |
 | **子代理系统**    | 主代理委派任务给子代理，独立上下文，受限工具集，结果汇总                    | P2     | ✅ 已完成 |
 | **持久化记忆**    | 基于文件系统或 SQLite 的记忆存储，关键词+语义搜索，自动注入上下文           | P2     | ✅ 已完成 |
@@ -259,9 +259,9 @@ shared ← config ← provider ← core ← tui ← cli
 - [x] 流式输出文本增量
 - [x] 流式处理工具调用（增量参数 + 完成后解析）
 - [x] 工具执行前后有参数验证和输出截断
-- [x] 权限系统：allow/deny/ask 三级，CLI 交互审批
+- [x] 权限系统：allow/ask/approval 三级，CLI 交互审批
 - [x] 沙箱约束：路径限制、危险命令拦截
-- [x] Slash 命令：/help、/clear、/permissions、/allow、/deny
+- [x] Slash 命令：/help、/clear、/permissions、/allow、/approval
 - [x] TUI 组件树：StatusBar + InputBox + MessageList 完整渲染
 - [x] 流式文本输出实时显示
 - [x] 工具调用状态卡片（运行中/成功/失败）

@@ -5,7 +5,14 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { ProjectManager, SessionManager } from '@personal-agent/core';
 import { WebSocket } from 'ws';
-import { createWebServer } from '../src/server';
+import { createWebServer, deriveTaskTitle } from '../src/server';
+
+test('task titles use the normalized first intent and respect the storage limit', () => {
+  assert.equal(deriveTaskTitle('  修复构建\n并补充测试  '), '修复构建 并补充测试');
+  const title = deriveTaskTitle('任务'.repeat(150));
+  assert.equal(Array.from(title).length, 200);
+  assert.equal(title.endsWith('…'), true);
+});
 
 test('web server exposes health and websocket readiness without a configured provider', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'personal-agent-web-'));
@@ -60,6 +67,36 @@ test('web server exposes health and websocket readiness without a configured pro
     assert.equal((ready.runtime as { configured: boolean }).configured, false);
     assert.equal(typeof ready.activeProjectId, 'string');
     assert.equal(typeof ready.activeTaskId, 'string');
+
+    const renamedTask = await new Promise<Record<string, unknown>>((resolve, reject) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${instance.port}/ws`);
+      let createdTaskId: string | undefined;
+      ws.once('error', reject);
+      ws.on('message', (data) => {
+        const message = JSON.parse(data.toString()) as Record<string, unknown>;
+        if (message.type === 'ready') {
+          ws.send(
+            JSON.stringify({
+              type: 'create_task',
+              projectId: message.activeProjectId,
+            }),
+          );
+        } else if (message.type === 'task_changed' && !createdTaskId) {
+          createdTaskId = (message.task as { id: string }).id;
+          ws.send(
+            JSON.stringify({
+              type: 'rename_task',
+              taskId: createdTaskId,
+              title: '重命名后的任务',
+            }),
+          );
+        } else if (message.type === 'task_renamed') {
+          ws.close();
+          resolve(message.task as Record<string, unknown>);
+        }
+      });
+    });
+    assert.equal(renamedTask.title, '重命名后的任务');
 
     const secondRoot = join(directory, 'second-workspace');
     await mkdir(secondRoot);

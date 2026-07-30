@@ -98,7 +98,7 @@ apps/
   → [工具调用] → ToolExecutor.execute()
        → validateParams()   参数校验
        → Sandbox 沙箱检查   路径/命令安全
-       → PermissionManager  权限判定 (allow/deny/ask)
+       → PermissionManager  权限判定 (allow/ask/approval)
        → Tool.execute()     执行工具
        → PostProcess        输出截断
   → 工具结果注入上下文 → 继续循环
@@ -213,7 +213,7 @@ pnpm web
   /clear         Clear conversation history
   /permissions   Show permission rules
   /allow <tool>  Allow a tool
-  /deny <tool>   Deny a tool
+  /approval <tool>   Require approval for a tool
   /exit          Exit
 ```
 

@@ -31,7 +31,12 @@ import {
   type ToolExecutor,
   type ToolRegistry,
 } from '@personal-agent/tool';
-import type { RuntimeInfo, ServerMessage, SessionSummary } from './protocol';
+import type {
+  PermissionMode,
+  RuntimeInfo,
+  ServerMessage,
+  SessionSummary,
+} from './protocol';
 
 const log = createLogger('web-runtime');
 const SAFE_TOOLS = ['read_file', 'list_directory', 'glob', 'grep', 'todo_write', 'ask_user'];
@@ -549,14 +554,29 @@ export class WebAgentRuntime {
     toolName: string,
     params: Record<string, unknown>,
   ): Promise<boolean> {
+    const mode = conversation.getPermissionMode();
+    if (mode === 'allow') return true;
+
     const remembered = conversation.getRememberedPermission(toolName);
     if (remembered !== undefined) return remembered;
 
     const tool = this.toolRegistry.get(toolName);
-    if (tool && !tool.requiresPermission && !tool.isDangerous) return true;
+    if (mode === 'approval') {
+      const answer = await conversation.askPermission(toolName, params);
+      if (answer.remember) conversation.rememberPermission(toolName, answer.approved);
+      return answer.approved;
+    }
+
     const configured = this.permissionManager.check(toolName, params);
     if (configured === 'allow') return true;
-    if (configured === 'deny') return false;
+    if (
+      configured === 'ask' &&
+      tool &&
+      !tool.requiresPermission &&
+      !tool.isDangerous
+    ) {
+      return true;
+    }
 
     const answer = await conversation.askPermission(toolName, params);
     if (answer.remember) conversation.rememberPermission(toolName, answer.approved);
@@ -802,6 +822,7 @@ export class WebConversation {
   private busy = false;
   private closed = false;
   private rememberedPermissions = new Map<string, boolean>();
+  private permissionMode: PermissionMode = 'ask';
 
   constructor(
     private runtime: WebAgentRuntime,
@@ -1014,6 +1035,21 @@ Execute in dependency order and use update_plan_step to report progress.`,
     return this.rememberedPermissions.get(toolName);
   }
 
+  setPermissionMode(mode: PermissionMode): void {
+    this.assertIdle();
+    this.permissionMode = mode;
+    this.rememberedPermissions.clear();
+    this.publishPermissionMode();
+  }
+
+  getPermissionMode(): PermissionMode {
+    return this.permissionMode;
+  }
+
+  publishPermissionMode(): void {
+    this.emit({ type: 'permission_mode', mode: this.permissionMode });
+  }
+
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
@@ -1024,6 +1060,7 @@ Execute in dependency order and use update_plan_step to report progress.`,
   }
 
   private createState(): void {
+    this.permissionMode = 'ask';
     this.session = new SessionManager(
       this.workingDirectory,
       this.provider.getModel(),

@@ -6,6 +6,7 @@ const elements = {
   input: document.querySelector('#prompt-input'),
   send: document.querySelector('#send-button'),
   stop: document.querySelector('#stop-button'),
+  executionTimer: document.querySelector('#execution-timer'),
   composer: document.querySelector('#composer'),
   connectionPill: document.querySelector('#connection-pill'),
   connectionLabel: document.querySelector('#connection-label'),
@@ -25,6 +26,7 @@ const elements = {
   openProviderSettings: document.querySelector('#open-provider-settings'),
   configureProviderBanner: document.querySelector('#configure-provider-banner'),
   projectSelect: document.querySelector('#project-select'),
+  newTask: document.querySelector('#new-task'),
   taskList: document.querySelector('#task-list'),
   sessionId: document.querySelector('#session-id'),
   projectDetail: document.querySelector('#project-detail'),
@@ -37,6 +39,9 @@ const elements = {
   mcpStatus: document.querySelector('#mcp-status'),
   pluginStatus: document.querySelector('#plugin-status'),
   planMode: document.querySelector('#plan-mode'),
+  modeExecute: document.querySelector('#mode-execute'),
+  modePlan: document.querySelector('#mode-plan'),
+  permissionMode: document.querySelector('#permission-mode'),
   planBadge: document.querySelector('#plan-badge'),
   planEmpty: document.querySelector('#plan-empty'),
   planDetail: document.querySelector('#plan-detail'),
@@ -56,9 +61,6 @@ const elements = {
   projectNameInput: document.querySelector('#project-name-input'),
   projectRootInput: document.querySelector('#project-root-input'),
   createProjectSubmit: document.querySelector('#create-project-submit'),
-  taskDialog: document.querySelector('#task-dialog'),
-  taskForm: document.querySelector('#task-form'),
-  taskTitleInput: document.querySelector('#task-title-input'),
   providerDialog: document.querySelector('#provider-dialog'),
   providerForm: document.querySelector('#provider-form'),
   providerSelect: document.querySelector('#provider-select'),
@@ -75,7 +77,6 @@ const elements = {
   providerFormError: document.querySelector('#provider-form-error'),
   saveProvider: document.querySelector('#save-provider'),
   scrollBottom: document.querySelector('#scroll-bottom'),
-  createTaskSubmit: document.querySelector('#create-task-submit'),
   toastRegion: document.querySelector('#toast-region'),
 };
 
@@ -101,10 +102,14 @@ const state = {
   tools: new Map(),
   pendingPermission: null,
   planActive: false,
+  permissionMode: 'ask',
   followOutput: true,
   autoScrolling: false,
   lastTranscriptScrollTop: 0,
   scrollEndTimer: null,
+  executionStartedAt: null,
+  executionInterval: null,
+  executionHideTimer: null,
 };
 
 function connect() {
@@ -140,6 +145,7 @@ function connect() {
   socket.addEventListener('close', () => {
     state.connected = false;
     state.busy = false;
+    stopExecutionTimer(false);
     setConnection('offline');
     updateComposer();
     if (state.pendingPermission && elements.permissionDialog.open) {
@@ -220,10 +226,15 @@ function handleServerMessage(message) {
       renderTasks();
       updateWorkspaceMetadata();
       if (state.creatingTask) {
-        elements.taskDialog.close();
         setCreationState('task', false);
         closeSidebar();
+        requestAnimationFrame(() => elements.input.focus());
       }
+      break;
+    case 'task_renamed':
+      upsertById(state.tasks, message.task);
+      renderTasks();
+      updateWorkspaceMetadata();
       break;
     case 'session_list':
       break;
@@ -233,7 +244,12 @@ function handleServerMessage(message) {
       break;
     case 'busy':
       state.busy = message.busy;
-      if (!message.busy) finishStreamingMessages();
+      if (message.busy) {
+        startExecutionTimer();
+      } else {
+        finishStreamingMessages();
+        stopExecutionTimer(true);
+      }
       updateComposer();
       break;
     case 'turn_start':
@@ -252,6 +268,10 @@ function handleServerMessage(message) {
       break;
     case 'permission_request':
       showPermission(message);
+      break;
+    case 'permission_mode':
+      state.permissionMode = message.mode;
+      elements.permissionMode.value = message.mode;
       break;
     case 'turn_end':
       finishAssistantTurn(message.turnNumber);
@@ -273,6 +293,7 @@ function handleServerMessage(message) {
       showToast(message.message, true);
       if (state.creatingProject) setCreationState('project', false);
       if (state.creatingTask) setCreationState('task', false);
+      if (message.code === 'REQUEST_FAILED') renderTasks();
       if (message.code === 'AGENT_ERROR') appendSystemMessage(message.message, true);
       break;
   }
@@ -554,6 +575,10 @@ function renderTasks() {
     return;
   }
   for (const task of state.tasks) {
+    const row = document.createElement('div');
+    row.className = 'task-item';
+    row.classList.toggle('active', task.id === state.activeTaskId);
+
     const button = document.createElement('button');
     button.className = 'session-item';
     button.dataset.taskId = task.id;
@@ -568,8 +593,60 @@ function renderTasks() {
       send({ type: 'open_task', taskId: task.id });
       closeSidebar();
     });
-    elements.taskList.append(button);
+
+    const rename = document.createElement('button');
+    rename.className = 'task-rename-button';
+    rename.type = 'button';
+    rename.title = `重命名“${task.title}”`;
+    rename.setAttribute('aria-label', `重命名任务 ${task.title}`);
+    rename.textContent = '✎';
+    rename.disabled = state.busy;
+    rename.addEventListener('click', () => beginTaskRename(task, row));
+
+    row.append(button, rename);
+    elements.taskList.append(row);
   }
+}
+
+function beginTaskRename(task, row) {
+  if (state.busy) return;
+  const form = document.createElement('form');
+  form.className = 'task-rename-form';
+  const input = document.createElement('input');
+  input.value = task.title;
+  input.maxLength = 200;
+  input.setAttribute('aria-label', '新的任务名称');
+  const save = document.createElement('button');
+  save.type = 'submit';
+  save.title = '保存任务名称';
+  save.setAttribute('aria-label', '保存任务名称');
+  save.textContent = '✓';
+  form.append(input, save);
+  row.replaceChildren(form);
+
+  const cancel = () => renderTasks();
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    const title = input.value.trim();
+    if (!title) {
+      input.setCustomValidity('任务名称不能为空');
+      input.reportValidity();
+      return;
+    }
+    input.disabled = true;
+    save.disabled = true;
+    send({ type: 'rename_task', taskId: task.id, title });
+  });
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      cancel();
+    }
+  });
+  requestAnimationFrame(() => {
+    input.focus();
+    input.select();
+  });
 }
 
 function updateWorkspaceMetadata() {
@@ -639,6 +716,7 @@ function appendMessage(role, text, options = {}) {
   avatar.className = 'message-avatar';
   avatar.textContent = role === 'user' ? 'YOU' : role === 'system' ? '!' : 'PA';
   const body = document.createElement('div');
+  body.className = 'message-body';
   const head = document.createElement('div');
   head.className = 'message-head';
   const label = document.createElement('strong');
@@ -764,7 +842,8 @@ function answerPermission(approved) {
 function renderPlan(message) {
   state.planActive = message.active;
   elements.planMode.classList.toggle('active', message.active);
-  elements.planMode.setAttribute('aria-pressed', String(message.active));
+  elements.modeExecute.checked = !message.active;
+  elements.modePlan.checked = message.active;
   elements.planBadge.textContent = message.active
     ? '规划中'
     : message.plan
@@ -838,9 +917,11 @@ function updateComposer() {
       ? '配置 Provider 后即可开始对话'
       : state.busy
         ? 'Agent 正在处理…'
-        : '给 personal-agent 发送消息…';
+        : '给 personal-agent 发送消息…（Enter 发送，Shift+Enter 换行）';
   elements.send.disabled = !enabled || state.busy || elements.input.value.trim().length === 0;
-  elements.planMode.disabled = !enabled || state.busy;
+  elements.modeExecute.disabled = !enabled || state.busy;
+  elements.modePlan.disabled = !enabled || state.busy;
+  elements.permissionMode.disabled = !enabled || state.busy;
   elements.stop.classList.toggle('hidden', !state.busy);
   updateRuntimeSelectorState();
 }
@@ -858,6 +939,64 @@ function setConnection(status) {
   } else {
     elements.connectionLabel.textContent = '连接中';
   }
+}
+
+function startExecutionTimer() {
+  clearTimeout(state.executionHideTimer);
+  state.executionHideTimer = null;
+  if (state.executionStartedAt === null) {
+    state.executionStartedAt = Date.now();
+  }
+  clearInterval(state.executionInterval);
+  elements.executionTimer.classList.remove('hidden', 'completed');
+  updateExecutionTimer();
+  state.executionInterval = setInterval(updateExecutionTimer, 100);
+}
+
+function updateExecutionTimer() {
+  if (state.executionStartedAt === null) return;
+  elements.executionTimer.textContent =
+    `执行中 ${formatExecutionDuration(Date.now() - state.executionStartedAt)}`;
+}
+
+function stopExecutionTimer(showCompleted) {
+  clearInterval(state.executionInterval);
+  state.executionInterval = null;
+  if (state.executionStartedAt === null) {
+    if (!showCompleted) elements.executionTimer.classList.add('hidden');
+    return;
+  }
+
+  const elapsed = Date.now() - state.executionStartedAt;
+  state.executionStartedAt = null;
+  if (!showCompleted) {
+    elements.executionTimer.classList.add('hidden');
+    return;
+  }
+
+  elements.executionTimer.textContent = `本次 ${formatExecutionDuration(elapsed)}`;
+  elements.executionTimer.classList.add('completed');
+  elements.executionTimer.classList.remove('hidden');
+  clearTimeout(state.executionHideTimer);
+  state.executionHideTimer = setTimeout(() => {
+    elements.executionTimer.classList.add('hidden');
+    elements.executionTimer.classList.remove('completed');
+    state.executionHideTimer = null;
+  }, 5000);
+}
+
+function formatExecutionDuration(milliseconds) {
+  const totalTenths = Math.max(0, Math.floor(milliseconds / 100));
+  const tenths = totalTenths % 10;
+  const totalSeconds = Math.floor(totalTenths / 10);
+  const seconds = totalSeconds % 60;
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  const minutes = totalMinutes % 60;
+  const hours = Math.floor(totalMinutes / 60);
+  const clock = hours
+    ? `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+    : `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  return `${clock}.${tenths}`;
 }
 
 function relativeTime(value) {
@@ -994,7 +1133,7 @@ document.querySelector('#new-project').addEventListener('click', () => {
   elements.projectDialog.showModal();
   requestAnimationFrame(() => elements.projectNameInput.focus());
 });
-document.querySelector('#new-task').addEventListener('click', openTaskDialog);
+elements.newTask.addEventListener('click', createNewTask);
 document.querySelector('#refresh-projects').addEventListener('click', () => {
   send({ type: 'list_projects' });
 });
@@ -1010,27 +1149,24 @@ elements.projectForm.addEventListener('submit', (event) => {
   setCreationState('project', true);
   send({ type: 'create_project', name, rootPath });
 });
-elements.taskForm.addEventListener('submit', (event) => {
-  event.preventDefault();
-  const title = elements.taskTitleInput.value.trim();
-  if (!title || !state.activeProjectId) return;
-  setCreationState('task', true);
-  send({ type: 'create_task', projectId: state.activeProjectId, title });
-});
 document.querySelector('#cancel-project').addEventListener('click', () => {
   setCreationState('project', false);
   elements.projectDialog.close();
 });
-document.querySelector('#cancel-task').addEventListener('click', () => {
-  setCreationState('task', false);
-  elements.taskDialog.close();
-});
 elements.projectDialog.addEventListener('cancel', () => setCreationState('project', false));
-elements.taskDialog.addEventListener('cancel', () => setCreationState('task', false));
-elements.planMode.addEventListener('click', () => {
-  if (!state.busy && state.configured) {
-    send({ type: 'set_plan_mode', enabled: !state.planActive });
+elements.modeExecute.addEventListener('change', () => {
+  if (elements.modeExecute.checked && !state.busy && state.configured) {
+    send({ type: 'set_plan_mode', enabled: false });
   }
+});
+elements.modePlan.addEventListener('change', () => {
+  if (elements.modePlan.checked && !state.busy && state.configured) {
+    send({ type: 'set_plan_mode', enabled: true });
+  }
+});
+elements.permissionMode.addEventListener('change', () => {
+  state.permissionMode = elements.permissionMode.value;
+  send({ type: 'set_permission_mode', mode: state.permissionMode });
 });
 elements.approvePlan.addEventListener('click', () => send({ type: 'approve_plan' }));
 document.querySelector('#approve-permission').addEventListener('click', (event) => {
@@ -1065,7 +1201,7 @@ document.querySelector('#sidebar-scrim').addEventListener('click', closeSidebar)
 document.addEventListener('keydown', (event) => {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
     event.preventDefault();
-    openTaskDialog();
+    createNewTask();
   } else if (event.key === 'Escape' && elements.inspector.classList.contains('open')) {
     setInspectorOpen(false);
   }
@@ -1082,24 +1218,26 @@ function setInspectorOpen(open) {
   document.querySelector('#toggle-inspector').classList.toggle('active', open);
 }
 
-function openTaskDialog() {
-  if (state.busy) return;
+function createNewTask() {
+  if (state.busy || state.creatingTask) return;
   if (!state.activeProjectId) {
     showToast('请先创建一个项目', true);
     return;
   }
-  elements.taskForm.reset();
-  elements.taskDialog.showModal();
-  requestAnimationFrame(() => elements.taskTitleInput.focus());
+  setCreationState('task', true);
+  send({ type: 'create_task', projectId: state.activeProjectId });
 }
 
 function setCreationState(kind, creating) {
   const project = kind === 'project';
   if (project) state.creatingProject = creating;
   else state.creatingTask = creating;
-  const button = project ? elements.createProjectSubmit : elements.createTaskSubmit;
+  const button = project ? elements.createProjectSubmit : elements.newTask;
   button.disabled = creating;
-  button.textContent = creating ? '正在创建…' : project ? '创建项目' : '创建任务';
+  button.toggleAttribute('aria-busy', creating);
+  if (project) {
+    button.textContent = creating ? '正在创建…' : '创建项目';
+  }
 }
 
 setTheme(document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light');

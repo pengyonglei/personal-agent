@@ -186,7 +186,7 @@ export class ToolRegistry {
 export interface PermissionRule {
   tool: string;
   pattern?: string; // match against params (e.g., file path pattern)
-  action: 'allow' | 'deny' | 'ask';
+  action: 'allow' | 'ask' | 'approval';
   scope: 'session' | 'project' | 'global';
 }
 
@@ -201,7 +201,7 @@ export class PermissionManager {
     this.rules = this.rules.filter((r) => !(r.tool === tool && r.scope === scope));
   }
 
-  check(toolName: string, params?: Record<string, unknown>): 'allow' | 'deny' | 'ask' {
+  check(toolName: string, params?: Record<string, unknown>): 'allow' | 'ask' | 'approval' {
     // Check specific rules first, then wildcard
     for (const rule of this.rules) {
       const toolMatches =
@@ -215,7 +215,7 @@ export class PermissionManager {
         return rule.action;
       }
     }
-    // Default: ask for dangerous, allow for safe
+    // Default "ask" mode: only tools marked as risky require approval.
     return 'ask';
   }
 
@@ -336,7 +336,7 @@ export class ToolExecutor {
    * 1. Lookup tool
    * 2. Validate params
    * 3. Check sandbox
-   * 4. Check permissions (allow/deny/ask)
+   * 4. Check permissions (allow/ask/approval)
    * 5. Execute with timeout
    * 6. Post-process (truncate, redact)
    */
@@ -400,16 +400,12 @@ export class ToolExecutor {
     }
 
     // 4. Permission check
-    if (tool.requiresPermission && !permissionGranted) {
+    if (!permissionGranted) {
       const decision = this.permissionManager.check(name, params);
-      if (decision === 'deny') {
-        return {
-          success: false,
-          content: '',
-          error: `Permission denied for tool '${name}'`,
-        };
-      }
-      if (decision === 'ask') {
+      const needsPermission =
+        decision === 'approval' ||
+        (decision === 'ask' && (tool.requiresPermission || tool.isDangerous));
+      if (needsPermission) {
         return {
           success: false,
           content: '',

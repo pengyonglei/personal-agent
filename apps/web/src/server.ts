@@ -20,6 +20,7 @@ import {
 } from './protocol';
 
 const VERSION = '0.1.0';
+const UNTITLED_TASK_TITLE = '新任务';
 const sourceDirectory = dirname(fileURLToPath(import.meta.url));
 const publicDirectory = resolve(sourceDirectory, '..', 'public');
 const require = createRequire(import.meta.url);
@@ -221,7 +222,7 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
       if (!task) {
         task = await runtime.projects.createTask({
           projectId: project.id,
-          title: '新任务',
+          title: UNTITLED_TASK_TITLE,
         });
       }
       await activateTask(task.id, false);
@@ -288,7 +289,7 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
         });
         const task = await runtime.projects.createTask({
           projectId: project.id,
-          title: '新任务',
+          title: UNTITLED_TASK_TITLE,
         });
         await activateTask(task.id);
         sendProjectState();
@@ -301,7 +302,7 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
         if (!task) {
           task = await runtime.projects.createTask({
             projectId: project.id,
-            title: '新任务',
+            title: UNTITLED_TASK_TITLE,
           });
         }
         await activateTask(task.id);
@@ -311,9 +312,15 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
       if (message.type === 'create_task') {
         const task = await runtime.projects.createTask({
           projectId: message.projectId,
-          title: message.title,
+          title: UNTITLED_TASK_TITLE,
         });
         await activateTask(task.id);
+        sendProjectState();
+        return;
+      }
+      if (message.type === 'rename_task') {
+        const task = await runtime.projects.renameTask(message.taskId, message.title);
+        send({ type: 'task_renamed', task: serializeTask(task) });
         sendProjectState();
         return;
       }
@@ -329,7 +336,7 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
           if (!next) {
             next = await runtime.projects.createTask({
               projectId: archived.projectId,
-              title: '新任务',
+              title: UNTITLED_TASK_TITLE,
             });
           }
           await activateTask(next.id);
@@ -343,6 +350,16 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
 
       switch (message.type) {
         case 'prompt':
+          if (activeTaskId) {
+            const task = runtime.projects.getTask(activeTaskId);
+            if (task?.title === UNTITLED_TASK_TITLE) {
+              const renamed = await runtime.projects.renameTask(
+                activeTaskId,
+                deriveTaskTitle(message.text),
+              );
+              send({ type: 'task_renamed', task: serializeTask(renamed) });
+            }
+          }
           await conversation.runPrompt(message.text);
           if (activeTaskId) await runtime.projects.touchTask(activeTaskId);
           sendProjectState();
@@ -356,7 +373,7 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
           {
             const task = await runtime.projects.createTask({
               projectId: activeProjectId,
-              title: '新任务',
+              title: UNTITLED_TASK_TITLE,
             });
             await activateTask(task.id);
             sendProjectState();
@@ -378,6 +395,9 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
               ? 'Plan 模式已开启：当前仅允许只读工具。'
               : 'Plan 模式已关闭：计划（如有）已批准，可开始执行。',
           });
+          break;
+        case 'set_permission_mode':
+          conversation.setPermissionMode(message.mode);
           break;
         case 'approve_plan':
           conversation.setPlanMode(false);
@@ -430,6 +450,10 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
       } else {
         send({ type: 'history', sessionId: task.sessionId ?? '', messages: [] });
       }
+      send({
+        type: 'permission_mode',
+        mode: conversation?.getPermissionMode() ?? 'ask',
+      });
 
       if (announce) {
         send({ type: 'project_changed', project: serializeProject(project) });
@@ -611,6 +635,13 @@ function serializeTask(task: {
     createdAt: task.createdAt.toISOString(),
     updatedAt: task.updatedAt.toISOString(),
   };
+}
+
+export function deriveTaskTitle(intent: string): string {
+  const normalized = intent.replace(/\s+/g, ' ').trim();
+  const characters = Array.from(normalized);
+  if (characters.length <= 200) return normalized;
+  return `${characters.slice(0, 199).join('')}…`;
 }
 
 function isAuthorized(

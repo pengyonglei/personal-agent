@@ -43,6 +43,63 @@ test('permission rules support qualified prefix wildcards', () => {
   assert.equal(permissions.check('mcp__other__search'), 'ask');
 });
 
+test('allow mode executes permission-gated tools without prompting', async () => {
+  let calls = 0;
+  const tool = new (class extends BaseTool {
+    readonly name = 'write_anywhere';
+    readonly description = 'A permission-gated action';
+    readonly category = 'utility';
+    readonly requiresPermission = true;
+    readonly inputSchema = { type: 'object', properties: {} };
+    async execute() {
+      calls++;
+      return { success: true, content: 'done' };
+    }
+  })();
+  const registry = new ToolRegistry();
+  registry.register(tool);
+  const permissions = new PermissionManager();
+  permissions.addRule({ tool: '*', action: 'allow', scope: 'session' });
+  const executor = new ToolExecutor(registry, permissions, new Sandbox());
+
+  const result = await executor.execute(tool.name, {}, {
+    sessionId: 'test',
+    workingDirectory: process.cwd(),
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(calls, 1);
+});
+
+test('approval mode prompts even for tools considered safe', async () => {
+  let calls = 0;
+  const tool = new (class extends BaseTool {
+    readonly name = 'read_status';
+    readonly description = 'A safe read-only action';
+    readonly category = 'utility';
+    readonly requiresPermission = false;
+    readonly inputSchema = { type: 'object', properties: {} };
+    async execute() {
+      calls++;
+      return { success: true, content: 'done' };
+    }
+  })();
+  const registry = new ToolRegistry();
+  registry.register(tool);
+  const permissions = new PermissionManager();
+  permissions.addRule({ tool: '*', action: 'approval', scope: 'session' });
+  const executor = new ToolExecutor(registry, permissions, new Sandbox());
+  const context = { sessionId: 'test', workingDirectory: process.cwd() };
+
+  const pending = await executor.execute(tool.name, {}, context);
+  assert.match(pending.error ?? '', /NEEDS_PERMISSION/);
+  assert.equal(calls, 0);
+
+  const approved = await executor.executeWithPermission(tool.name, {}, context, true);
+  assert.equal(approved.success, true);
+  assert.equal(calls, 1);
+});
+
 test('restricted sandbox permits the workspace but rejects sibling prefixes', () => {
   const workspace = process.platform === 'win32' ? 'C:\\work\\repo' : '/work/repo';
   const sibling =

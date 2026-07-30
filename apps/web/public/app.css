@@ -24,6 +24,8 @@
   --control-surface: rgba(21, 25, 22, 0.72);
   --card-surface: rgba(19, 23, 20, 0.7);
   --message-text: #dce3de;
+  --user-message-surface: rgba(201, 242, 119, 0.1);
+  --user-message-border: rgba(201, 242, 119, 0.2);
   --inline-code-text: #d8efaa;
   --inline-code-bg: #121612;
   --code-text: #d4ddd6;
@@ -85,6 +87,8 @@
   --control-surface: rgba(242, 246, 239, 0.92);
   --card-surface: rgba(255, 255, 255, 0.82);
   --message-text: #263229;
+  --user-message-surface: rgba(107, 149, 42, 0.1);
+  --user-message-border: rgba(107, 149, 42, 0.2);
   --inline-code-text: #456a18;
   --inline-code-bg: #edf3e8;
   --code-text: #e8eee9;
@@ -376,6 +380,79 @@ kbd {
   color: var(--muted);
   background: transparent;
   text-align: left;
+  cursor: pointer;
+}
+
+.task-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 28px;
+  align-items: center;
+  gap: 2px;
+  border-radius: 8px;
+}
+
+.task-item:hover,
+.task-item.active {
+  background: var(--panel-soft);
+}
+
+.task-item .session-item:hover,
+.task-item .session-item.active {
+  background: transparent;
+}
+
+.task-rename-button {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  opacity: 0.42;
+  color: var(--faint);
+  background: transparent;
+  cursor: pointer;
+}
+
+.task-item:hover .task-rename-button,
+.task-item.active .task-rename-button,
+.task-item:focus-within .task-rename-button {
+  opacity: 1;
+}
+
+.task-rename-button:hover {
+  color: var(--text);
+  background: var(--panel-raised);
+}
+
+.task-rename-button:disabled {
+  cursor: not-allowed;
+}
+
+.task-rename-form {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: minmax(0, 1fr) 28px;
+  gap: 4px;
+  padding: 6px;
+}
+
+.task-rename-form input {
+  min-width: 0;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  color: var(--text);
+  background: var(--field-surface);
+  font-size: 11px;
+}
+
+.task-rename-form button {
+  border: 0;
+  border-radius: 6px;
+  color: var(--accent-ink);
+  background: var(--accent);
   cursor: pointer;
 }
 
@@ -797,6 +874,40 @@ kbd {
   min-width: 0;
 }
 
+.message-body {
+  min-width: 0;
+}
+
+.message-row.user {
+  grid-template-columns: minmax(0, 1fr) 28px;
+}
+
+.message-row.user .message-avatar {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.message-row.user .message-body {
+  grid-column: 1;
+  grid-row: 1;
+  justify-self: end;
+  width: min(620px, 88%);
+}
+
+.message-row.user .message-head {
+  justify-content: flex-end;
+}
+
+.message-row.user .message-content {
+  width: fit-content;
+  max-width: 100%;
+  margin-left: auto;
+  padding: 10px 13px;
+  border: 1px solid var(--user-message-border);
+  border-radius: 12px 4px 12px 12px;
+  background: var(--user-message-surface);
+}
+
 @keyframes message-in {
   from {
     opacity: 0;
@@ -1120,12 +1231,18 @@ kbd {
     0 0 0 3px rgba(201, 242, 119, 0.04);
 }
 
+.composer-header {
+  display: flex;
+  min-width: 0;
+  padding: 9px 13px 0;
+}
+
 .composer textarea {
   display: block;
   width: 100%;
   min-height: 46px;
   max-height: 180px;
-  padding: 14px 15px 7px;
+  padding: 9px 15px 7px;
   resize: none;
   overflow-y: auto;
   border: 0;
@@ -1164,31 +1281,109 @@ kbd {
   gap: 6px;
 }
 
-.composer-controls .runtime-select-control {
+.composer-actions {
+  min-width: 0;
+}
+
+.composer-actions .runtime-select-control,
+.permission-mode-control {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   height: 27px;
   padding: 0 6px 0 8px;
-  background: transparent;
-}
-
-.composer-controls .runtime-select-control select {
-  min-width: 82px;
-  max-width: 140px;
-}
-
-.composer-controls #reasoning-control select {
-  min-width: 48px;
-}
-
-.composer-context {
-  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 7px;
   color: var(--faint);
+  background: transparent;
   font-size: 9px;
 }
 
-.composer-mode-button {
-  height: 27px;
-  padding: 0 8px;
+.composer-actions .runtime-select-control select,
+.permission-mode-control select {
+  min-width: 82px;
+  max-width: 140px;
+  border: 0;
+  outline: 0;
+  color: var(--text);
   background: transparent;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.composer-actions #reasoning-control select {
+  min-width: 48px;
+}
+
+.permission-mode-control select {
+  min-width: 112px;
+}
+
+.permission-mode-control select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.composer-mode-switch {
+  display: inline-flex;
+  height: 27px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: transparent;
+}
+
+.composer-mode-switch label {
+  position: relative;
+  display: flex;
+}
+
+.composer-mode-switch input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.composer-mode-switch span {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 43px;
+  padding: 0 8px;
+  color: var(--muted);
+  font-size: 10px;
+  cursor: pointer;
+  transition:
+    color 140ms,
+    background 140ms;
+}
+
+.composer-mode-switch label + label span {
+  border-left: 1px solid var(--line);
+}
+
+.composer-mode-switch input:checked + span {
+  color: var(--accent);
+  background: rgba(201, 242, 119, 0.1);
+}
+
+.composer-mode-switch input:focus-visible + span {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.composer-mode-switch input:disabled + span {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.composer-context {
+  max-width: 100%;
+  min-width: 0;
+  color: var(--faint);
+  font-size: 9px;
 }
 
 .composer-context span:last-child {
@@ -1205,9 +1400,37 @@ kbd {
   background: var(--accent);
 }
 
-.shortcut-hint {
-  color: var(--faint);
-  font-size: 8px;
+.execution-timer {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.execution-timer::before {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--warning);
+  box-shadow: 0 0 0 3px rgba(245, 203, 114, 0.1);
+  content: '';
+  animation: timer-pulse 1.2s ease-in-out infinite;
+}
+
+.execution-timer.completed::before {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px rgba(201, 242, 119, 0.1);
+  animation: none;
+}
+
+@keyframes timer-pulse {
+  50% {
+    opacity: 0.45;
+  }
 }
 
 .send-button,
@@ -1835,8 +2058,13 @@ kbd {
     width: 58px;
   }
 
-  .composer-actions .composer-context {
-    display: none;
+  .composer-bottom {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .composer-actions {
+    margin-left: auto;
   }
 
   .theme-label {
@@ -1879,10 +2107,6 @@ kbd {
     bottom: 106px;
   }
 
-  .shortcut-hint {
-    display: none;
-  }
-
   .tool-card {
     margin-left: 41px;
   }
@@ -1897,20 +2121,47 @@ kbd {
     padding-left: 8px;
   }
 
+  .composer-controls,
+  .composer-actions {
+    width: 100%;
+  }
+
   .composer-controls {
     gap: 4px;
   }
 
-  .composer-controls .runtime-select-control {
+  .composer-actions {
+    justify-content: flex-end;
+  }
+
+  .composer-actions .runtime-select-control {
     padding-inline: 4px;
   }
 
-  .composer-controls .runtime-select-control select {
+  .composer-actions .runtime-select-control select {
     width: 74px;
   }
 
-  .composer-controls #reasoning-control select {
+  .composer-actions #reasoning-control select {
     width: 46px;
+  }
+
+  .permission-mode-control > span {
+    display: none;
+  }
+
+  .permission-mode-control {
+    padding-inline: 5px;
+  }
+
+  .permission-mode-control select {
+    width: 112px;
+    min-width: 0;
+  }
+
+  .composer-mode-switch span {
+    min-width: 38px;
+    padding-inline: 6px;
   }
 }
 
