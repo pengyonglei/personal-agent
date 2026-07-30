@@ -1,0 +1,253 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import {
+  AgentLoop,
+  ContextAssembler,
+  PlanModeEngine,
+  SessionManager,
+  SubAgentManager,
+  TokenBudget,
+} from '../src/index';
+
+test('plan engine enforces approval, dependencies, and completion', async () => {
+  const engine = new PlanModeEngine();
+  const plan = engine.createPlan({
+    title: 'Ship feature',
+    steps: [
+      { id: 'step-1', title: 'Inspect', description: 'Inspect the code' },
+      {
+        id: 'step-2',
+        title: 'Implement',
+        description: 'Implement the feature',
+        dependencies: ['step-1'],
+      },
+    ],
+  });
+
+  assert.equal(plan.status, 'draft');
+  await assert.rejects(() => engine.startStep('step-1'), /approved/);
+  engine.approvePlan();
+  assert.equal(engine.getNextStep()?.id, 'step-1');
+  await engine.startStep('step-1');
+  await engine.completeStep('step-1', 'inspected');
+  assert.equal(engine.getNextStep()?.id, 'step-2');
+  await engine.startStep('step-2');
+  await engine.completeStep('step-2', 'implemented');
+  assert.equal(engine.getPlan()?.status, 'completed');
+  assert.equal(engine.getProgress().percentage, 100);
+});
+
+test('plan engine rejects cyclic dependencies', () => {
+  const engine = new PlanModeEngine();
+  assert.throws(
+    () =>
+      engine.createPlan({
+        title: 'Invalid',
+        steps: [
+          { id: 'a', title: 'A', description: 'A', dependencies: ['b'] },
+          { id: 'b', title: 'B', description: 'B', dependencies: ['a'] },
+        ],
+      }),
+    /cycle/,
+  );
+});
+
+test('agent loop applies dynamic tool blocking only when active', async () => {
+  for (const blocked of [false, true]) {
+    let providerTurn = 0;
+    let executed = false;
+    const provider = createProvider(async function* () {
+      providerTurn++;
+      if (providerTurn === 1) {
+        yield {
+          type: 'tool_call_end',
+          toolCallEnd: {
+            id: 'call-1',
+            name: 'write_file',
+            arguments: { path: 'test.txt', content: 'hello' },
+          },
+        };
+        yield {
+          type: 'message_end',
+          stopReason: 'tool_use',
+          usage: { inputTokens: 1, outputTokens: 1 },
+        };
+        return;
+      }
+      yield { type: 'text_delta', textDelta: 'done' };
+      yield {
+        type: 'message_end',
+        stopReason: 'end_turn',
+        usage: { inputTokens: 1, outputTokens: 1 },
+      };
+    });
+    const context = createContext();
+    const loop = new AgentLoop({
+      provider: provider as never,
+      contextAssembler: context,
+      tokenBudget: new TokenBudget(10_000),
+      toolDefinitions: [
+        {
+          name: 'write_file',
+          description: 'write',
+          inputSchema: { type: 'object' },
+        },
+      ],
+      maxTurns: 3,
+      isToolBlocked: () => blocked,
+      executeTool: async () => {
+        executed = true;
+        return { success: true, content: 'written' };
+      },
+    });
+
+    for await (const _event of loop.run('write')) {
+      // Consume the full run.
+    }
+    assert.equal(executed, !blocked);
+  }
+});
+
+test('session messages and metadata survive a reload', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'personal-agent-session-'));
+  try {
+    const first = new SessionManager('/workspace', 'mock', 'mock', directory);
+    first.replaceMessages([
+      { role: 'user', content: 'hello' },
+      { role: 'assistant', content: 'hi' },
+    ]);
+    first.incrementTurnCount();
+    first.addTokensUsed(4, 6);
+    const id = await first.save();
+    first.addMessage({ role: 'user', content: 'second turn' });
+    await first.save();
+
+    const restored = new SessionManager('/other', 'other', 'other', directory);
+    assert.equal(await restored.restore(id), true);
+    assert.equal(restored.getMessages().length, 3);
+    assert.equal(restored.getSession().metadata.turnCount, 1);
+    assert.equal(restored.getSession().metadata.totalTokensUsed, 10);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('token compaction summarizes older messages and preserves recent context', () => {
+  const budget = new TokenBudget(100);
+  const messages = Array.from({ length: 10 }, (_, index) => ({
+    role: index % 2 === 0 ? ('user' as const) : ('assistant' as const),
+    content: `message-${index}`,
+  }));
+  const compacted = budget.compact(messages, 4);
+  assert.equal(compacted.length, 5);
+  assert.match(String(compacted[0].content), /Earlier conversation summary/);
+  assert.deepEqual(
+    compacted.slice(1).map((message) => message.content),
+    messages.slice(-4).map((message) => message.content),
+  );
+});
+
+test('sub-agent rejects hallucinated tools outside its allowlist', async () => {
+  let providerTurn = 0;
+  let globalExecutions = 0;
+  const provider = createProvider(async function* () {
+    providerTurn++;
+    if (providerTurn === 1) {
+      yield {
+        type: 'tool_call_end',
+        toolCallEnd: {
+          id: 'call-1',
+          name: 'write_file',
+          arguments: { path: 'forbidden.txt', content: 'x' },
+        },
+      };
+      yield {
+        type: 'message_end',
+        stopReason: 'tool_use',
+        usage: { inputTokens: 1, outputTokens: 1 },
+      };
+      return;
+    }
+    yield { type: 'text_delta', textDelta: 'finished safely' };
+    yield {
+      type: 'message_end',
+      stopReason: 'end_turn',
+      usage: { inputTokens: 1, outputTokens: 1 },
+    };
+  });
+  const manager = new SubAgentManager(async () => {
+    globalExecutions++;
+    return { success: true, content: 'unexpected' };
+  });
+  const handle = manager.spawn({
+    description: 'Read only',
+    prompt: 'Inspect',
+    allowedTools: ['read_file'],
+    toolDefinitions: [
+      { name: 'read_file', description: 'read', inputSchema: { type: 'object' } },
+      { name: 'write_file', description: 'write', inputSchema: { type: 'object' } },
+    ],
+    provider: provider as never,
+  });
+  const result = await handle.result;
+  assert.equal(result.success, true);
+  assert.equal(result.toolCallsMade, 0);
+  assert.equal(globalExecutions, 0);
+});
+
+test('sub-agent cancellation aborts the active provider stream', async () => {
+  let observedAbort = false;
+  const provider = {
+    providerId: 'mock',
+    displayName: 'Mock',
+    getModel: () => 'mock',
+    async *streamChat(_messages: unknown, _tools: unknown, options: { signal?: AbortSignal }) {
+      await new Promise<void>((resolve) => {
+        options.signal?.addEventListener(
+          'abort',
+          () => {
+            observedAbort = true;
+            resolve();
+          },
+          { once: true },
+        );
+      });
+    },
+  };
+  const manager = new SubAgentManager(async () => ({ success: true, content: '' }));
+  const handle = manager.spawn({
+    description: 'Wait',
+    prompt: 'Wait forever',
+    allowedTools: [],
+    toolDefinitions: [],
+    provider: provider as never,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  handle.cancel();
+  const result = await handle.result;
+  assert.equal(observedAbort, true);
+  assert.equal(result.success, false);
+  assert.equal(result.error, 'Cancelled');
+});
+
+function createContext() {
+  return new ContextAssembler({
+    workingDirectory: process.cwd(),
+    platform: process.platform,
+    model: 'mock',
+    provider: 'mock',
+    mode: 'chat',
+  });
+}
+
+function createProvider(streamFactory: () => AsyncGenerator<unknown>) {
+  return {
+    providerId: 'mock',
+    displayName: 'Mock',
+    getModel: () => 'mock',
+    streamChat: streamFactory,
+  };
+}

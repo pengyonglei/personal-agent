@@ -1,0 +1,52 @@
+{
+  "name": "personal-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A production-grade AI Agent CLI tool - multi-provider LLM, TUI, sub-agents, memory, MCP",
+  "keywords": [
+    "ai-agent",
+    "cli",
+    "llm",
+    "claude-code",
+    "codex",
+    "agent"
+  ],
+  "license": "MIT",
+  "author": "",
+  "packageManager": "pnpm@11.17.0",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "pnpm build && cd apps/cli && node --import tsx src/index.ts",
+    "lint": "turbo run lint",
+    "test": "turbo run test",
+    "format": "prettier --write \"**/*.{ts,tsx,js,json,md}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,json,md}\"",
+    "clean": "turbo run clean",
+    "cli": "cd apps/cli && node --import tsx src/index.ts",
+    "web": "pnpm --filter @personal-agent/web dev",
+    "changeset": "changeset",
+    "version-packages": "changeset version",
+    "release": "pnpm build && pnpm test && changeset publish"
+  },
+  "devDependencies": {
+    "@changesets/cli": "^2.31.1",
+    "@esbuild/win32-x64": "^0.28.1",
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.0.0",
+    "@types/react": "^18.3.31",
+    "@types/ws": "^8.18.1",
+    "esbuild": "~0.27.7",
+    "express": "^5.2.1",
+    "ink": "5.1.0",
+    "prettier": "^3.3.0",
+    "react": "18.3.0",
+    "tsup": "^8.5.1",
+    "tsx": "^4.23.1",
+    "turbo": "2.3.0",
+    "typescript": "^5.7.0",
+    "ws": "^8.21.1"
+  }
+}

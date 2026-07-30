@@ -1,0 +1,45 @@
+{
+  "name": "@personal-agent/core",
+  "version": "0.1.0",
+  "private": false,
+  "description": "Core agent engine for personal-agent",
+  "files": [
+    "dist"
+  ],
+  "license": "MIT",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts --clean",
+    "test": "tsx --test test/*.test.ts",
+    "dev": "tsup src/index.ts --format esm,cjs --dts --watch",
+    "lint": "echo 'lint ok'",
+    "clean": "node -e \"fs.rmSync('dist',{recursive:true,force:true})\""
+  },
+  "dependencies": {
+    "@personal-agent/config": "workspace:*",
+    "@personal-agent/provider": "workspace:*",
+    "@personal-agent/shared": "workspace:*",
+    "@personal-agent/tool": "workspace:*",
+    "events": "^3.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsup": "^8.3.0",
+    "typescript": "^5.7.0"
+  }
+}

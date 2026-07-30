@@ -1,0 +1,61 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build output and caches
+dist/
+build/
+out/
+.turbo/
+.cache/
+coverage/
+.nyc_output/
+*.tsbuildinfo
+*.tgz
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+tmp/
+temp/
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.p12
+*.pfx
+
+# personal-agent local configuration and persisted runtime data
+.personal-agent/
+
+# Local databases
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+
+# Editors and local assistant settings
+.idea/
+.vscode/
+.claude/settings.local.json
+*.swp
+*.swo
+*~
+
+# Operating system metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Accidental Windows device-name artifact
+/apps/cli/nul

@@ -1,0 +1,218 @@
+import type { Plan, PlanProgress } from '@personal-agent/core';
+import type {
+  ReasoningEffort,
+  ToolResult,
+  UnifiedMessage,
+  UsageInfo,
+} from '@personal-agent/shared';
+
+export type ClientMessage =
+  | { type: 'prompt'; text: string }
+  | { type: 'interrupt' }
+  | {
+      type: 'permission_response';
+      requestId: string;
+      approved: boolean;
+      remember?: boolean;
+    }
+  | { type: 'list_sessions' }
+  | { type: 'load_session'; sessionId: string }
+  | { type: 'new_session' }
+  | { type: 'list_projects' }
+  | { type: 'create_project'; name: string; rootPath: string }
+  | { type: 'select_project'; projectId: string }
+  | { type: 'create_task'; projectId: string; title: string }
+  | { type: 'open_task'; taskId: string }
+  | { type: 'archive_task'; taskId: string }
+  | { type: 'set_plan_mode'; enabled: boolean }
+  | { type: 'approve_plan' }
+  | { type: 'ping' };
+
+export interface RuntimeInfo {
+  configured: boolean;
+  initializationError?: string;
+  provider?: string;
+  providerName?: string;
+  model?: string;
+  models: Array<{ id: string; displayName: string; provider: string }>;
+  reasoningSupported: boolean;
+  reasoningEffort: ReasoningEffort;
+  workingDirectory: string;
+  toolCount: number;
+  plugins: Array<{ name: string; version: string; skills: number; tools: number }>;
+  mcpServers: Array<{ name: string; connected: boolean; toolCount: number }>;
+  memoryEnabled: boolean;
+}
+
+export interface SessionSummary {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  workingDirectory: string;
+  model: string;
+  provider: string;
+  turnCount: number;
+  messageCount: number;
+}
+
+export interface ProjectSummary {
+  id: string;
+  name: string;
+  rootPath: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TaskSummary {
+  id: string;
+  projectId: string;
+  title: string;
+  sessionId?: string;
+  status: 'active' | 'archived';
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type ServerMessage =
+  | {
+      type: 'ready';
+      version: string;
+      sessionId?: string;
+      activeProjectId?: string;
+      activeTaskId?: string;
+      runtime: RuntimeInfo;
+    }
+  | { type: 'runtime_updated'; runtime: RuntimeInfo }
+  | {
+      type: 'project_list';
+      projects: ProjectSummary[];
+      activeProjectId?: string;
+    }
+  | {
+      type: 'task_list';
+      projectId: string;
+      tasks: TaskSummary[];
+      activeTaskId?: string;
+    }
+  | { type: 'project_changed'; project: ProjectSummary }
+  | { type: 'task_changed'; task: TaskSummary }
+  | { type: 'history'; sessionId: string; messages: UnifiedMessage[] }
+  | { type: 'session_list'; sessions: SessionSummary[] }
+  | { type: 'session_changed'; sessionId: string; isNew: boolean }
+  | { type: 'busy'; busy: boolean }
+  | { type: 'turn_start'; turnNumber: number }
+  | { type: 'assistant_delta'; text: string; turnNumber: number }
+  | { type: 'tool_start'; toolName: string; toolCallId: string; turnNumber: number }
+  | { type: 'tool_progress'; toolCallId: string; content: string; turnNumber: number }
+  | {
+      type: 'permission_request';
+      requestId: string;
+      toolName: string;
+      params: Record<string, unknown>;
+    }
+  | {
+      type: 'tool_end';
+      toolCallId: string;
+      result: ToolResult;
+      turnNumber: number;
+    }
+  | { type: 'turn_end'; turnNumber: number; usage: UsageInfo | null }
+  | { type: 'done'; totalTurns: number; totalUsage: UsageInfo }
+  | { type: 'interrupted' }
+  | { type: 'plan'; active: boolean; plan: Plan | null; progress: PlanProgress }
+  | { type: 'notice'; message: string }
+  | { type: 'error'; message: string; code?: string }
+  | { type: 'pong' };
+
+export function parseClientMessage(raw: string): ClientMessage {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw new Error('消息必须是有效的 JSON');
+  }
+  if (
+    !value ||
+    typeof value !== 'object' ||
+    typeof (value as { type?: unknown }).type !== 'string'
+  ) {
+    throw new Error('消息缺少 type 字段');
+  }
+
+  const message = value as Record<string, unknown>;
+  switch (message.type) {
+    case 'prompt':
+      if (typeof message.text !== 'string' || !message.text.trim()) {
+        throw new Error('prompt.text 不能为空');
+      }
+      return { type: 'prompt', text: message.text.trim() };
+    case 'permission_response':
+      if (typeof message.requestId !== 'string' || typeof message.approved !== 'boolean') {
+        throw new Error('permission_response 格式无效');
+      }
+      return {
+        type: 'permission_response',
+        requestId: message.requestId,
+        approved: message.approved,
+        remember: message.remember === true,
+      };
+    case 'load_session':
+      if (typeof message.sessionId !== 'string' || !message.sessionId.trim()) {
+        throw new Error('load_session.sessionId 不能为空');
+      }
+      return { type: 'load_session', sessionId: message.sessionId.trim() };
+    case 'create_project':
+      if (
+        typeof message.name !== 'string' ||
+        !message.name.trim() ||
+        typeof message.rootPath !== 'string' ||
+        !message.rootPath.trim()
+      ) {
+        throw new Error('create_project 需要 name 和 rootPath');
+      }
+      return {
+        type: 'create_project',
+        name: message.name.trim(),
+        rootPath: message.rootPath.trim(),
+      };
+    case 'select_project':
+      if (typeof message.projectId !== 'string' || !message.projectId.trim()) {
+        throw new Error('select_project.projectId 不能为空');
+      }
+      return { type: 'select_project', projectId: message.projectId.trim() };
+    case 'create_task':
+      if (
+        typeof message.projectId !== 'string' ||
+        !message.projectId.trim() ||
+        typeof message.title !== 'string' ||
+        !message.title.trim()
+      ) {
+        throw new Error('create_task 需要 projectId 和 title');
+      }
+      return {
+        type: 'create_task',
+        projectId: message.projectId.trim(),
+        title: message.title.trim(),
+      };
+    case 'open_task':
+    case 'archive_task':
+      if (typeof message.taskId !== 'string' || !message.taskId.trim()) {
+        throw new Error(`${message.type}.taskId 不能为空`);
+      }
+      return { type: message.type, taskId: message.taskId.trim() };
+    case 'set_plan_mode':
+      if (typeof message.enabled !== 'boolean') {
+        throw new Error('set_plan_mode.enabled 必须是布尔值');
+      }
+      return { type: 'set_plan_mode', enabled: message.enabled };
+    case 'interrupt':
+    case 'list_sessions':
+    case 'list_projects':
+    case 'new_session':
+    case 'approve_plan':
+    case 'ping':
+      return { type: message.type };
+    default:
+      throw new Error(`不支持的消息类型: ${String(message.type)}`);
+  }
+}

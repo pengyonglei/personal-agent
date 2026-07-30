@@ -1,0 +1,49 @@
+{
+  "name": "@personal-agent/cli",
+  "version": "0.1.0",
+  "private": false,
+  "description": "A local-first, multi-provider AI coding agent for your terminal",
+  "type": "module",
+  "files": [
+    "dist"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "main": "./dist/index.js",
+  "bin": {
+    "personal-agent": "./dist/index.js",
+    "pa": "./dist/index.js"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --clean --external yoga-wasm-web",
+    "dev": "tsx src/index.ts",
+    "lint": "echo 'lint ok'",
+    "clean": "node -e \"fs.rmSync('dist',{recursive:true,force:true})\""
+  },
+  "dependencies": {
+    "@personal-agent/config": "workspace:*",
+    "@personal-agent/core": "workspace:*",
+    "@personal-agent/provider": "workspace:*",
+    "@personal-agent/shared": "workspace:*",
+    "@personal-agent/tool": "workspace:*",
+    "commander": "^13.0.0",
+    "@personal-agent/tui": "workspace:*",
+    "ink": "^5.1.0",
+    "ink-text-input": "^6.0.0",
+    "react": "^18.3.0",
+    "@personal-agent/memory": "workspace:*",
+    "@personal-agent/mcp": "workspace:*",
+    "@personal-agent/plugin": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsup": "^8.3.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

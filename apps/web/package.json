@@ -1,0 +1,39 @@
+{
+  "name": "@personal-agent/web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Browser-based streaming chat UI for personal-agent",
+  "scripts": {
+    "build": "tsup src/server.ts --format esm --clean --external yoga-wasm-web",
+    "dev": "tsx src/server.ts",
+    "start": "node dist/server.js",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test test/*.test.ts",
+    "lint": "echo lint ok",
+    "clean": "node -e \"fs.rmSync('dist',{recursive:true,force:true})\""
+  },
+  "type": "module",
+  "main": "./dist/server.js",
+  "dependencies": {
+    "@personal-agent/config": "workspace:*",
+    "@personal-agent/core": "workspace:*",
+    "@personal-agent/mcp": "workspace:*",
+    "@personal-agent/memory": "workspace:*",
+    "@personal-agent/plugin": "workspace:*",
+    "@personal-agent/provider": "workspace:*",
+    "@personal-agent/shared": "workspace:*",
+    "@personal-agent/tool": "workspace:*",
+    "dompurify": "^3.4.12",
+    "express": "^5.0.0",
+    "marked": "^18.0.7",
+    "ws": "^8.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/express": "^5.0.0",
+    "@types/ws": "^8.0.0",
+    "tsup": "^8.3.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

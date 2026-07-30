@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="personal-agent Web UI — 在浏览器中使用你的本地 AI Agent" />
+    <meta name="color-scheme" content="light dark" />
+    <title>personal-agent</title>
+    <script src="/theme.js"></script>
+    <link rel="stylesheet" href="/app.css" />
+    <script src="/app.js" type="module"></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" id="sidebar" aria-label="会话导航">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+          <div>
+            <strong>personal-agent</strong>
+            <small>LOCAL WORKSPACE</small>
+          </div>
+          <button class="icon-button mobile-only" id="close-sidebar" aria-label="关闭侧栏">
+            ×
+          </button>
+        </div>
+
+        <div class="project-switcher">
+          <label for="project-select">当前项目</label>
+          <div class="project-select-row">
+            <select id="project-select" aria-label="切换项目"></select>
+            <button
+              class="project-add-button"
+              id="new-project"
+              title="创建项目"
+              aria-label="创建项目"
+            >
+              ＋
+            </button>
+          </div>
+        </div>
+
+        <button class="new-chat-button" id="new-task">
+          <span aria-hidden="true">＋</span>
+          新建任务
+          <kbd>Ctrl K</kbd>
+        </button>
+
+        <div class="sidebar-section-heading">
+          <span>项目任务</span>
+          <button class="quiet-button" id="refresh-projects" title="刷新项目和任务">↻</button>
+        </div>
+        <nav class="session-list" id="task-list" aria-label="项目任务">
+          <div class="session-skeleton"></div>
+          <div class="session-skeleton short"></div>
+        </nav>
+
+        <div class="sidebar-footer">
+          <div class="runtime-mini">
+            <span class="status-orb" id="runtime-orb"></span>
+            <div>
+              <strong id="runtime-model">正在连接</strong>
+              <small id="runtime-provider">等待本地服务</small>
+            </div>
+          </div>
+          <button
+            class="icon-button"
+            id="open-inspector"
+            title="打开运行状态"
+            aria-controls="inspector"
+            aria-expanded="false"
+          >
+            ···
+          </button>
+        </div>
+      </aside>
+
+      <div class="sidebar-scrim" id="sidebar-scrim"></div>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div class="topbar-left">
+            <button class="icon-button mobile-only" id="open-sidebar" aria-label="打开侧栏">
+              ☰
+            </button>
+            <div class="conversation-title">
+              <span class="eyebrow">WORKSPACE</span>
+              <strong id="workspace-name">personal-agent</strong>
+            </div>
+          </div>
+          <div class="topbar-actions">
+            <div class="connection-pill" id="connection-pill">
+              <span class="status-orb"></span>
+              <span id="connection-label">连接中</span>
+            </div>
+            <button class="theme-button" id="theme-toggle" aria-label="切换页面主题">
+              <span class="theme-icon" id="theme-icon" aria-hidden="true">☀</span>
+              <span class="theme-label" id="theme-label">浅色</span>
+            </button>
+            <button
+              class="theme-button provider-settings-button"
+              id="open-provider-settings"
+              aria-label="配置模型供应商"
+            >
+              <span class="theme-icon" aria-hidden="true">⚙</span>
+              <span class="theme-label">模型</span>
+            </button>
+            <button
+              class="icon-button inspector-toggle"
+              id="toggle-inspector"
+              aria-label="运行详情"
+              aria-controls="inspector"
+              aria-expanded="false"
+            >
+              <span aria-hidden="true">◫</span>
+            </button>
+          </div>
+        </header>
+
+        <section class="config-banner hidden" id="config-banner" role="alert">
+          <div class="banner-icon">!</div>
+          <div>
+            <strong>还需要配置模型</strong>
+            <p id="config-message">请配置一个 LLM Provider。</p>
+          </div>
+          <button class="banner-action" id="configure-provider-banner">立即配置</button>
+        </section>
+
+        <section class="transcript" id="transcript" aria-live="polite">
+          <div class="welcome" id="welcome">
+            <div class="welcome-symbol" aria-hidden="true">
+              <span></span><span></span><span></span>
+            </div>
+            <p class="eyebrow">YOUR LOCAL AI AGENT</p>
+            <h1>今天想一起完成什么？</h1>
+            <p class="welcome-copy">
+              直接描述目标。Agent 可以理解项目、编辑文件、运行命令，并在敏感操作前请求你的批准。
+            </p>
+            <div class="starter-grid">
+              <button class="starter" data-prompt="分析这个项目的架构，并指出最值得优先改进的三处">
+                <span>项目分析</span>
+                <small>理解架构与改进机会</small>
+                <b>↗</b>
+              </button>
+              <button class="starter" data-prompt="运行测试并修复当前失败的用例">
+                <span>修复测试</span>
+                <small>定位失败并验证修复</small>
+                <b>↗</b>
+              </button>
+              <button class="starter" data-prompt="帮我审查最近的代码改动，重点关注潜在缺陷">
+                <span>代码审查</span>
+                <small>发现缺陷与回归风险</small>
+                <b>↗</b>
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <button class="scroll-bottom-button hidden" id="scroll-bottom" title="滚动到最新消息">
+          <span aria-hidden="true">↓</span>
+          最新消息
+        </button>
+
+        <footer class="composer-wrap">
+          <div class="composer" id="composer">
+            <textarea
+              id="prompt-input"
+              rows="1"
+              placeholder="给 personal-agent 发送消息…"
+              aria-label="消息"
+            ></textarea>
+            <div class="composer-bottom">
+              <div class="composer-controls">
+                <button
+                  class="mode-button composer-mode-button"
+                  id="plan-mode"
+                  aria-pressed="false"
+                  title="Plan 模式仅允许只读工具"
+                >
+                  <span class="mode-icon" aria-hidden="true">◇</span>
+                  Plan
+                </button>
+                <label class="runtime-select-control" title="切换当前模型">
+                  <span>模型</span>
+                  <select id="model-switcher" aria-label="切换当前模型" disabled>
+                    <option>未配置</option>
+                  </select>
+                </label>
+                <label
+                  class="runtime-select-control hidden"
+                  id="reasoning-control"
+                  title="设置思考强度"
+                >
+                  <span>思考</span>
+                  <select id="reasoning-effort" aria-label="设置思考强度" disabled>
+                    <option value="off">关闭</option>
+                    <option value="high">High</option>
+                    <option value="max">Max</option>
+                  </select>
+                </label>
+              </div>
+              <div class="composer-actions">
+                <div class="composer-context">
+                  <span class="context-dot"></span>
+                  <span id="composer-context">当前工作区</span>
+                </div>
+                <span class="shortcut-hint">Shift Enter 换行</span>
+                <button class="stop-button hidden" id="stop-button" title="停止生成">■</button>
+                <button class="send-button" id="send-button" aria-label="发送消息" disabled>
+                  <span>↑</span>
+                </button>
+              </div>
+            </div>
+          </div>
+          <p class="disclaimer">Agent 可能会出错。请在批准工具调用前检查参数。</p>
+        </footer>
+      </main>
+
+      <aside class="inspector" id="inspector" aria-label="运行详情">
+        <div class="inspector-header">
+          <div>
+            <span class="eyebrow">LIVE CONTEXT</span>
+            <strong>运行详情</strong>
+          </div>
+          <button class="icon-button" id="close-inspector" aria-label="关闭运行详情">×</button>
+        </div>
+
+        <section class="inspector-section plan-section">
+          <div class="section-title">
+            <span>执行计划</span>
+            <span class="badge" id="plan-badge">未启用</span>
+          </div>
+          <div class="empty-detail" id="plan-empty">
+            开启 Plan 模式后，Agent 会先只读分析并等待你批准执行。
+          </div>
+          <div class="plan-detail hidden" id="plan-detail">
+            <div class="plan-title-row">
+              <strong id="plan-title">计划</strong>
+              <span id="plan-percent">0%</span>
+            </div>
+            <div class="progress-track"><span id="plan-progress"></span></div>
+            <div class="plan-steps" id="plan-steps"></div>
+            <button class="approve-plan hidden" id="approve-plan">批准并开始执行</button>
+          </div>
+        </section>
+
+        <section class="inspector-section">
+          <div class="section-title">
+            <span>能力</span>
+            <span class="badge" id="tool-count">0 tools</span>
+          </div>
+          <div class="capability-list">
+            <div class="capability">
+              <span class="capability-icon">⌁</span>
+              <div><strong>Memory</strong><small id="memory-status">检测中</small></div>
+            </div>
+            <div class="capability">
+              <span class="capability-icon">⌘</span>
+              <div><strong>MCP</strong><small id="mcp-status">检测中</small></div>
+            </div>
+            <div class="capability">
+              <span class="capability-icon">✦</span>
+              <div><strong>Plugins</strong><small id="plugin-status">检测中</small></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="inspector-section">
+          <div class="section-title"><span>会话</span></div>
+          <dl class="metadata-list">
+            <div>
+              <dt>ID</dt>
+              <dd id="session-id">—</dd>
+            </div>
+            <div>
+              <dt>项目</dt>
+              <dd id="project-detail">—</dd>
+            </div>
+            <div>
+              <dt>任务</dt>
+              <dd id="task-detail">—</dd>
+            </div>
+            <div>
+              <dt>Provider</dt>
+              <dd id="provider-detail">—</dd>
+            </div>
+            <div>
+              <dt>Model</dt>
+              <dd id="model-detail">—</dd>
+            </div>
+            <div>
+              <dt>工作目录</dt>
+              <dd id="cwd-detail">—</dd>
+            </div>
+          </dl>
+        </section>
+      </aside>
+    </div>
+
+    <dialog class="permission-dialog" id="permission-dialog">
+      <form method="dialog">
+        <div class="permission-heading">
+          <div class="permission-icon">⌁</div>
+          <div>
+            <span class="eyebrow">TOOL PERMISSION</span>
+            <h2>允许执行这个操作吗？</h2>
+          </div>
+        </div>
+        <p>Agent 请求调用 <code id="permission-tool">tool</code>。请检查下面的参数。</p>
+        <pre id="permission-params"></pre>
+        <label class="remember-choice">
+          <input type="checkbox" id="permission-remember" />
+          <span>本次会话中记住此决定</span>
+        </label>
+        <div class="permission-actions">
+          <button value="deny" class="deny-button" id="deny-permission">拒绝</button>
+          <button value="approve" class="approve-button" id="approve-permission">允许执行</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="form-dialog" id="project-dialog">
+      <form method="dialog" id="project-form">
+        <div class="form-dialog-heading">
+          <span class="eyebrow">NEW WORKSPACE</span>
+          <h2>创建项目</h2>
+          <p>每个项目对应一个本地根目录，Agent 的文件和命令操作都会限制在这个工作区中。</p>
+        </div>
+        <label class="form-field">
+          <span>项目名称</span>
+          <input
+            id="project-name-input"
+            name="name"
+            autocomplete="off"
+            placeholder="例如：personal-agent"
+            required
+          />
+        </label>
+        <label class="form-field">
+          <span>本地根目录</span>
+          <input
+            id="project-root-input"
+            name="rootPath"
+            autocomplete="off"
+            placeholder="例如：D:\workspace\my-project"
+            required
+          />
+        </label>
+        <div class="form-dialog-actions">
+          <button type="button" class="deny-button" id="cancel-project">取消</button>
+          <button value="default" class="approve-button" id="create-project-submit">
+            创建项目
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="form-dialog" id="task-dialog">
+      <form method="dialog" id="task-form">
+        <div class="form-dialog-heading">
+          <span class="eyebrow">NEW TASK</span>
+          <h2>创建任务</h2>
+          <p>新任务会继承当前项目的根目录，并拥有独立、可恢复的 Agent 会话。</p>
+        </div>
+        <label class="form-field">
+          <span>任务名称</span>
+          <input
+            id="task-title-input"
+            name="title"
+            autocomplete="off"
+            placeholder="今天要完成什么？"
+            required
+          />
+        </label>
+        <div class="form-dialog-actions">
+          <button type="button" class="deny-button" id="cancel-task">取消</button>
+          <button value="default" class="approve-button" id="create-task-submit">创建任务</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="form-dialog provider-dialog" id="provider-dialog">
+      <form id="provider-form">
+        <div class="form-dialog-heading">
+          <span class="eyebrow">MODEL PROVIDER</span>
+          <h2>配置模型供应商</h2>
+          <p>配置会保存在本机，保存后立即用于当前 Web 会话。</p>
+        </div>
+        <label class="form-field">
+          <span>供应商</span>
+          <select id="provider-select" name="provider">
+            <option value="openai">OpenAI</option>
+            <option value="anthropic">Anthropic</option>
+            <option value="deepseek">DeepSeek</option>
+            <option value="ollama">Ollama（本地）</option>
+          </select>
+        </label>
+        <label class="form-field" id="provider-api-key-field">
+          <span>API Key</span>
+          <input
+            id="provider-api-key"
+            name="apiKey"
+            type="password"
+            autocomplete="new-password"
+            spellcheck="false"
+            placeholder="输入 API Key"
+          />
+          <small id="provider-key-hint">密钥仅写入本机配置文件，不会回显。</small>
+        </label>
+        <label class="form-field">
+          <span>Base URL</span>
+          <input
+            id="provider-base-url"
+            name="baseURL"
+            type="url"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="留空使用供应商默认地址"
+          />
+        </label>
+        <label class="form-field">
+          <span>默认模型</span>
+          <input
+            id="provider-model"
+            name="defaultModel"
+            list="provider-model-options"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="模型 ID"
+            required
+          />
+          <datalist id="provider-model-options"></datalist>
+        </label>
+        <label class="form-field">
+          <span>可选模型</span>
+          <textarea
+            id="provider-models"
+            name="models"
+            rows="4"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="每行填写一个模型 ID"
+          ></textarea>
+          <small>每行或逗号分隔；保存后可在页面顶部直接切换。</small>
+        </label>
+        <label class="form-field hidden" id="provider-thinking-field">
+          <span>默认思考强度</span>
+          <select id="provider-thinking-effort" name="thinkingEffort">
+            <option value="off">关闭</option>
+            <option value="high">High</option>
+            <option value="max">Max</option>
+          </select>
+          <small>DeepSeek 的 low/medium 等价于 high，因此仅展示有效档位。</small>
+        </label>
+        <div class="provider-config-meta">
+          <span>保存位置</span>
+          <code id="provider-config-path">正在读取…</code>
+        </div>
+        <p class="form-error hidden" id="provider-form-error" role="alert"></p>
+        <div class="form-dialog-actions">
+          <button type="button" class="deny-button" id="cancel-provider">取消</button>
+          <button type="submit" class="approve-button" id="save-provider">保存并启用</button>
+        </div>
+      </form>
+    </dialog>
+
+    <div class="toast-region" id="toast-region" aria-live="assertive"></div>
+  </body>
+</html>
