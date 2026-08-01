@@ -45,7 +45,9 @@ test('web server exposes health and websocket readiness without a configured pro
     assert.equal(health.status, 'needs_configuration');
     assert.equal(health.runtime.configured, false);
 
-    const rootsResponse = await fetch(`http://127.0.0.1:${instance.port}/api/filesystem/directories`);
+    const rootsResponse = await fetch(
+      `http://127.0.0.1:${instance.port}/api/filesystem/directories`,
+    );
     assert.equal(rootsResponse.status, 200);
     const roots = (await rootsResponse.json()) as {
       entries: Array<{ name: string; path: string; hasChildren: boolean }>;
@@ -291,6 +293,27 @@ test('web server exposes health and websocket readiness without a configured pro
     assert.match(updatedConfig, /active: deepseek/);
     assert.match(updatedConfig, /defaultModel: deepseek-v4-pro/);
     assert.match(updatedConfig, /thinkingEffort: max/);
+
+    const deleteResponse = await fetch(
+      `http://127.0.0.1:${instance.port}/api/provider-settings/deepseek`,
+      { method: 'DELETE' },
+    );
+    assert.equal(deleteResponse.status, 200);
+    const deleted = (await deleteResponse.json()) as {
+      runtime: { configured: boolean; provider: string };
+      settings: {
+        active: string;
+        providers: Record<string, { configured: boolean }>;
+      };
+    };
+    assert.equal(deleted.runtime.configured, true);
+    assert.equal(deleted.runtime.provider, 'openai');
+    assert.equal(deleted.settings.active, 'openai');
+    assert.equal(deleted.settings.providers.deepseek.configured, false);
+
+    const configAfterDelete = await readFile(configPath, 'utf8');
+    assert.doesNotMatch(configAfterDelete, /deepseek:/);
+    assert.match(configAfterDelete, /active: openai/);
   } finally {
     await instance.close();
     await rm(directory, { recursive: true, force: true });
@@ -299,6 +322,97 @@ test('web server exposes health and websocket readiness without a configured pro
 
 test('remote listening requires an explicit access token', async () => {
   await assert.rejects(createWebServer({ host: '0.0.0.0', port: 0 }), /PERSONAL_AGENT_WEB_TOKEN/);
+});
+
+test('archiving the active project switches the workspace to another project', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'personal-agent-web-archive-'));
+  const configPath = join(directory, 'config.yaml');
+  await writeFile(
+    configPath,
+    ['memory:', '  enabled: false', 'plugins:', '  enabled: false', 'mcp:', '  servers: []'].join(
+      '\n',
+    ),
+    'utf-8',
+  );
+  const alphaRoot = join(directory, 'alpha');
+  const betaRoot = join(directory, 'beta');
+  await Promise.all([mkdir(alphaRoot), mkdir(betaRoot)]);
+
+  const instance = await createWebServer({
+    host: '127.0.0.1',
+    port: 0,
+    workingDirectory: directory,
+    configPath,
+    projectStoragePath: join(directory, 'projects.json'),
+  });
+
+  try {
+    const result = await new Promise<{
+      alphaId: string;
+      betaId: string;
+      activeAfterArchive?: string;
+      archived?: string;
+    }>((resolve, reject) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${instance.port}/ws`);
+      let alphaId: string | undefined;
+      let betaId: string | undefined;
+      let archived: string | undefined;
+      let state: Record<string, unknown> | undefined;
+      const timeout = setTimeout(() => {
+        ws.close();
+        reject(new Error('Timed out while archiving a project'));
+      }, 10_000);
+      const finish = () => {
+        clearTimeout(timeout);
+        ws.close();
+        resolve({
+          alphaId: alphaId!,
+          betaId: betaId!,
+          activeAfterArchive: state?.activeProjectId as string | undefined,
+          archived,
+        });
+      };
+
+      ws.once('error', (error) => {
+        clearTimeout(timeout);
+        reject(error);
+      });
+      ws.on('message', (data) => {
+        const message = JSON.parse(data.toString()) as Record<string, unknown>;
+        if (message.type === 'ready') {
+          alphaId = message.activeProjectId as string;
+          ws.send(
+            JSON.stringify({ type: 'create_project', name: 'Beta', rootPath: betaRoot }),
+          );
+          return;
+        }
+        if (message.type === 'project_changed') {
+          const project = message.project as { id: string; name: string };
+          if (project.name === 'Beta' && !betaId) {
+            betaId = project.id;
+            // Creating a project activates it, so the active project is now Beta.
+            ws.send(JSON.stringify({ type: 'archive_project', projectId: project.id }));
+            return;
+          }
+        }
+        if (message.type === 'project_archived') {
+          archived = (message.project as { id: string }).id;
+          return;
+        }
+        if (message.type === 'project_list' && archived) {
+          state = message;
+          finish();
+        }
+      });
+    });
+
+    assert.equal(result.archived, result.betaId);
+    // The workspace should have switched back to the remaining active project.
+    assert.equal(result.activeAfterArchive, result.alphaId);
+  } finally {
+    await instance.close();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('task permission mode is persisted and restored when switching tasks', async () => {
@@ -497,6 +611,8 @@ test('refresh restores the last opened task and its persisted conversation histo
     assert.equal(JSON.parse(sessionFile).messages.length, 2);
   } finally {
     await instance.close();
+    // 会话保存为异步写盘，等待落盘完成后再清理目录（避免 Windows 句柄占用）
+    await new Promise((resolve) => setTimeout(resolve, 200));
     await rm(directory, { recursive: true, force: true });
   }
 });

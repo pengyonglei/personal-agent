@@ -3,6 +3,7 @@ export { appConfigSchema, type AppConfig } from './schema';
 export { DEFAULT_CONFIG } from './defaults';
 export {
   PROVIDER_IDS,
+  removeProviderSettings,
   resolveWritableConfigPath,
   saveProviderSettings,
   type ProviderId,

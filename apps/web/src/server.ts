@@ -138,6 +138,26 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
     }
   });
 
+  app.delete('/api/provider-settings/:provider', async (req, res) => {
+    if (!isAuthorized(req.headers.authorization, req.query.token, authToken)) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    try {
+      const provider = parseProviderId(req.params.provider);
+      await runtime.removeProvider(provider);
+      const runtimeInfo = runtime.getRuntimeInfo();
+      broadcast({ type: 'runtime_updated', runtime: runtimeInfo });
+      res.json({
+        runtime: runtimeInfo,
+        settings: runtime.getProviderSettings(),
+      });
+    } catch (error) {
+      const message = formatError(error);
+      res.status(message.includes('正在运行') ? 409 : 400).json({ error: message });
+    }
+  });
+
   app.post('/api/runtime/model', async (req, res) => {
     if (!isAuthorized(req.headers.authorization, req.query.token, authToken)) {
       res.status(401).json({ error: 'Unauthorized' });
@@ -255,7 +275,18 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
           ? runtime.projects.getProject(preferredTask.projectId)
           : undefined;
       const project = preferredProject ?? runtime.projects.listProjects()[0];
-      if (!project) throw new Error('没有可用项目');
+      if (!project) {
+        // No active project (all projects may be archived). Load the UI with an
+        // empty workspace so the user can restore or create one.
+        send({
+          type: 'ready',
+          version: VERSION,
+          runtime: runtime.getRuntimeInfo(),
+        });
+        sendProjectState();
+        await sendSessionList(runtime, send);
+        return;
+      }
       let task =
         preferredTask?.status === 'active' && preferredTask.projectId === project.id
           ? preferredTask
@@ -338,7 +369,7 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
       }
       if (message.type === 'select_project') {
         const project = runtime.projects.getProject(message.projectId);
-        if (!project) throw new Error(`项目不存在: ${message.projectId}`);
+        if (!project || project.archived) throw new Error(`项目不存在: ${message.projectId}`);
         let task = runtime.projects.listTasks(project.id)[0];
         if (!task) {
           task = await runtime.projects.createTask({
@@ -347,6 +378,45 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
           });
         }
         await activateTask(task.id);
+        sendProjectState();
+        return;
+      }
+      if (message.type === 'archive_project') {
+        const project = runtime.projects.getProject(message.projectId);
+        if (!project) throw new Error(`项目不存在: ${message.projectId}`);
+        const archived = await runtime.projects.archiveProject(project.id);
+        send({ type: 'project_archived', project: serializeProject(archived) });
+        if (activeProjectId === project.id) {
+          await switchAwayFromProject(project.id);
+        }
+        sendProjectState();
+        return;
+      }
+      if (message.type === 'restore_project') {
+        const project = runtime.projects.getProject(message.projectId);
+        if (!project) throw new Error(`项目不存在: ${message.projectId}`);
+        const restored = await runtime.projects.restoreProject(project.id);
+        send({ type: 'project_changed', project: serializeProject(restored) });
+        sendProjectState();
+        return;
+      }
+      if (message.type === 'delete_project') {
+        const project = runtime.projects.getProject(message.projectId);
+        if (!project) throw new Error(`项目不存在: ${message.projectId}`);
+        const wasActive = activeProjectId === project.id;
+        await runtime.projects.deleteProject(project.id);
+        send({ type: 'project_deleted', projectId: project.id });
+        if (wasActive) {
+          await switchAwayFromProject(project.id);
+        }
+        sendProjectState();
+        return;
+      }
+      if (message.type === 'rename_project') {
+        const project = runtime.projects.getProject(message.projectId);
+        if (!project) throw new Error(`项目不存在: ${message.projectId}`);
+        const renamed = await runtime.projects.renameProject(project.id, message.name);
+        send({ type: 'project_changed', project: serializeProject(renamed) });
         sendProjectState();
         return;
       }
@@ -512,17 +582,43 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
       }
     }
 
+    async function switchAwayFromProject(removedProjectId: string): Promise<void> {
+      const nextProject = runtime.projects
+        .listProjects()
+        .find((project) => project.id !== removedProjectId);
+      if (nextProject) {
+        let task = runtime.projects.listTasks(nextProject.id)[0];
+        if (!task) {
+          task = await runtime.projects.createTask({
+            projectId: nextProject.id,
+            title: UNTITLED_TASK_TITLE,
+          });
+        }
+        await activateTask(task.id);
+        return;
+      }
+      activeProjectId = undefined;
+      activeTaskId = undefined;
+      if (conversation) {
+        await conversation.close();
+        conversation = null;
+      }
+    }
+
     function sendProjectState(): void {
       send({
         type: 'project_list',
-        projects: runtime.projects.listProjects().map(serializeProject),
+        projects: runtime.projects.listProjects({ includeArchived: true }).map(serializeProject),
         activeProjectId,
       });
       if (activeProjectId) {
         send({
           type: 'task_list',
-          projectId: activeProjectId,
-          tasks: runtime.projects.listTasks(activeProjectId).map(serializeTask),
+          // 一次性下发所有项目的任务，由前端按项目组织成树
+          tasks: runtime.projects
+            .listProjects({ includeArchived: true })
+            .flatMap((project) => runtime.projects.listTasks(project.id))
+            .map(serializeTask),
           activeTaskId,
         });
       }
@@ -628,6 +724,13 @@ function parseProviderSettings(value: unknown): ProviderSettingsInput {
     result.thinkingEffort = parseReasoningEffort(input.thinkingEffort);
   }
   return result;
+}
+
+function parseProviderId(value: string): ProviderSettingsInput['provider'] {
+  if (value !== 'anthropic' && value !== 'openai' && value !== 'ollama' && value !== 'deepseek') {
+    throw new Error('不支持的 Provider。');
+  }
+  return value;
 }
 
 function parseRuntimeModelSettings(value: unknown): RuntimeModelSettingsInput {
@@ -764,11 +867,13 @@ function serializeProject(project: {
   id: string;
   name: string;
   rootPath: string;
+  archived?: boolean;
   createdAt: Date;
   updatedAt: Date;
 }): ProjectSummary {
   return {
     ...project,
+    archived: project.archived === true,
     createdAt: project.createdAt.toISOString(),
     updatedAt: project.updatedAt.toISOString(),
   };

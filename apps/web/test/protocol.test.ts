@@ -53,12 +53,14 @@ test('parseClientMessage validates project and task commands', () => {
       rootPath: 'D:\\workspace\\web',
     },
   );
-  assert.deepEqual(
-    parseClientMessage('{"type":"create_task","projectId":" project-1 "}'),
-    {
-      type: 'create_task',
-      projectId: 'project-1',
-    },
+  assert.deepEqual(parseClientMessage('{"type":"create_task","projectId":" project-1 "}'), {
+    type: 'create_task',
+    projectId: 'project-1',
+  });
+  assert.throws(
+    () =>
+      parseClientMessage('{"type":"create_task","projectId":"project-1","parentTaskId":"task-1"}'),
+    /不支持子任务/,
   );
   assert.deepEqual(
     parseClientMessage('{"type":"rename_task","taskId":" task-1 ","title":" 修复构建 "}'),
@@ -71,5 +73,27 @@ test('parseClientMessage validates project and task commands', () => {
   assert.throws(
     () => parseClientMessage('{"type":"create_project","name":"Missing root"}'),
     /name 和 rootPath/,
+  );
+});
+
+test('parseClientMessage validates project archive and rename commands', () => {
+  for (const type of ['archive_project', 'restore_project', 'delete_project']) {
+    assert.deepEqual(parseClientMessage(JSON.stringify({ type, projectId: ' project-1 ' })), {
+      type,
+      projectId: 'project-1',
+    });
+  }
+  assert.throws(() => parseClientMessage('{"type":"archive_project"}'), /projectId 不能为空/);
+  assert.deepEqual(
+    parseClientMessage('{"type":"rename_project","projectId":" project-1 ","name":" 新版 "}'),
+    {
+      type: 'rename_project',
+      projectId: 'project-1',
+      name: '新版',
+    },
+  );
+  assert.throws(
+    () => parseClientMessage('{"type":"rename_project","projectId":"project-1"}'),
+    /projectId 和 name/,
   );
 });

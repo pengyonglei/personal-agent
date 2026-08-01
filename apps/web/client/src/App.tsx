@@ -16,7 +16,7 @@ import {
   Grid,
   Input,
   Layout,
-  List,
+  Menu,
   Modal,
   Progress,
   Segmented,
@@ -33,6 +33,7 @@ import zhCN from 'antd/es/locale/zh_CN';
 import {
   AppstoreOutlined,
   BulbOutlined,
+  CaretRightOutlined,
   CheckCircleFilled,
   CloseOutlined,
   CodeOutlined,
@@ -343,18 +344,33 @@ function AgentWorkspace({
   const followOutputRef = useRef(true);
   const [showScrollButton, setShowScrollButton] = useState(false);
   const [prompt, setPrompt] = useState('');
+  const [draftTaskProjectId, setDraftTaskProjectId] = useState<string>();
+  const pendingTaskDraftRef = useRef<{ projectId: string; prompt?: string }>();
   const [projectModalOpen, setProjectModalOpen] = useState(false);
   const [directoryPickerOpen, setDirectoryPickerOpen] = useState(false);
   const [directoryPickerLoading, setDirectoryPickerLoading] = useState(false);
   const [directoryTreeData, setDirectoryTreeData] = useState<DirectoryTreeNode[]>([]);
   const [selectedDirectory, setSelectedDirectory] = useState<string>();
   const [providerModalOpen, setProviderModalOpen] = useState(false);
+  const [providerView, setProviderView] = useState<'list' | 'form'>('list');
   const [providerLoading, setProviderLoading] = useState(false);
   const [providerSaving, setProviderSaving] = useState(false);
+  const [providerDeleting, setProviderDeleting] = useState<ProviderId>();
   const [providerSettings, setProviderSettings] = useState<ProviderSettingsInfo | null>(null);
+  const [appVersion, setAppVersion] = useState('0.1.0');
   const [rememberPermission, setRememberPermission] = useState(false);
   const [renamingTaskId, setRenamingTaskId] = useState<string>();
   const [renameTitle, setRenameTitle] = useState('');
+  const [renamingProjectId, setRenamingProjectId] = useState<string>();
+  const [renameProjectName, setRenameProjectName] = useState('');
+  const [showArchived, setShowArchived] = useState(false);
+  const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(() =>
+    loadStoredIds('pa-collapsed-projects'),
+  );
+  useEffect(() => {
+    saveStoredIds('pa-collapsed-projects', collapsedProjects);
+  }, [collapsedProjects]);
+
   const [projectForm] = Form.useForm<ProjectFormValues>();
   const [providerForm] = Form.useForm<ProviderFormValues>();
   const selectedProvider = Form.useWatch('provider', providerForm);
@@ -427,10 +443,11 @@ function AgentWorkspace({
             runtime: incoming.runtime,
             configured: incoming.runtime.configured,
             sessionId: incoming.sessionId,
-            activeProjectId: incoming.activeProjectId,
-            activeTaskId: incoming.activeTaskId,
+            activeProjectId: pendingTaskDraftRef.current?.projectId ?? incoming.activeProjectId,
+            activeTaskId: pendingTaskDraftRef.current ? undefined : incoming.activeTaskId,
           });
-          rememberActiveTask(incoming.activeTaskId);
+          setAppVersion(incoming.version);
+          if (!pendingTaskDraftRef.current) rememberActiveTask(incoming.activeTaskId);
           break;
         case 'runtime_updated': {
           const becameConfigured = !stateRef.current.configured && incoming.runtime.configured;
@@ -444,6 +461,7 @@ function AgentWorkspace({
           break;
         }
         case 'history': {
+          if (pendingTaskDraftRef.current) break;
           const restored: TimelineItem[] = [];
           for (const historyMessage of incoming.messages) {
             if (historyMessage.role === 'system') continue;
@@ -484,29 +502,48 @@ function AgentWorkspace({
         case 'project_list':
           patchState((current) => ({
             projects: incoming.projects,
-            activeProjectId: incoming.activeProjectId ?? current.activeProjectId,
+            activeProjectId:
+              pendingTaskDraftRef.current?.projectId ??
+              incoming.activeProjectId ??
+              current.activeProjectId,
           }));
           break;
         case 'task_list':
-          if (incoming.projectId !== stateRef.current.activeProjectId) break;
           patchState((current) => ({
             tasks: incoming.tasks,
-            activeTaskId: incoming.activeTaskId ?? current.activeTaskId,
-            permissionMode:
-              incoming.tasks.find(
-                (task) => task.id === (incoming.activeTaskId ?? current.activeTaskId),
-              )?.permissionMode ?? current.permissionMode,
+            activeTaskId: pendingTaskDraftRef.current
+              ? undefined
+              : (incoming.activeTaskId ?? current.activeTaskId),
+            permissionMode: pendingTaskDraftRef.current
+              ? current.permissionMode
+              : (incoming.tasks.find(
+                  (task) => task.id === (incoming.activeTaskId ?? current.activeTaskId),
+                )?.permissionMode ?? current.permissionMode),
           }));
           break;
         case 'project_changed':
           patchState((current) => ({
             projects: upsertById(current.projects, incoming.project),
-            tasks: current.activeProjectId === incoming.project.id ? current.tasks : [],
             activeProjectId: incoming.project.id,
             activeTaskId: undefined,
             creatingProject: false,
           }));
           setProjectModalOpen(false);
+          break;
+        case 'project_archived':
+          patchState((current) => ({
+            projects: upsertById(current.projects, incoming.project),
+            activeTaskId:
+              current.activeProjectId === incoming.project.id ? undefined : current.activeTaskId,
+          }));
+          break;
+        case 'project_deleted':
+          patchState((current) => ({
+            projects: current.projects.filter((project) => project.id !== incoming.projectId),
+            tasks: current.tasks.filter((task) => task.projectId !== incoming.projectId),
+            activeTaskId:
+              current.activeProjectId === incoming.projectId ? undefined : current.activeTaskId,
+          }));
           break;
         case 'task_changed':
           patchState((current) => ({
@@ -518,6 +555,17 @@ function AgentWorkspace({
             sidebarOpen: false,
           }));
           rememberActiveTask(incoming.task.id);
+          if (
+            pendingTaskDraftRef.current?.prompt &&
+            pendingTaskDraftRef.current.projectId === incoming.task.projectId
+          ) {
+            const initialPrompt = pendingTaskDraftRef.current.prompt;
+            pendingTaskDraftRef.current = undefined;
+            setDraftTaskProjectId(undefined);
+            followOutputRef.current = true;
+            appendMessage('user', initialPrompt);
+            if (send({ type: 'prompt', text: initialPrompt })) setPrompt('');
+          }
           requestAnimationFrame(() =>
             document.querySelector<HTMLTextAreaElement>('#prompt-input')?.focus(),
           );
@@ -750,11 +798,17 @@ function AgentWorkspace({
   const activeProject = state.projects.find((project) => project.id === state.activeProjectId);
   const activeTask = state.tasks.find((task) => task.id === state.activeTaskId);
   const rootPath = activeProject?.rootPath ?? state.runtime?.workingDirectory ?? '当前工作区';
-  const workspaceTitle =
-    activeTask?.title ?? activeProject?.name ?? lastPathSegment(rootPath) ?? 'personal-agent';
+  const workspaceTitle = draftTaskProjectId
+    ? '新任务'
+    : (activeTask?.title ?? activeProject?.name ?? lastPathSegment(rootPath) ?? 'personal-agent');
   const composerEnabled = state.connected && state.configured;
-  const runtimeDisabled = !composerEnabled || state.busy || state.switchingRuntime;
-  const activeRuntimeModel = findRuntimeModel(state.runtime, state.runtime?.provider, state.runtime?.model);
+  const runtimeDisabled =
+    !composerEnabled || state.busy || state.creatingTask || state.switchingRuntime;
+  const activeRuntimeModel = findRuntimeModel(
+    state.runtime,
+    state.runtime?.provider,
+    state.runtime?.model,
+  );
   const runtimeModelValue =
     state.runtime?.provider && state.runtime.model
       ? runtimeModelSelectValue(state.runtime.provider, state.runtime.model)
@@ -771,24 +825,52 @@ function AgentWorkspace({
       messageApi.error('请先创建一个项目');
       return;
     }
-    patchState({ creatingTask: true });
-    if (!send({ type: 'create_task', projectId })) {
-      patchState({ creatingTask: false });
-    }
+    pendingTaskDraftRef.current = { projectId };
+    setDraftTaskProjectId(projectId);
+    setPrompt('');
+    replaceTimeline([]);
+    setShowScrollButton(false);
+    patchState({
+      activeProjectId: projectId,
+      activeTaskId: undefined,
+      creatingTask: false,
+      sidebarOpen: false,
+    });
+    requestAnimationFrame(() =>
+      document.querySelector<HTMLTextAreaElement>('#prompt-input')?.focus(),
+    );
   }
 
   function submitPrompt(value = prompt.trim()) {
+    const text = value.trim();
     if (
-      !value ||
+      !text ||
       !stateRef.current.connected ||
       !stateRef.current.configured ||
-      stateRef.current.busy
+      stateRef.current.busy ||
+      stateRef.current.creatingTask
     ) {
       return;
     }
+    const pendingTaskDraft = pendingTaskDraftRef.current;
+    if (pendingTaskDraft) {
+      pendingTaskDraftRef.current = { ...pendingTaskDraft, prompt: text };
+      patchState({ creatingTask: true });
+      if (!send({ type: 'create_task', projectId: pendingTaskDraft.projectId })) {
+        pendingTaskDraftRef.current = pendingTaskDraft;
+        patchState({ creatingTask: false });
+      }
+      return;
+    }
     followOutputRef.current = true;
-    appendMessage('user', value);
-    if (send({ type: 'prompt', text: value })) setPrompt('');
+    appendMessage('user', text);
+    if (send({ type: 'prompt', text })) setPrompt('');
+  }
+
+  function discardTaskDraft() {
+    pendingTaskDraftRef.current = undefined;
+    setDraftTaskProjectId(undefined);
+    patchState({ creatingTask: false });
   }
 
   function answerPermission(approved: boolean) {
@@ -828,6 +910,44 @@ function AgentWorkspace({
     });
   }
 
+  function archiveProject(project: ProjectSummary) {
+    modal.confirm({
+      title: '归档项目',
+      content: `确定归档“${project.name}”吗？项目及其任务会保留，可随时恢复。`,
+      okText: '归档',
+      cancelText: '取消',
+      okButtonProps: { danger: true },
+      onOk: () => {
+        send({ type: 'archive_project', projectId: project.id });
+      },
+    });
+  }
+
+  function deleteProject(project: ProjectSummary) {
+    modal.confirm({
+      title: '删除项目',
+      content: `确定彻底删除“${project.name}”吗？该项目的所有任务记录会被一并删除，且无法恢复。`,
+      okText: '删除',
+      cancelText: '取消',
+      okButtonProps: { danger: true },
+      onOk: () => {
+        send({ type: 'delete_project', projectId: project.id });
+      },
+    });
+  }
+
+  function startProjectRename(project: ProjectSummary) {
+    setRenamingProjectId(project.id);
+    setRenameProjectName(project.name);
+  }
+
+  function saveProjectRename(projectId: string) {
+    const name = renameProjectName.trim();
+    if (!name) return;
+    send({ type: 'rename_project', projectId, name });
+    setRenamingProjectId(undefined);
+  }
+
   async function openProviderSettings() {
     setProviderModalOpen(true);
     setProviderLoading(true);
@@ -838,7 +958,14 @@ function AgentWorkspace({
       };
       if (!response.ok) throw new Error(data.error || '读取 Provider 配置失败');
       setProviderSettings(data);
-      hydrateProviderForm(data.active ?? 'openai', data);
+      const configuredProviders = getConfiguredProviders(data);
+      if (configuredProviders.length) {
+        setProviderView('list');
+        hydrateProviderForm(data.active ?? configuredProviders[0], data);
+      } else {
+        setProviderView('form');
+        hydrateProviderForm('openai', data);
+      }
     } catch (error) {
       messageApi.error(formatError(error));
     } finally {
@@ -880,6 +1007,7 @@ function AgentWorkspace({
       };
       if (!response.ok) throw new Error(data.error || '保存 Provider 配置失败');
       setProviderSettings(data.settings);
+      setProviderView('list');
       patchState({
         runtime: data.runtime,
         configured: data.runtime.configured,
@@ -890,6 +1018,56 @@ function AgentWorkspace({
     } finally {
       setProviderSaving(false);
     }
+  }
+
+  function editProvider(provider: ProviderId) {
+    hydrateProviderForm(provider, providerSettings);
+    setProviderView('form');
+  }
+
+  function addProvider() {
+    const provider =
+      (Object.keys(providerLabels) as ProviderId[]).find(
+        (id) => !providerSettings?.providers[id].configured,
+      ) ?? 'openai';
+    hydrateProviderForm(provider, providerSettings);
+    setProviderView('form');
+  }
+
+  function deleteProvider(provider: ProviderId) {
+    modal.confirm({
+      title: `删除 ${providerLabels[provider]} 配置`,
+      content: '确定删除这个模型供应商吗？本机配置中的密钥和模型信息也会被移除。',
+      okText: '删除',
+      cancelText: '取消',
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        setProviderDeleting(provider);
+        try {
+          const response = await apiFetch(`/api/provider-settings/${provider}`, {
+            method: 'DELETE',
+          });
+          const data = (await response.json()) as {
+            runtime: RuntimeInfo;
+            settings: ProviderSettingsInfo;
+            error?: string;
+          };
+          if (!response.ok) throw new Error(data.error || '删除模型供应商失败');
+          setProviderSettings(data.settings);
+          patchState({ runtime: data.runtime, configured: data.runtime.configured });
+          if (!getConfiguredProviders(data.settings).length) {
+            setProviderView('form');
+            hydrateProviderForm('openai', data.settings);
+          }
+          messageApi.success(`${providerLabels[provider]} 配置已删除`);
+        } catch (error) {
+          messageApi.error(formatError(error));
+          throw error;
+        } finally {
+          setProviderDeleting(undefined);
+        }
+      },
+    });
   }
 
   async function saveRuntimeSelection(
@@ -985,15 +1163,32 @@ function AgentWorkspace({
       tasks={state.tasks}
       activeProjectId={state.activeProjectId}
       activeTaskId={state.activeTaskId}
-      busy={state.busy}
+      busy={state.busy || state.creatingTask}
       creatingTask={state.creatingTask}
-      runtime={state.runtime}
       renamingTaskId={renamingTaskId}
       renameTitle={renameTitle}
+      renamingProjectId={renamingProjectId}
+      renameProjectName={renameProjectName}
+      showArchived={showArchived}
+      onToggleArchived={() => setShowArchived((current) => !current)}
+      collapsedProjects={collapsedProjects}
+      onToggleProjectCollapse={(projectId) =>
+        setCollapsedProjects((current) => toggleId(current, projectId))
+      }
       onProjectChange={(projectId) => {
-        if (!state.busy) send({ type: 'select_project', projectId });
+        if (!state.busy) {
+          discardTaskDraft();
+          // 切换到项目时自动展开其任务
+          setCollapsedProjects((current) => {
+            const next = new Set(current);
+            next.delete(projectId);
+            return next;
+          });
+          send({ type: 'select_project', projectId });
+        }
       }}
       onCreateProject={() => {
+        discardTaskDraft();
         projectForm.resetFields();
         setSelectedDirectory(undefined);
         setProjectModalOpen(true);
@@ -1002,6 +1197,7 @@ function AgentWorkspace({
       onRefresh={() => send({ type: 'list_projects' })}
       onOpenTask={(taskId) => {
         if (state.busy) return;
+        discardTaskDraft();
         send({ type: 'open_task', taskId });
         patchState({ sidebarOpen: false });
       }}
@@ -1010,7 +1206,15 @@ function AgentWorkspace({
       onSaveRename={saveTaskRename}
       onCancelRename={() => setRenamingTaskId(undefined)}
       onArchiveTask={archiveTask}
-      onOpenInspector={() => patchState({ inspectorOpen: true })}
+      onStartProjectRename={startProjectRename}
+      onRenameProjectNameChange={setRenameProjectName}
+      onSaveProjectRename={saveProjectRename}
+      onCancelProjectRename={() => setRenamingProjectId(undefined)}
+      onArchiveProject={archiveProject}
+      onRestoreProject={(projectId) => send({ type: 'restore_project', projectId })}
+      onDeleteProject={deleteProject}
+      onOpenSettings={openProviderSettings}
+      version={appVersion}
     />
   );
 
@@ -1019,6 +1223,10 @@ function AgentWorkspace({
   const providerModelOptions = parseModelList(providerModelsText).map((model) => ({
     value: model,
   }));
+  const configuredProviders = getConfiguredProviders(providerSettings);
+  const availableProviders = (Object.keys(providerLabels) as ProviderId[]).filter(
+    (provider) => !providerSettings?.providers[provider].configured,
+  );
 
   return (
     <Layout className="pa-shell">
@@ -1029,7 +1237,7 @@ function AgentWorkspace({
       ) : (
         <Drawer
           placement="left"
-          width={280}
+          size={280}
           open={state.sidebarOpen}
           onClose={() => patchState({ sidebarOpen: false })}
           closeIcon={false}
@@ -1079,11 +1287,6 @@ function AgentWorkspace({
                 onClick={onToggleColorMode}
               >
                 <span className="pa-button-label">{colorMode === 'light' ? '浅色' : '深色'}</span>
-              </Button>
-            </Tooltip>
-            <Tooltip title="配置模型供应商">
-              <Button icon={<SettingOutlined />} onClick={openProviderSettings}>
-                <span className="pa-button-label">模型</span>
               </Button>
             </Tooltip>
             <Tooltip title="运行详情">
@@ -1146,6 +1349,7 @@ function AgentWorkspace({
             prompt={prompt}
             enabled={composerEnabled}
             busy={state.busy}
+            creatingTask={state.creatingTask}
             planActive={state.planActive}
             permissionMode={state.permissionMode}
             pendingPermission={state.pendingPermission}
@@ -1196,7 +1400,7 @@ function AgentWorkspace({
           </div>
         }
         placement="right"
-        width={380}
+        size={380}
         open={state.inspectorOpen}
         onClose={() => patchState({ inspectorOpen: false })}
         className="pa-inspector"
@@ -1306,9 +1510,7 @@ function AgentWorkspace({
                 treeData={directoryTreeData}
                 selectedKeys={selectedDirectory ? [selectedDirectory] : []}
                 loadData={(node) =>
-                  node.children
-                    ? Promise.resolve()
-                    : loadDirectoryChildren(String(node.key))
+                  node.children ? Promise.resolve() : loadDirectoryChildren(String(node.key))
                 }
                 onSelect={(_, info) => selectDirectory(String(info.node.key))}
               />
@@ -1320,98 +1522,188 @@ function AgentWorkspace({
       </Modal>
 
       <Modal
-        title="配置模型供应商"
+        title="设置"
         open={providerModalOpen}
         onCancel={() => setProviderModalOpen(false)}
         footer={null}
-        width={640}
+        width={860}
         destroyOnHidden
+        className="pa-settings-modal"
       >
-        <Spin spinning={providerLoading}>
-          <Text type="secondary">配置保存在本机；保存多个供应商后，可在输入框按供应商切换模型。</Text>
-          <Form
-            form={providerForm}
-            layout="vertical"
-            className="pa-modal-form"
-            onFinish={saveProvider}
-          >
-            <Form.Item name="provider" label="供应商">
-              <Select
-                options={Object.entries(providerLabels).map(([value, label]) => ({
-                  value,
-                  label,
-                }))}
-                onChange={(provider: ProviderId) => hydrateProviderForm(provider, providerSettings)}
-              />
-            </Form.Item>
-            {selectedProviderSettings?.requiresApiKey && (
-              <Form.Item
-                name="apiKey"
-                label="API Key"
-                extra={
-                  selectedProviderSettings.hasApiKey
-                    ? '已检测到密钥。留空会保留当前值，服务端不会回传密钥。'
-                    : '密钥仅写入本机配置文件，不会回显。'
-                }
-                rules={[
-                  {
-                    required: !selectedProviderSettings.hasApiKey,
-                    message: '请输入 API Key',
-                  },
-                ]}
-              >
-                <Input.Password
-                  autoComplete="new-password"
-                  placeholder={
-                    selectedProviderSettings.hasApiKey ? '已配置；留空保持不变' : '输入 API Key'
-                  }
-                />
-              </Form.Item>
-            )}
-            <Form.Item name="baseURL" label="Base URL">
-              <Input placeholder="留空使用供应商默认地址" />
-            </Form.Item>
-            <Form.Item
-              name="defaultModel"
-              label="默认模型"
-              rules={[{ required: true, message: '请输入默认模型' }]}
-            >
-              <AutoComplete options={providerModelOptions} placeholder="模型 ID" />
-            </Form.Item>
-            <Form.Item
-              name="models"
-              label="可选模型"
-              extra="每行或逗号分隔；保存后可在输入框右下角切换。"
-            >
-              <TextArea rows={4} placeholder="每行填写一个模型 ID" />
-            </Form.Item>
-            {selectedProvider === 'deepseek' && (
-              <Form.Item
-                name="thinkingEffort"
-                label="默认思考强度"
-                extra="DeepSeek 的 low/medium 等价于 high，因此仅展示有效档位。"
-              >
-                <Select
-                  options={getReasoningOptions(['off', 'high', 'max'])}
-                />
-              </Form.Item>
-            )}
-            <div className="pa-config-path">
-              <span>保存位置</span>
-              <code title={providerSettings?.configPath}>
-                {providerSettings?.configPath ?? '正在读取…'}
-              </code>
-            </div>
-            <div className="pa-modal-actions">
-              <Button onClick={() => setProviderModalOpen(false)}>取消</Button>
-              <Button type="primary" htmlType="submit" loading={providerSaving}>
-                保存配置
-              </Button>
-            </div>
-          </Form>
-        </Spin>
-      </Modal>
+        <div className="pa-settings-layout">
+          <nav className="pa-settings-nav" aria-label="设置菜单">
+            <Menu
+              mode="inline"
+              selectedKeys={['providers']}
+              items={[
+                {
+                  key: 'providers',
+                  icon: <RobotOutlined />,
+                  label: '模型提供商',
+                },
+              ]}
+            />
+          </nav>
+          <Spin spinning={providerLoading} className="pa-settings-spin">
+            <section className="pa-settings-content">
+              <div className="pa-settings-heading">
+                <div>
+                  <Title level={4}>模型提供商</Title>
+                  <Text type="secondary">
+                    管理本机模型供应商配置，配置后可在对话输入框中切换模型。
+                  </Text>
+                </div>
+                {providerView === 'list' && availableProviders.length > 0 && (
+                  <Button type="primary" icon={<PlusOutlined />} onClick={addProvider}>
+                    添加供应商
+                  </Button>
+                )}
+              </div>
 
+              {providerView === 'list' ? (
+                configuredProviders.length ? (
+                  <div className="pa-provider-list">
+                    {configuredProviders.map((provider) => {
+                      const info = providerSettings!.providers[provider];
+                      return (
+                        <Card key={provider} size="small" className="pa-provider-card">
+                          <div className="pa-provider-card-main">
+                            <Avatar shape="square" icon={<RobotOutlined />} />
+                            <div>
+                              <Space size={8}>
+                                <strong>{providerLabels[provider]}</strong>
+                                {providerSettings?.active === provider && (
+                                  <Tag color="success">当前使用</Tag>
+                                )}
+                              </Space>
+                              <Text type="secondary">{info.defaultModel}</Text>
+                            </div>
+                          </div>
+                          <Space>
+                            <Button size="small" onClick={() => editProvider(provider)}>
+                              编辑
+                            </Button>
+                            <Button
+                              size="small"
+                              danger
+                              icon={<DeleteOutlined />}
+                              loading={providerDeleting === provider}
+                              onClick={() => deleteProvider(provider)}
+                            >
+                              删除
+                            </Button>
+                          </Space>
+                        </Card>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="尚未配置模型供应商">
+                    <Button type="primary" icon={<PlusOutlined />} onClick={addProvider}>
+                      选择供应商进行配置
+                    </Button>
+                  </Empty>
+                )
+              ) : (
+                <Form
+                  form={providerForm}
+                  layout="vertical"
+                  className="pa-provider-form"
+                  onFinish={saveProvider}
+                >
+                  <div className="pa-provider-form-title">
+                    <Button type="link" onClick={() => setProviderView('list')}>
+                      返回列表
+                    </Button>
+                    <strong>
+                      {selectedProviderSettings?.configured ? '编辑供应商' : '添加供应商'}
+                    </strong>
+                  </div>
+                  <Form.Item name="provider" label="供应商">
+                    <Select
+                      disabled={Boolean(selectedProviderSettings?.configured)}
+                      options={Object.entries(providerLabels).map(([value, label]) => ({
+                        value,
+                        label,
+                        disabled:
+                          providerSettings?.providers[value as ProviderId].configured &&
+                          value !== selectedProvider,
+                      }))}
+                      onChange={(provider: ProviderId) =>
+                        hydrateProviderForm(provider, providerSettings)
+                      }
+                    />
+                  </Form.Item>
+                  {selectedProviderSettings?.requiresApiKey && (
+                    <Form.Item
+                      name="apiKey"
+                      label="API Key"
+                      extra={
+                        selectedProviderSettings.hasApiKey
+                          ? '已检测到密钥。留空会保留当前值，服务端不会回传密钥。'
+                          : '密钥仅写入本机配置文件，不会回显。'
+                      }
+                      rules={[
+                        {
+                          required: !selectedProviderSettings.hasApiKey,
+                          message: '请输入 API Key',
+                        },
+                      ]}
+                    >
+                      <Input.Password
+                        autoComplete="new-password"
+                        placeholder={
+                          selectedProviderSettings.hasApiKey
+                            ? '已配置；留空保持不变'
+                            : '输入 API Key'
+                        }
+                      />
+                    </Form.Item>
+                  )}
+                  <Form.Item name="baseURL" label="Base URL">
+                    <Input placeholder="留空使用供应商默认地址" />
+                  </Form.Item>
+                  <Form.Item
+                    name="defaultModel"
+                    label="默认模型"
+                    rules={[{ required: true, message: '请输入默认模型' }]}
+                  >
+                    <AutoComplete options={providerModelOptions} placeholder="模型 ID" />
+                  </Form.Item>
+                  <Form.Item
+                    name="models"
+                    label="可选模型"
+                    extra="每行或逗号分隔；保存后可在输入框右下角切换。"
+                  >
+                    <TextArea rows={4} placeholder="每行填写一个模型 ID" />
+                  </Form.Item>
+                  {selectedProvider === 'deepseek' && (
+                    <Form.Item
+                      name="thinkingEffort"
+                      label="默认思考强度"
+                      extra="DeepSeek 的 low/medium 等价于 high，因此仅展示有效档位。"
+                    >
+                      <Select options={getReasoningOptions(['off', 'high', 'max'])} />
+                    </Form.Item>
+                  )}
+                  <div className="pa-config-path">
+                    <span>保存位置</span>
+                    <code title={providerSettings?.configPath}>
+                      {providerSettings?.configPath ?? '正在读取…'}
+                    </code>
+                  </div>
+                  <div className="pa-modal-actions">
+                    <Button onClick={() => setProviderView('list')}>取消</Button>
+                    <Button type="primary" htmlType="submit" loading={providerSaving}>
+                      保存配置
+                    </Button>
+                  </div>
+                </Form>
+              )}
+            </section>
+          </Spin>
+        </div>
+      </Modal>
     </Layout>
   );
 }
@@ -1423,9 +1715,14 @@ function SidebarContent({
   activeTaskId,
   busy,
   creatingTask,
-  runtime,
   renamingTaskId,
   renameTitle,
+  renamingProjectId,
+  renameProjectName,
+  showArchived,
+  collapsedProjects,
+  onToggleArchived,
+  onToggleProjectCollapse,
   onProjectChange,
   onCreateProject,
   onCreateTask,
@@ -1436,7 +1733,15 @@ function SidebarContent({
   onSaveRename,
   onCancelRename,
   onArchiveTask,
-  onOpenInspector,
+  onStartProjectRename,
+  onRenameProjectNameChange,
+  onSaveProjectRename,
+  onCancelProjectRename,
+  onArchiveProject,
+  onRestoreProject,
+  onDeleteProject,
+  onOpenSettings,
+  version,
 }: {
   projects: ProjectSummary[];
   tasks: TaskSummary[];
@@ -1444,9 +1749,14 @@ function SidebarContent({
   activeTaskId?: string;
   busy: boolean;
   creatingTask: boolean;
-  runtime?: RuntimeInfo;
   renamingTaskId?: string;
   renameTitle: string;
+  renamingProjectId?: string;
+  renameProjectName: string;
+  showArchived: boolean;
+  collapsedProjects: Set<string>;
+  onToggleArchived: () => void;
+  onToggleProjectCollapse: (projectId: string) => void;
   onProjectChange: (projectId: string) => void;
   onCreateProject: () => void;
   onCreateTask: () => void;
@@ -1457,8 +1767,32 @@ function SidebarContent({
   onSaveRename: (taskId: string) => void;
   onCancelRename: () => void;
   onArchiveTask: (task: TaskSummary) => void;
-  onOpenInspector: () => void;
+  onStartProjectRename: (project: ProjectSummary) => void;
+  onRenameProjectNameChange: (name: string) => void;
+  onSaveProjectRename: (projectId: string) => void;
+  onCancelProjectRename: () => void;
+  onArchiveProject: (project: ProjectSummary) => void;
+  onRestoreProject: (projectId: string) => void;
+  onDeleteProject: (project: ProjectSummary) => void;
+  onOpenSettings: () => void;
+  version: string;
 }) {
+  const activeProjects = projects.filter((project) => !project.archived);
+  const archivedProjects = projects.filter((project) => project.archived);
+  const visibleProjects = showArchived ? projects : activeProjects;
+  const projectTasks = useMemo(() => {
+    const groups = new Map<string, TaskSummary[]>();
+    for (const project of projects) {
+      groups.set(
+        project.id,
+        tasks
+          .filter((task) => task.projectId === project.id)
+          .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)),
+      );
+    }
+    return groups;
+  }, [projects, tasks]);
+
   return (
     <div className="pa-sidebar-content">
       <div className="pa-brand">
@@ -1473,141 +1807,300 @@ function SidebarContent({
         </div>
       </div>
 
-      <div className="pa-project-switcher">
-        <span className="pa-field-label">当前项目</span>
-        <Space.Compact block>
-          <Select
-            value={activeProjectId}
-            placeholder="暂无项目"
-            disabled={!projects.length || busy}
-            options={projects.map((project) => ({
-              value: project.id,
-              label: project.name,
-              title: project.rootPath,
-            }))}
-            onChange={onProjectChange}
-            className="pa-project-select"
-          />
-          <Tooltip title="创建项目">
-            <Button icon={<FolderAddOutlined />} aria-label="创建项目" onClick={onCreateProject} />
-          </Tooltip>
-        </Space.Compact>
+      <div className="pa-sidebar-menu">
+        <Button
+          block
+          className="pa-sidebar-menu-btn"
+          icon={<PlusOutlined />}
+          loading={creatingTask}
+          disabled={busy || !activeProjectId}
+          onClick={() => onCreateTask()}
+        >
+          新建任务
+          <kbd>Ctrl K</kbd>
+        </Button>
       </div>
-
-      <Button
-        block
-        className="pa-new-task"
-        icon={<PlusOutlined />}
-        loading={creatingTask}
-        disabled={busy}
-        onClick={onCreateTask}
-      >
-        新建任务
-        <kbd>Ctrl K</kbd>
-      </Button>
 
       <div className="pa-section-heading">
-        <span>项目任务</span>
-        <Tooltip title="刷新项目和任务">
-          <Button type="text" size="small" icon={<ReloadOutlined />} onClick={onRefresh} />
-        </Tooltip>
+        <span>项目与任务</span>
+        <Space size={0}>
+          <Tooltip title="新建项目">
+            <Button
+              type="text"
+              size="small"
+              icon={<FolderAddOutlined />}
+              aria-label="新建项目"
+              onClick={onCreateProject}
+            />
+          </Tooltip>
+          <Tooltip title="刷新项目和任务">
+            <Button type="text" size="small" icon={<ReloadOutlined />} onClick={onRefresh} />
+          </Tooltip>
+        </Space>
       </div>
 
-      <div className="pa-task-list">
-        {tasks.length === 0 ? (
-          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="这个项目还没有任务" />
+      <div className="pa-project-list">
+        {visibleProjects.length === 0 ? (
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无项目" />
         ) : (
-          <List
-            split={false}
-            dataSource={tasks}
-            renderItem={(task) => (
-              <List.Item className="pa-task-list-item">
-                {renamingTaskId === task.id ? (
+          <ul className="pa-project-menu-list">
+            {visibleProjects.map((project) => (
+              <li className="pa-project-list-item" key={project.id}>
+                {renamingProjectId === project.id ? (
                   <div className="pa-task-rename">
                     <Input
                       autoFocus
-                      maxLength={200}
-                      value={renameTitle}
-                      onChange={(event) => onRenameTitleChange(event.target.value)}
-                      onPressEnter={() => onSaveRename(task.id)}
+                      maxLength={100}
+                      value={renameProjectName}
+                      onChange={(event) => onRenameProjectNameChange(event.target.value)}
+                      onPressEnter={() => onSaveProjectRename(project.id)}
                       onKeyDown={(event) => {
-                        if (event.key === 'Escape') onCancelRename();
+                        if (event.key === 'Escape') onCancelProjectRename();
                       }}
                     />
                     <Button
                       type="primary"
                       icon={<CheckCircleFilled />}
-                      aria-label="保存任务名称"
-                      onClick={() => onSaveRename(task.id)}
+                      aria-label="保存项目名称"
+                      onClick={() => onSaveProjectRename(project.id)}
                     />
                   </div>
                 ) : (
-                  <div className={`pa-task-row${task.id === activeTaskId ? ' active' : ''}`}>
-                    <button
-                      type="button"
-                      className="pa-task-main"
-                      disabled={busy}
-                      onClick={() => onOpenTask(task.id)}
+                  <>
+                    <div
+                      className={`pa-project-row${project.archived ? ' archived' : ''}${
+                        project.id === activeProjectId ? ' active' : ''
+                      }`}
                     >
-                      <strong>{task.title}</strong>
-                      <small>
-                        {relativeTime(task.updatedAt)} · {task.sessionId ? '可恢复' : '尚未开始'}
-                      </small>
-                    </button>
-                    <Dropdown
-                      trigger={['click']}
-                      menu={{
-                        items: [
-                          {
-                            key: 'rename',
-                            icon: <EditOutlined />,
-                            label: '重命名',
+                      <button
+                        type="button"
+                        className="pa-project-collapse"
+                        disabled={busy || project.archived}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onToggleProjectCollapse(project.id);
+                        }}
+                        aria-label={
+                          collapsedProjects.has(project.id)
+                            ? `展开项目 ${project.name} 的任务`
+                            : `折叠项目 ${project.name} 的任务`
+                        }
+                      >
+                        <CaretRightOutlined
+                          className={collapsedProjects.has(project.id) ? '' : 'expanded'}
+                        />
+                      </button>
+                      <button
+                        type="button"
+                        className="pa-project-main"
+                        disabled={busy || project.archived}
+                        onClick={() => onProjectChange(project.id)}
+                        title={project.rootPath}
+                      >
+                        <strong>{project.name}</strong>
+                      </button>
+                      <Dropdown
+                        trigger={['click']}
+                        menu={{
+                          items: [
+                            ...(project.archived
+                              ? [
+                                  {
+                                    key: 'restore',
+                                    icon: <ReloadOutlined />,
+                                    label: '恢复项目',
+                                  },
+                                ]
+                              : [
+                                  {
+                                    key: 'rename',
+                                    icon: <EditOutlined />,
+                                    label: '重命名',
+                                  },
+                                  {
+                                    key: 'archive',
+                                    icon: <DeleteOutlined />,
+                                    danger: true,
+                                    label: '归档',
+                                  },
+                                ]),
+                            {
+                              key: 'delete',
+                              icon: <DeleteOutlined />,
+                              danger: true,
+                              label: '彻底删除',
+                            },
+                          ],
+                          onClick: ({ key }) => {
+                            if (key === 'rename') onStartProjectRename(project);
+                            else if (key === 'archive') onArchiveProject(project);
+                            else if (key === 'restore') onRestoreProject(project.id);
+                            else if (key === 'delete') onDeleteProject(project);
                           },
-                          {
-                            key: 'archive',
-                            icon: <DeleteOutlined />,
-                            danger: true,
-                            label: '归档',
-                          },
-                        ],
-                        onClick: ({ key }) => {
-                          if (key === 'rename') onStartRename(task);
-                          else onArchiveTask(task);
-                        },
-                      }}
-                    >
-                      <Button
-                        type="text"
-                        size="small"
-                        icon={<MoreOutlined />}
-                        disabled={busy}
-                        aria-label={`任务 ${task.title} 的更多操作`}
-                      />
-                    </Dropdown>
-                  </div>
+                        }}
+                      >
+                        <Button
+                          type="text"
+                          size="small"
+                          icon={<MoreOutlined />}
+                          disabled={busy}
+                          aria-label={`项目 ${project.name} 的更多操作`}
+                        />
+                      </Dropdown>
+                    </div>
+                    {!project.archived && !collapsedProjects.has(project.id) && (
+                      <div className="pa-project-tasks">
+                        {projectTasks.get(project.id)?.length ? (
+                          (projectTasks.get(project.id) ?? []).map((task) => (
+                            <TaskMenuItem
+                              key={task.id}
+                              task={task}
+                              activeTaskId={activeTaskId}
+                              busy={busy}
+                              renamingTaskId={renamingTaskId}
+                              renameTitle={renameTitle}
+                              onOpenTask={onOpenTask}
+                              onStartRename={onStartRename}
+                              onRenameTitleChange={onRenameTitleChange}
+                              onSaveRename={onSaveRename}
+                              onCancelRename={onCancelRename}
+                              onArchiveTask={onArchiveTask}
+                            />
+                          ))
+                        ) : (
+                          <div className="pa-project-tasks-empty">
+                            <Text type="secondary">暂无任务</Text>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </>
                 )}
-              </List.Item>
-            )}
-          />
+              </li>
+            ))}
+          </ul>
+        )}
+        {archivedProjects.length > 0 && (
+          <Button
+            type="text"
+            size="small"
+            className="pa-archived-toggle"
+            onClick={onToggleArchived}
+          >
+            {showArchived ? '收起已归档' : `查看已归档（${archivedProjects.length}）`}
+          </Button>
         )}
       </div>
 
       <div className="pa-sidebar-footer">
-        <Badge
-          status={runtime?.configured ? 'success' : 'error'}
-          text={
-            <div className="pa-runtime-mini">
-              <strong>{runtime?.model ?? '正在连接'}</strong>
-              <small>{runtime?.providerName ?? runtime?.provider ?? '等待本地服务'}</small>
-            </div>
-          }
-        />
-        <Button
-          type="text"
-          icon={<MoreOutlined />}
-          aria-label="打开运行详情"
-          onClick={onOpenInspector}
-        />
+        <div className="pa-sidebar-settings">
+          <Text type="secondary">v{version}</Text>
+          <Button
+            type="text"
+            icon={<SettingOutlined />}
+            aria-label="打开设置"
+            onClick={onOpenSettings}
+          >
+            设置
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TaskMenuItem({
+  task,
+  activeTaskId,
+  busy,
+  renamingTaskId,
+  renameTitle,
+  onOpenTask,
+  onStartRename,
+  onRenameTitleChange,
+  onSaveRename,
+  onCancelRename,
+  onArchiveTask,
+}: {
+  task: TaskSummary;
+  activeTaskId?: string;
+  busy: boolean;
+  renamingTaskId?: string;
+  renameTitle: string;
+  onOpenTask: (taskId: string) => void;
+  onStartRename: (task: TaskSummary) => void;
+  onRenameTitleChange: (title: string) => void;
+  onSaveRename: (taskId: string) => void;
+  onCancelRename: () => void;
+  onArchiveTask: (task: TaskSummary) => void;
+}) {
+  return (
+    <div className="pa-task-list-item">
+      <div className={`pa-task-row${task.id === activeTaskId ? ' active' : ''}`}>
+        {renamingTaskId === task.id ? (
+          <div className="pa-task-rename">
+            <Input
+              autoFocus
+              maxLength={200}
+              value={renameTitle}
+              onChange={(event) => onRenameTitleChange(event.target.value)}
+              onPressEnter={() => onSaveRename(task.id)}
+              onKeyDown={(event) => {
+                if (event.key === 'Escape') onCancelRename();
+              }}
+            />
+            <Button
+              type="primary"
+              icon={<CheckCircleFilled />}
+              aria-label="保存任务名称"
+              onClick={() => onSaveRename(task.id)}
+            />
+          </div>
+        ) : (
+          <>
+            <button
+              type="button"
+              className="pa-task-main"
+              disabled={busy}
+              onClick={() => onOpenTask(task.id)}
+              title={`${task.title} · ${relativeTime(task.updatedAt)} · ${
+                task.sessionId ? '可恢复' : '尚未开始'
+              }`}
+            >
+              <strong>{task.title}</strong>
+            </button>
+            <Dropdown
+              trigger={['click']}
+              menu={{
+                items: [
+                  {
+                    key: 'rename',
+                    icon: <EditOutlined />,
+                    label: '重命名',
+                  },
+                  {
+                    key: 'archive',
+                    icon: <DeleteOutlined />,
+                    danger: true,
+                    label: '归档',
+                  },
+                ],
+                onClick: ({ key }) => {
+                  if (key === 'rename') onStartRename(task);
+                  else onArchiveTask(task);
+                },
+              }}
+            >
+              <Button
+                type="text"
+                size="small"
+                icon={<MoreOutlined />}
+                disabled={busy}
+                aria-label={`任务 ${task.title} 的更多操作`}
+              />
+            </Dropdown>
+          </>
+        )}
       </div>
     </div>
   );
@@ -1739,6 +2232,7 @@ function Composer({
   prompt,
   enabled,
   busy,
+  creatingTask,
   planActive,
   permissionMode,
   pendingPermission,
@@ -1763,6 +2257,7 @@ function Composer({
   prompt: string;
   enabled: boolean;
   busy: boolean;
+  creatingTask: boolean;
   planActive: boolean;
   permissionMode: PermissionMode;
   pendingPermission?: PermissionRequest;
@@ -1847,7 +2342,7 @@ function Composer({
         <TextArea
           id="prompt-input"
           value={prompt}
-          disabled={!enabled}
+          disabled={!enabled || creatingTask}
           autoSize={{ minRows: 2, maxRows: 8 }}
           placeholder={placeholder}
           onChange={(event) => onPromptChange(event.target.value)}
@@ -1863,14 +2358,14 @@ function Composer({
             <Select
               value={permissionMode}
               options={permissionOptions}
-              disabled={!enabled || busy}
+              disabled={!enabled || busy || creatingTask}
               popupMatchSelectWidth={false}
               aria-label="设置工具权限"
               onChange={(value: PermissionMode) => onPermissionModeChange(value)}
             />
             <Segmented
               value={planActive ? 'plan' : 'execute'}
-              disabled={!enabled || busy}
+              disabled={!enabled || busy || creatingTask}
               options={[
                 { value: 'execute', label: '执行' },
                 { value: 'plan', label: '计划' },
@@ -1910,7 +2405,8 @@ function Composer({
                 type="primary"
                 shape="circle"
                 icon={<SendOutlined />}
-                disabled={!enabled || !prompt.trim()}
+                loading={creatingTask}
+                disabled={!enabled || creatingTask || !prompt.trim()}
                 aria-label="发送消息"
                 onClick={() => onSubmit()}
               />
@@ -1968,27 +2464,25 @@ function Inspector({
               showInfo={false}
               status={state.planProgress.failed ? 'exception' : 'active'}
             />
-            <List
-              size="small"
-              dataSource={state.plan.steps}
-              renderItem={(step) => (
-                <List.Item>
-                  <List.Item.Meta
-                    avatar={
-                      <Avatar size={24} className={`pa-plan-step ${step.status}`}>
-                        {step.status === 'completed'
-                          ? '✓'
-                          : step.status === 'failed'
-                            ? '!'
-                            : step.order}
-                      </Avatar>
-                    }
-                    title={step.title}
-                    description={step.description}
-                  />
-                </List.Item>
-              )}
-            />
+            <div className="pa-inspector-list">
+              {state.plan.steps.map((step) => (
+                <div className="pa-inspector-list-item" key={`${step.order}-${step.title}`}>
+                  <Avatar size={24} className={`pa-plan-step ${step.status}`}>
+                    {step.status === 'completed'
+                      ? '✓'
+                      : step.status === 'failed'
+                        ? '!'
+                        : step.order}
+                  </Avatar>
+                  <div className="pa-inspector-list-copy">
+                    <div className="pa-inspector-list-title">{step.title}</div>
+                    {step.description && (
+                      <div className="pa-inspector-list-description">{step.description}</div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
             {state.planActive && state.plan.status === 'draft' && (
               <Button type="primary" block onClick={onApprovePlan}>
                 批准并开始执行
@@ -1999,9 +2493,8 @@ function Inspector({
       </Card>
 
       <Card size="small" title="能力">
-        <List
-          size="small"
-          dataSource={[
+        <div className="pa-inspector-list">
+          {[
             {
               icon: <BulbOutlined />,
               name: 'Memory',
@@ -2021,17 +2514,16 @@ function Inspector({
                 ? `${state.runtime.plugins.length} 个已加载`
                 : '未加载插件',
             },
-          ]}
-          renderItem={(item) => (
-            <List.Item>
-              <List.Item.Meta
-                avatar={<Avatar icon={item.icon} />}
-                title={item.name}
-                description={item.value}
-              />
-            </List.Item>
-          )}
-        />
+          ].map((item) => (
+            <div className="pa-inspector-list-item" key={item.name}>
+              <Avatar icon={item.icon} />
+              <div className="pa-inspector-list-copy">
+                <div className="pa-inspector-list-title">{item.name}</div>
+                <div className="pa-inspector-list-description">{item.value}</div>
+              </div>
+            </div>
+          ))}
+        </div>
       </Card>
 
       <Card size="small" title="会话">
@@ -2102,6 +2594,29 @@ function upsertById<T extends { id: string }>(items: T[], value: T): T[] {
   const index = items.findIndex((item) => item.id === value.id);
   if (index === -1) return [value, ...items];
   return items.map((item, itemIndex) => (itemIndex === index ? value : item));
+}
+
+function loadStoredIds(key: string): Set<string> {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(parsed.filter((value): value is string => typeof value === 'string'));
+  } catch {
+    return new Set();
+  }
+}
+
+function saveStoredIds(key: string, ids: Set<string>): void {
+  localStorage.setItem(key, JSON.stringify([...ids]));
+}
+
+function toggleId(current: Set<string>, id: string): Set<string> {
+  const next = new Set(current);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  return next;
 }
 
 function directoryEntryToNode(entry: DirectoryEntryInfo): DirectoryTreeNode {
@@ -2207,12 +2722,14 @@ function buildRuntimeModelGroups(runtime?: RuntimeInfo): RuntimeModelGroup[] {
     groups.set(model.provider, group);
   }
 
-  if (runtime.provider && runtime.model && !findRuntimeModel(runtime, runtime.provider, runtime.model)) {
+  if (
+    runtime.provider &&
+    runtime.model &&
+    !findRuntimeModel(runtime, runtime.provider, runtime.model)
+  ) {
     const group = groups.get(runtime.provider) ?? {
       label:
-        runtime.providerName ||
-        providerLabels[runtime.provider as ProviderId] ||
-        runtime.provider,
+        runtime.providerName || providerLabels[runtime.provider as ProviderId] || runtime.provider,
       options: [],
     };
     group.options.unshift({
@@ -2241,6 +2758,13 @@ function getModelSelectWidth(label: string): number {
 
 function isProviderId(value: string): value is ProviderId {
   return value === 'openai' || value === 'anthropic' || value === 'deepseek' || value === 'ollama';
+}
+
+function getConfiguredProviders(settings: ProviderSettingsInfo | null): ProviderId[] {
+  if (!settings) return [];
+  return (Object.keys(providerLabels) as ProviderId[]).filter(
+    (provider) => settings.providers[provider].configured,
+  );
 }
 
 function currentTime(): string {

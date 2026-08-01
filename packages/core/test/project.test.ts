@@ -64,3 +64,104 @@ test('project roots must exist and cannot be registered twice', async () => {
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test('projects can be archived, restored, renamed, and deleted', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'personal-agent-project-lifecycle-'));
+  const firstRoot = join(directory, 'alpha');
+  const secondRoot = join(directory, 'beta');
+  const storagePath = join(directory, 'state', 'projects.json');
+  await Promise.all([mkdir(firstRoot), mkdir(secondRoot)]);
+
+  try {
+    const manager = new ProjectManager(storagePath);
+    await manager.initialize();
+    const alpha = await manager.createProject({ name: 'Alpha', rootPath: firstRoot });
+    const beta = await manager.createProject({ name: 'Beta', rootPath: secondRoot });
+    await manager.createTask({ projectId: alpha.id, title: 'Alpha 任务' });
+    await manager.createTask({ projectId: beta.id, title: 'Beta 任务' });
+
+    // New projects are active by default.
+    assert.equal(alpha.archived, false);
+    assert.deepEqual(
+      manager
+        .listProjects()
+        .map((project) => project.id)
+        .sort(),
+      [alpha.id, beta.id].sort(),
+    );
+
+    // Archiving hides the project from the default listing.
+    await manager.archiveProject(alpha.id);
+    assert.deepEqual(
+      manager.listProjects().map((project) => project.id),
+      [beta.id],
+    );
+    assert.deepEqual(
+      manager
+        .listProjects({ includeArchived: true })
+        .map((project) => project.id)
+        .sort(),
+      [alpha.id, beta.id].sort(),
+    );
+    assert.equal(manager.getProject(alpha.id)?.archived, true);
+
+    // Restoring brings it back.
+    await manager.restoreProject(alpha.id);
+    assert.deepEqual(
+      manager
+        .listProjects()
+        .map((project) => project.id)
+        .sort(),
+      [alpha.id, beta.id].sort(),
+    );
+
+    // Renaming updates the stored name.
+    await manager.renameProject(alpha.id, 'Alpha 2');
+    assert.equal(manager.getProject(alpha.id)?.name, 'Alpha 2');
+
+    // Deleting removes the project and all of its tasks.
+    await manager.deleteProject(alpha.id);
+    assert.equal(manager.getProject(alpha.id), null);
+    assert.equal(manager.getTask('task-missing'), null);
+    assert.deepEqual(
+      manager.listProjects().map((project) => project.id),
+      [beta.id],
+    );
+
+    // The lifecycle survives a reload.
+    const restored = new ProjectManager(storagePath);
+    await restored.initialize();
+    assert.equal(restored.getProject(beta.id)?.archived, false);
+    assert.equal(restored.listProjects().length, 1);
+    assert.equal(restored.listTasks(beta.id).length, 1);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('tasks are direct project children and archive independently', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'personal-agent-flat-tasks-'));
+  const root = join(directory, 'workspace');
+  const storagePath = join(directory, 'projects.json');
+  await mkdir(root);
+
+  try {
+    const manager = new ProjectManager(storagePath);
+    await manager.initialize();
+    const project = await manager.createProject({ name: 'Flat', rootPath: root });
+    const first = await manager.createTask({ projectId: project.id, title: '任务 A' });
+    const second = await manager.createTask({ projectId: project.id, title: '任务 B' });
+
+    assert.equal(manager.listTasks(project.id).length, 2);
+    await manager.archiveTask(first.id);
+    assert.equal(manager.listTasks(project.id).length, 1);
+    assert.equal(manager.getTask(second.id)?.status, 'active');
+
+    const restored = new ProjectManager(storagePath);
+    await restored.initialize();
+    assert.equal(restored.listTasks(project.id).length, 1);
+    assert.equal(restored.listTasks(project.id)[0].id, second.id);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

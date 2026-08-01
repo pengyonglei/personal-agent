@@ -11,6 +11,7 @@ export interface Project {
   id: string;
   name: string;
   rootPath: string;
+  archived: boolean;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -34,7 +35,11 @@ interface SerializedProjectStore {
     Omit<Project, 'createdAt' | 'updatedAt'> & { createdAt: string; updatedAt: string }
   >;
   tasks: Array<
-    Omit<ProjectTask, 'createdAt' | 'updatedAt'> & { createdAt: string; updatedAt: string }
+    Omit<ProjectTask, 'createdAt' | 'updatedAt'> & {
+      parentTaskId?: string;
+      createdAt: string;
+      updatedAt: string;
+    }
   >;
 }
 
@@ -55,6 +60,7 @@ export class ProjectManager {
       for (const project of raw.projects ?? []) {
         this.projects.set(project.id, {
           ...project,
+          archived: project.archived === true,
           createdAt: new Date(project.createdAt),
           updatedAt: new Date(project.updatedAt),
         });
@@ -62,7 +68,10 @@ export class ProjectManager {
       for (const task of raw.tasks ?? []) {
         if (!this.projects.has(task.projectId)) continue;
         this.tasks.set(task.id, {
-          ...task,
+          id: task.id,
+          projectId: task.projectId,
+          title: task.title,
+          sessionId: task.sessionId,
           permissionMode: normalizePermissionMode(task.permissionMode),
           status: task.status === 'archived' ? 'archived' : 'active',
           createdAt: new Date(task.createdAt),
@@ -76,7 +85,7 @@ export class ProjectManager {
 
   async ensureDefaultProject(rootPath: string, name?: string): Promise<Project> {
     const canonicalRoot = await validateRootPath(rootPath);
-    const existing = this.listProjects().find((project) =>
+    const existing = this.listProjects({ includeArchived: true }).find((project) =>
       samePath(project.rootPath, canonicalRoot),
     );
     if (existing) return existing;
@@ -89,7 +98,9 @@ export class ProjectManager {
   async createProject(input: { name: string; rootPath: string }): Promise<Project> {
     const name = validateText(input.name, '项目名称', 100);
     const rootPath = await validateRootPath(input.rootPath);
-    const duplicate = this.listProjects().find((project) => samePath(project.rootPath, rootPath));
+    const duplicate = this.listProjects({ includeArchived: true }).find((project) =>
+      samePath(project.rootPath, rootPath),
+    );
     if (duplicate) {
       throw new Error(`该目录已经属于项目“${duplicate.name}”`);
     }
@@ -98,6 +109,7 @@ export class ProjectManager {
       id: `project-${generateId()}`,
       name,
       rootPath,
+      archived: false,
       createdAt: now,
       updatedAt: now,
     };
@@ -106,8 +118,9 @@ export class ProjectManager {
     return cloneProject(project);
   }
 
-  listProjects(): Project[] {
+  listProjects(options: { includeArchived?: boolean } = {}): Project[] {
     return [...this.projects.values()]
+      .filter((project) => options.includeArchived || !project.archived)
       .sort((left, right) => right.updatedAt.getTime() - left.updatedAt.getTime())
       .map(cloneProject);
   }
@@ -115,6 +128,46 @@ export class ProjectManager {
   getProject(projectId: string): Project | null {
     const project = this.projects.get(projectId);
     return project ? cloneProject(project) : null;
+  }
+
+  async archiveProject(projectId: string): Promise<Project> {
+    const project = this.requireProject(projectId);
+    if (project.archived) return cloneProject(project);
+    project.archived = true;
+    project.updatedAt = new Date();
+    await this.persist();
+    return cloneProject(project);
+  }
+
+  async restoreProject(projectId: string): Promise<Project> {
+    const project = this.requireProject(projectId);
+    project.archived = false;
+    project.updatedAt = new Date();
+    await this.persist();
+    return cloneProject(project);
+  }
+
+  async renameProject(projectId: string, name: string): Promise<Project> {
+    const project = this.requireProject(projectId);
+    project.name = validateText(name, '项目名称', 100);
+    project.updatedAt = new Date();
+    await this.persist();
+    return cloneProject(project);
+  }
+
+  async deleteProject(projectId: string): Promise<void> {
+    const project = this.requireProject(projectId);
+    for (const [taskId, task] of this.tasks) {
+      if (task.projectId === project.id) this.tasks.delete(taskId);
+    }
+    this.projects.delete(project.id);
+    await this.persist();
+  }
+
+  private requireProject(projectId: string): Project {
+    const project = this.projects.get(projectId);
+    if (!project) throw new Error(`项目不存在: ${projectId}`);
+    return project;
   }
 
   async createTask(input: {

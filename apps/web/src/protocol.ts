@@ -23,6 +23,10 @@ export type ClientMessage =
   | { type: 'list_projects' }
   | { type: 'create_project'; name: string; rootPath: string }
   | { type: 'select_project'; projectId: string }
+  | { type: 'archive_project'; projectId: string }
+  | { type: 'restore_project'; projectId: string }
+  | { type: 'delete_project'; projectId: string }
+  | { type: 'rename_project'; projectId: string; name: string }
   | { type: 'create_task'; projectId: string }
   | { type: 'rename_task'; taskId: string; title: string }
   | { type: 'open_task'; taskId: string }
@@ -71,6 +75,7 @@ export interface ProjectSummary {
   id: string;
   name: string;
   rootPath: string;
+  archived: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -103,11 +108,12 @@ export type ServerMessage =
     }
   | {
       type: 'task_list';
-      projectId: string;
       tasks: TaskSummary[];
       activeTaskId?: string;
     }
   | { type: 'project_changed'; project: ProjectSummary }
+  | { type: 'project_archived'; project: ProjectSummary }
+  | { type: 'project_deleted'; projectId: string }
   | { type: 'task_changed'; task: TaskSummary }
   | { type: 'task_renamed'; task: TaskSummary }
   | { type: 'history'; sessionId: string; messages: UnifiedMessage[] }
@@ -195,9 +201,33 @@ export function parseClientMessage(raw: string): ClientMessage {
         throw new Error('select_project.projectId 不能为空');
       }
       return { type: 'select_project', projectId: message.projectId.trim() };
+    case 'archive_project':
+    case 'restore_project':
+    case 'delete_project':
+      if (typeof message.projectId !== 'string' || !message.projectId.trim()) {
+        throw new Error(`${message.type}.projectId 不能为空`);
+      }
+      return { type: message.type, projectId: message.projectId.trim() };
+    case 'rename_project':
+      if (
+        typeof message.projectId !== 'string' ||
+        !message.projectId.trim() ||
+        typeof message.name !== 'string' ||
+        !message.name.trim()
+      ) {
+        throw new Error('rename_project 需要 projectId 和 name');
+      }
+      return {
+        type: 'rename_project',
+        projectId: message.projectId.trim(),
+        name: message.name.trim(),
+      };
     case 'create_task':
       if (typeof message.projectId !== 'string' || !message.projectId.trim()) {
         throw new Error('create_task.projectId 不能为空');
+      }
+      if (message.parentTaskId !== undefined) {
+        throw new Error('任务只能直接创建在项目下，不支持子任务');
       }
       return {
         type: 'create_task',

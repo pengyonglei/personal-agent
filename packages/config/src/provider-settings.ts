@@ -69,6 +69,37 @@ export async function saveProviderSettings(
   return targetPath;
 }
 
+export async function removeProviderSettings(
+  provider: ProviderId,
+  activeProvider: ProviderId | undefined,
+  configPath?: string,
+): Promise<string> {
+  const targetPath = resolveWritableConfigPath(configPath);
+  let document: Record<string, unknown> = {};
+
+  if (existsSync(targetPath)) {
+    const parsed = parseYaml(await readFile(targetPath, 'utf8'));
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      document = parsed as Record<string, unknown>;
+    }
+  }
+
+  const providers =
+    document.providers &&
+    typeof document.providers === 'object' &&
+    !Array.isArray(document.providers)
+      ? (document.providers as Record<string, unknown>)
+      : {};
+  delete providers[provider];
+  if (activeProvider) providers.active = activeProvider;
+  else delete providers.active;
+  document.providers = providers;
+
+  await mkdir(dirname(targetPath), { recursive: true });
+  await writeFile(targetPath, stringifyYaml(document), 'utf8');
+  return targetPath;
+}
+
 function setOptionalField(
   target: Record<string, unknown>,
   key: string,

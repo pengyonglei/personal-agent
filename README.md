@@ -186,6 +186,12 @@ corepack enable
 corepack prepare pnpm@11.17.0 --activate
 ```
 
+也可以直接使用npm安装
+
+```bash
+npm install --g pnpm
+```
+
 ### 安装依赖
 
 ```bash

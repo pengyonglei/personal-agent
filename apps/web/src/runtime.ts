@@ -1,6 +1,7 @@
 import {
   appConfigSchema,
   loadConfig,
+  removeProviderSettings,
   resolveWritableConfigPath,
   saveProviderSettings,
   type AppConfig,
@@ -31,12 +32,7 @@ import {
   type ToolExecutor,
   type ToolRegistry,
 } from '@personal-agent/tool';
-import type {
-  PermissionMode,
-  RuntimeInfo,
-  ServerMessage,
-  SessionSummary,
-} from './protocol';
+import type { PermissionMode, RuntimeInfo, ServerMessage, SessionSummary } from './protocol';
 
 const log = createLogger('web-runtime');
 const SAFE_TOOLS = ['read_file', 'list_directory', 'glob', 'grep', 'todo_write', 'ask_user'];
@@ -175,7 +171,7 @@ export class WebAgentRuntime {
 
   private async initialize(): Promise<void> {
     await this.projects.initialize();
-    const projectStoreWasEmpty = this.projects.listProjects().length === 0;
+    const projectStoreWasEmpty = this.projects.listProjects({ includeArchived: true }).length === 0;
     const defaultProject = await this.projects.ensureDefaultProject(this.workingDirectory);
     if (projectStoreWasEmpty) {
       await this.importLegacySessions(defaultProject);
@@ -308,7 +304,9 @@ export class WebAgentRuntime {
             reasoningEffort: reasoningSupported
               ? resolveProviderReasoningEffort(providerId, this.config.providers[providerId])
               : 'off',
-            reasoningOptions: reasoningSupported ? reasoningOptionsForProvider(providerId) : ['off'],
+            reasoningOptions: reasoningSupported
+              ? reasoningOptionsForProvider(providerId)
+              : ['off'],
           };
         }),
       ),
@@ -354,8 +352,7 @@ export class WebAgentRuntime {
               configured?.defaultModel ?? defaults.defaultModel,
             ),
             thinkingEffort:
-              configured?.thinkingEffort ??
-              (id === 'deepseek' ? defaults.thinkingEffort : 'off'),
+              configured?.thinkingEffort ?? (id === 'deepseek' ? defaults.thinkingEffort : 'off'),
             reasoningSupported: id === 'deepseek',
           },
         ];
@@ -456,12 +453,61 @@ export class WebAgentRuntime {
     await previousRegistry?.disposeAll();
   }
 
+  async removeProvider(providerId: ProviderId): Promise<void> {
+    if ([...this.conversations.values()].some((conversation) => conversation.isBusy)) {
+      throw new Error('Agent 正在运行，请等待当前请求完成后再删除模型供应商。');
+    }
+    if (!this.getProviderSettings().providers[providerId].configured) {
+      throw new Error(`${providerLabel(providerId)} 尚未配置。`);
+    }
+
+    const nextConfigValue = structuredClone(this.config) as unknown as Record<string, unknown>;
+    const providers = nextConfigValue.providers as Record<string, unknown>;
+    delete providers[providerId];
+    if (providers.active === providerId) delete providers.active;
+
+    const preliminaryConfig = appConfigSchema.parse(nextConfigValue);
+    const nextRegistry = await ProviderRegistry.fromConfig(preliminaryConfig);
+    const nextProvider =
+      nextRegistry.getActiveProviderId() !== null ? nextRegistry.getActive() : null;
+    if (nextProvider) providers.active = nextProvider.providerId;
+    else delete providers.active;
+    const nextConfig = appConfigSchema.parse(nextConfigValue);
+
+    try {
+      await removeProviderSettings(
+        providerId,
+        nextProvider?.providerId as ProviderId | undefined,
+        this.configPath,
+      );
+    } catch (error) {
+      await nextRegistry.disposeAll();
+      throw error;
+    }
+
+    const previousRegistry = this.providerRegistry;
+    this.config = nextConfig;
+    this.providerRegistry = nextRegistry;
+    this.provider = nextProvider;
+    this.initializationError = nextProvider
+      ? undefined
+      : '未配置 LLM Provider。请在设置中添加一个模型供应商。';
+
+    if (nextProvider) {
+      for (const conversation of this.conversations.values()) {
+        await conversation.replaceProvider(nextProvider);
+      }
+    }
+    await previousRegistry?.disposeAll();
+  }
+
   async configureRuntimeModel(input: RuntimeModelSettingsInput): Promise<void> {
     if ([...this.conversations.values()].some((conversation) => conversation.isBusy)) {
       throw new Error('Agent 正在运行，请等待当前请求完成后再切换模型。');
     }
     if (!this.provider) throw new Error(this.initializationError ?? '未配置 LLM Provider。');
-    if (!this.providerRegistry) throw new Error(this.initializationError ?? '未配置 LLM Provider。');
+    if (!this.providerRegistry)
+      throw new Error(this.initializationError ?? '未配置 LLM Provider。');
     const registry = this.providerRegistry;
 
     const model = input.model.trim();
@@ -605,12 +651,7 @@ export class WebAgentRuntime {
 
     const configured = this.permissionManager.check(toolName, params);
     if (configured === 'allow') return true;
-    if (
-      configured === 'ask' &&
-      tool &&
-      !tool.requiresPermission &&
-      !tool.isDangerous
-    ) {
+    if (configured === 'ask' && tool && !tool.requiresPermission && !tool.isDangerous) {
       return true;
     }
 
@@ -1206,11 +1247,7 @@ function getProviderDefaults(provider: ProviderId): {
       return {
         baseURL: '',
         defaultModel: 'claude-sonnet-5-20251001',
-        models: [
-          'claude-sonnet-5-20251001',
-          'claude-opus-5-20251001',
-          'claude-fable-5-20251001',
-        ],
+        models: ['claude-sonnet-5-20251001', 'claude-opus-5-20251001', 'claude-fable-5-20251001'],
         thinkingEffort: 'off',
       };
     case 'openai':
@@ -1263,17 +1300,13 @@ function normalizeRuntimeReasoningEffort(
 }
 
 function normalizeModelList(models: string[], defaultModel: string): string[] {
-  return [
-    defaultModel,
-    ...models.map((model) => model.trim()).filter(Boolean),
-  ].filter((model, index, values) => values.indexOf(model) === index);
+  return [defaultModel, ...models.map((model) => model.trim()).filter(Boolean)].filter(
+    (model, index, values) => values.indexOf(model) === index,
+  );
 }
 
 function normalizeProviderModel(provider: ProviderId, model: string): string {
-  if (
-    provider === 'deepseek' &&
-    (model === 'deepseek-chat' || model === 'deepseek-reasoner')
-  ) {
+  if (provider === 'deepseek' && (model === 'deepseek-chat' || model === 'deepseek-reasoner')) {
     return 'deepseek-v4-flash';
   }
   return model;
@@ -1285,10 +1318,7 @@ function normalizeRuntimeConfig(config: AppConfig): AppConfig {
   if (!deepseek) return next;
 
   const legacyModel = deepseek.defaultModel;
-  deepseek.defaultModel = normalizeProviderModel(
-    'deepseek',
-    legacyModel ?? 'deepseek-v4-flash',
-  );
+  deepseek.defaultModel = normalizeProviderModel('deepseek', legacyModel ?? 'deepseek-v4-flash');
   deepseek.models = normalizeModelList(
     (deepseek.models ?? ['deepseek-v4-flash', 'deepseek-v4-pro']).map((model) =>
       normalizeProviderModel('deepseek', model),
