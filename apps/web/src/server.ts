@@ -25,7 +25,7 @@ const VERSION = '0.1.0';
 const UNTITLED_TASK_TITLE = '新任务';
 const sourceDirectory = dirname(fileURLToPath(import.meta.url));
 const webDirectory = resolve(sourceDirectory, '..');
-const clientBuildDirectory = resolve(webDirectory, 'dist/client');
+const defaultClientBuildDirectory = resolve(webDirectory, 'dist/client');
 const viteConfigPath = resolve(webDirectory, 'vite.config.ts');
 
 interface PendingPermission {
@@ -47,6 +47,7 @@ export interface WebServerOptions {
   configPath?: string;
   projectStoragePath?: string;
   sessionsDirectory?: string;
+  clientBuildDirectory?: string;
   viteDev?: boolean;
 }
 
@@ -61,6 +62,7 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
   const host = options.host ?? process.env.PERSONAL_AGENT_WEB_HOST ?? '127.0.0.1';
   const port = options.port ?? Number(process.env.PORT ?? 5678);
   const authToken = options.authToken ?? process.env.PERSONAL_AGENT_WEB_TOKEN;
+  const clientBuildDirectory = options.clientBuildDirectory ?? defaultClientBuildDirectory;
 
   if (!isLoopback(host) && !authToken) {
     throw new Error('远程监听必须设置 PERSONAL_AGENT_WEB_TOKEN；本地使用请监听 127.0.0.1。');
@@ -199,7 +201,10 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
   });
 
   if (options.viteDev) {
-    const { createServer: createViteServer } = await import('vite');
+    // Keep Vite out of desktop/production bundles while retaining the dev middleware.
+    const { createServer: createViteServer } = (await import(
+      resolveOptionalModuleName('vite')
+    )) as typeof import('vite');
     viteDevServer = await createViteServer({
       configFile: viteConfigPath,
       server: {
@@ -920,6 +925,10 @@ function isLoopback(host: string): boolean {
 
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function resolveOptionalModuleName(moduleName: string): string {
+  return moduleName;
 }
 
 const isEntrypoint =

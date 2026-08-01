@@ -759,7 +759,12 @@ function AgentWorkspace({
       const pageParams = new URLSearchParams(location.search);
       const token =
         pageParams.get('token') ?? sessionStorage.getItem('personal-agent-token') ?? undefined;
-      if (token) sessionStorage.setItem('personal-agent-token', token);
+      if (token) {
+        sessionStorage.setItem('personal-agent-token', token);
+        if (pageParams.has('token')) {
+          history.replaceState(null, '', `${location.pathname}${location.hash}`);
+        }
+      }
       const socketParams = new URLSearchParams();
       if (token) socketParams.set('token', token);
       const preferredTask = localStorage.getItem('personal-agent-active-task');
@@ -1159,8 +1164,21 @@ function AgentWorkspace({
   }
 
   async function openDirectoryPicker() {
+    const initialDirectory = projectForm.getFieldValue('rootPath')?.trim() || undefined;
+    if (window.personalAgentDesktop) {
+      try {
+        const directory = await window.personalAgentDesktop.selectDirectory(initialDirectory);
+        if (!directory) return;
+        projectForm.setFieldValue('rootPath', directory);
+        await projectForm.validateFields(['rootPath']);
+      } catch (error) {
+        messageApi.error(formatError(error));
+      }
+      return;
+    }
+
     setDirectoryPickerOpen(true);
-    setSelectedDirectory(projectForm.getFieldValue('rootPath')?.trim() || undefined);
+    setSelectedDirectory(initialDirectory);
     if (directoryTreeData.length === 0) {
       await loadDirectoryChildren();
     }

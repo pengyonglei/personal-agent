@@ -141,7 +141,7 @@ personal-agent/
 ├─ apps/
 │  ├─ cli/
 │  │  └─ src/index.ts            # CLI 入口、运行时组装、Slash 命令和 TUI 启动
-│  └─ web/
+│  ├─ web/
 │     ├─ client/
 │     │  └─ src/                 # React Web UI
 │     ├─ src/
@@ -150,6 +150,10 @@ personal-agent/
 │     │  └─ protocol.ts          # 前后端 WebSocket 协议
 │     ├─ test/                   # Web 协议与服务测试
 │     └─ vite.config.ts
+│  └─ desktop/
+│     ├─ src/main.ts             # Electron 主进程与内嵌 Web Server
+│     ├─ src/preload.ts          # 受限的桌面能力桥接
+│     └─ forge.config.cjs        # Windows 安装包配置
 ├─ packages/
 │  ├─ shared/                    # 公共类型与工具函数
 │  ├─ config/                    # 配置 Schema、默认值和加载器
@@ -241,6 +245,9 @@ pnpm cli
 
 # 启动 Web UI（默认 http://127.0.0.1:5678）
 pnpm web
+
+# 启动 Electron 桌面版
+pnpm desktop
 ```
 
 ## 配置说明
@@ -439,6 +446,38 @@ Web UI 支持：
 - `allow`、`ask`、`approval` 三种权限模式
 - Plan 模式、计划审批和步骤进度
 - Provider、模型和 DeepSeek 思考强度设置
+
+### Windows 桌面版
+
+桌面版使用 Electron 承载现有 Web UI，并在 Electron 主进程内启动仅监听本机随机端口的 Express/WebSocket 服务。用户配置、项目索引和会话保存在 Windows 用户数据目录；创建项目时通过 Windows 系统目录选择框选择本地根目录。普通 Web 版仍使用页面内的目录树选择器。
+
+开发启动：
+
+```powershell
+pnpm desktop
+```
+
+生成 x64 Windows 安装程序：
+
+```powershell
+pnpm desktop:make
+```
+
+如果当前网络访问 GitHub Release 较慢，可在当前 PowerShell 会话使用 Electron 官方文档列出的镜像变量：
+
+```powershell
+$env:ELECTRON_MIRROR = 'https://npmmirror.com/mirrors/electron/'
+pnpm desktop:make
+```
+
+生成 ARM64 Windows 安装程序：
+
+```powershell
+pnpm desktop:make:arm64
+```
+
+构建产物位于 `apps/desktop/out/make`。未签名的安装程序可能触发 Windows SmartScreen 提示；正式分发时应在 `apps/desktop/forge.config.cjs` 中配置代码签名证书。
+
 - Memory、MCP 和插件运行状态展示
 
 服务健康检查：

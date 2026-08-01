@@ -25,7 +25,10 @@ test('web server exposes health and websocket readiness without a configured pro
     'utf-8',
   );
   const browsableRoot = join(directory, 'browse-root');
+  const clientBuildDirectory = join(directory, 'client');
   await mkdir(browsableRoot);
+  await mkdir(clientBuildDirectory);
+  await writeFile(join(clientBuildDirectory, 'index.html'), '<h1>desktop client</h1>', 'utf8');
 
   const instance = await createWebServer({
     host: '127.0.0.1',
@@ -33,6 +36,7 @@ test('web server exposes health and websocket readiness without a configured pro
     workingDirectory: directory,
     configPath,
     projectStoragePath: join(directory, 'projects.json'),
+    clientBuildDirectory,
   });
 
   try {
@@ -44,6 +48,10 @@ test('web server exposes health and websocket readiness without a configured pro
     };
     assert.equal(health.status, 'needs_configuration');
     assert.equal(health.runtime.configured, false);
+
+    const clientResponse = await fetch(`http://127.0.0.1:${instance.port}/`);
+    assert.equal(clientResponse.status, 200);
+    assert.match(await clientResponse.text(), /desktop client/);
 
     const rootsResponse = await fetch(
       `http://127.0.0.1:${instance.port}/api/filesystem/directories`,
@@ -381,9 +389,7 @@ test('archiving the active project switches the workspace to another project', a
         const message = JSON.parse(data.toString()) as Record<string, unknown>;
         if (message.type === 'ready') {
           alphaId = message.activeProjectId as string;
-          ws.send(
-            JSON.stringify({ type: 'create_project', name: 'Beta', rootPath: betaRoot }),
-          );
+          ws.send(JSON.stringify({ type: 'create_project', name: 'Beta', rootPath: betaRoot }));
           return;
         }
         if (message.type === 'project_changed') {

@@ -1,7 +1,14 @@
 packages:
   - 'packages/*'
   - 'apps/*'
+nodeLinker: hoisted
 allowBuilds:
+  electron: true
+  electron-winstaller: true
   esbuild: true
 minimumReleaseAgeExclude:
   - '@vitejs/plugin-react@6.0.5'
+overrides:
+  # Forge 7 references this fork through Git; use its npm release so strict
+  # supply-chain policies can keep exotic transitive dependencies blocked.
+  '@electron/node-gyp': 10.2.0-electron.2

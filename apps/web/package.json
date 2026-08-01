@@ -4,7 +4,7 @@
   "private": true,
   "description": "Browser-based streaming chat UI for personal-agent",
   "scripts": {
-    "build": "tsup src/server.ts --format esm --clean --external yoga-wasm-web --external vite && vite build",
+    "build": "tsup src/server.ts --format esm --dts --clean --external yoga-wasm-web --external vite && vite build",
     "dev": "tsx src/server.ts",
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit && tsc -p client/tsconfig.json --noEmit",
@@ -14,6 +14,7 @@
   },
   "type": "module",
   "main": "./dist/server.js",
+  "types": "./dist/server.d.ts",
   "dependencies": {
     "@ant-design/icons": "^6.3.2",
     "@personal-agent/config": "workspace:*",

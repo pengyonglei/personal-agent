@@ -27,6 +27,10 @@
     "clean": "turbo run clean",
     "cli": "cd apps/cli && node --import tsx src/index.ts",
     "web": "pnpm --filter @personal-agent/web dev",
+    "desktop": "pnpm --filter @personal-agent/desktop start",
+    "desktop:package": "pnpm --filter @personal-agent/desktop package",
+    "desktop:make": "pnpm --filter @personal-agent/desktop make",
+    "desktop:make:arm64": "pnpm --filter @personal-agent/desktop make:arm64",
     "changeset": "changeset",
     "version-packages": "changeset version",
     "release": "pnpm build && pnpm test && changeset publish"
