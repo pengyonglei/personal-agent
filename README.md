@@ -463,6 +463,18 @@ pnpm desktop
 pnpm desktop:make
 ```
 
+该命令使用 Turbo 缓存工作区构建，并将“生成可运行目录”和“压缩安装程序”拆成两个可单独重试的阶段。如果 Forge 已经成功完成 `Packaging application`，但在 `Making a squirrel distributable` 阶段被中断，可以跳过重新构建和打包，直接重试安装程序生成：
+
+```powershell
+pnpm desktop:make:installer
+```
+
+如果只需要本机可运行目录，不需要 Squirrel 安装程序，使用下列命令可以避开最慢的安装包压缩阶段：
+
+```powershell
+pnpm desktop:package
+```
+
 如果当前网络访问 GitHub Release 较慢，可在当前 PowerShell 会话使用 Electron 官方文档列出的镜像变量：
 
 ```powershell

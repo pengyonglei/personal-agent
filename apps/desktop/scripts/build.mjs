@@ -5,6 +5,7 @@ import { build } from 'esbuild';
 
 const desktopDirectory = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const outputDirectory = resolve(desktopDirectory, 'dist');
+const production = process.argv.includes('--production');
 
 await rm(outputDirectory, { recursive: true, force: true });
 await Promise.all([
@@ -16,7 +17,8 @@ await Promise.all([
     target: 'node20',
     format: 'esm',
     external: ['electron'],
-    sourcemap: true,
+    minify: production,
+    sourcemap: !production,
     banner: {
       js: "import { createRequire as __createRequire } from 'node:module'; const require = __createRequire(import.meta.url);",
     },
@@ -30,7 +32,8 @@ await Promise.all([
     target: 'node20',
     format: 'cjs',
     external: ['electron'],
-    sourcemap: true,
+    minify: production,
+    sourcemap: !production,
     logLevel: 'info',
   }),
 ]);

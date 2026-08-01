@@ -8,6 +8,9 @@ const webDirectory = fileURLToPath(new URL('.', import.meta.url));
 export default defineConfig({
   root: resolve(webDirectory, 'client'),
   plugins: [react()],
+  resolve: {
+    dedupe: ['react', 'react-dom'],
+  },
   build: {
     outDir: resolve(webDirectory, 'dist/client'),
     emptyOutDir: true,
