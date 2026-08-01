@@ -1,4 +1,9 @@
-export { AgentLoop, type AgentLoopConfig } from './agent-loop';
+export {
+  AgentLoop,
+  type AgentLoopConfig,
+  type ModelCallDebugStart,
+  type ModelCallDebugEnd,
+} from './agent-loop';
 export {
   ContextAssembler,
   TokenBudget,

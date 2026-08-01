@@ -1,4 +1,9 @@
-import type { Plan, PlanProgress } from '@personal-agent/core';
+import type {
+  ModelCallDebugEnd,
+  ModelCallDebugStart,
+  Plan,
+  PlanProgress,
+} from '@personal-agent/core';
 import type {
   ReasoningEffort,
   ToolResult,
@@ -121,6 +126,8 @@ export type ServerMessage =
   | { type: 'session_changed'; sessionId: string; isNew: boolean }
   | { type: 'busy'; busy: boolean }
   | { type: 'turn_start'; turnNumber: number }
+  | { type: 'llm_call_start'; call: ModelCallDebugStart }
+  | { type: 'llm_call_end'; call: ModelCallDebugEnd }
   | { type: 'assistant_delta'; text: string; turnNumber: number }
   | { type: 'tool_start'; toolName: string; toolCallId: string; turnNumber: number }
   | { type: 'tool_progress'; toolCallId: string; content: string; turnNumber: number }

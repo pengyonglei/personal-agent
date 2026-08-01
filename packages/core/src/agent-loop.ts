@@ -7,6 +7,7 @@ import type {
   AgentEvent,
   UsageInfo,
   ToolResult,
+  StopReason,
 } from '@personal-agent/shared';
 import { createLogger, generateId } from '@personal-agent/shared';
 import { ContextAssembler, TokenBudget, type AssemblerContext } from './context';
@@ -38,6 +39,40 @@ export interface AgentLoopConfig {
   requestPermission?: (toolName: string, params: Record<string, unknown>) => Promise<boolean>;
   /** Provider options applied to every model turn. */
   streamOptions?: Omit<StreamOptions, 'signal'>;
+  /** Optional diagnostics hook fired immediately before every provider request. */
+  onModelCallStart?: (call: ModelCallDebugStart) => void;
+  /** Optional diagnostics hook fired when a provider request finishes. */
+  onModelCallEnd?: (call: ModelCallDebugEnd) => void;
+}
+
+export interface ModelCallDebugStart {
+  callId: string;
+  turnNumber: number;
+  provider: string;
+  model: string;
+  startedAt: string;
+  request: {
+    messages: UnifiedMessage[];
+    tools: UnifiedToolDefinition[];
+    options: Omit<StreamOptions, 'signal'>;
+  };
+}
+
+export interface ModelCallDebugEnd {
+  callId: string;
+  finishedAt: string;
+  durationMs: number;
+  status: 'completed' | 'error' | 'interrupted';
+  response: {
+    messageId?: string;
+    model?: string;
+    text: string;
+    thinking: string;
+    toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown> }>;
+    stopReason?: StopReason;
+    usage: UsageInfo | null;
+  };
+  error?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -106,79 +141,142 @@ export class AgentLoop {
         // Blocked tools: skip execution and return an error
         let assistantText = '';
         let assistantThinking = '';
+        let responseMessageId: string | undefined;
+        let responseModel: string | undefined;
+        let stopReason: StopReason | undefined;
+        let responseUsage: UsageInfo | null = null;
         const pendingToolCalls: Map<string, { name: string; arguments: Record<string, unknown> }> =
           new Map();
-        for await (const event of provider.streamChat(messages, effectiveTools, {
-          ...this.config.streamOptions,
-          signal: this.controller.signal,
-        })) {
-          if (this.aborted) break;
+        const callId = generateId();
+        const callStartedAt = Date.now();
+        let callFinished = false;
+        const finishModelCall = (status: ModelCallDebugEnd['status'], error?: string): void => {
+          if (callFinished) return;
+          callFinished = true;
+          this.safeNotifyModelCallEnd({
+            callId,
+            finishedAt: new Date().toISOString(),
+            durationMs: Date.now() - callStartedAt,
+            status,
+            response: {
+              messageId: responseMessageId,
+              model: responseModel,
+              text: assistantText,
+              thinking: assistantThinking,
+              toolCalls: Array.from(pendingToolCalls, ([id, toolCall]) => ({
+                id,
+                name: toolCall.name,
+                arguments: toolCall.arguments,
+              })),
+              stopReason,
+              usage: responseUsage,
+            },
+            error,
+          });
+        };
 
-          switch (event.type) {
-            case 'thinking_delta':
-              assistantThinking += event.thinkingDelta;
-              yield {
-                type: 'assistant_thinking_delta',
-                thinkingDelta: event.thinkingDelta,
-                turnNumber: this.turnCount,
-              };
-              break;
+        this.safeNotifyModelCallStart({
+          callId,
+          turnNumber: this.turnCount,
+          provider: provider.providerId,
+          model: provider.getModel(),
+          startedAt: new Date(callStartedAt).toISOString(),
+          request: {
+            messages,
+            tools: effectiveTools,
+            options: { ...this.config.streamOptions },
+          },
+        });
 
-            case 'text_delta':
-              assistantText += event.textDelta;
-              yield {
-                type: 'assistant_text_delta',
-                textDelta: event.textDelta,
-                turnNumber: this.turnCount,
-              };
-              break;
+        try {
+          for await (const event of provider.streamChat(messages, effectiveTools, {
+            ...this.config.streamOptions,
+            signal: this.controller.signal,
+          })) {
+            if (this.aborted) break;
 
-            case 'tool_call_delta':
-              break;
+            switch (event.type) {
+              case 'message_start':
+                responseMessageId = event.messageId;
+                responseModel = event.model;
+                break;
 
-            case 'tool_call_end':
-              pendingToolCalls.set(event.toolCallEnd.id, {
-                name: event.toolCallEnd.name,
-                arguments: event.toolCallEnd.arguments,
-              });
-              yield {
-                type: 'tool_call_start',
-                toolName: event.toolCallEnd.name,
-                toolCallId: event.toolCallEnd.id,
-                turnNumber: this.turnCount,
-              };
-              break;
-
-            case 'message_end':
-              if (event.usage) {
-                this.totalUsage.inputTokens += event.usage.inputTokens;
-                this.totalUsage.outputTokens += event.usage.outputTokens;
-              }
-              // If stop reason is 'end_turn' and no tool calls, we're done
-              if (event.stopReason === 'end_turn' && pendingToolCalls.size === 0) {
-                // Finalize this turn
-                const assistantMsg: UnifiedMessage = {
-                  role: 'assistant',
-                  content: createAssistantContent(assistantText, assistantThinking),
-                };
-                this.config.contextAssembler.addMessage(assistantMsg);
-
-                yield { type: 'turn_end', turnNumber: this.turnCount, usage: event.usage };
-
-                // All done — nothing more to do
+              case 'thinking_delta':
+                assistantThinking += event.thinkingDelta;
                 yield {
-                  type: 'done',
-                  totalTurns: this.turnCount,
-                  totalUsage: this.totalUsage,
+                  type: 'assistant_thinking_delta',
+                  thinkingDelta: event.thinkingDelta,
+                  turnNumber: this.turnCount,
                 };
-                return;
-              }
-              break;
+                break;
 
-            case 'error':
-              yield { type: 'error', error: event.error, turnNumber: this.turnCount };
-              return;
+              case 'text_delta':
+                assistantText += event.textDelta;
+                yield {
+                  type: 'assistant_text_delta',
+                  textDelta: event.textDelta,
+                  turnNumber: this.turnCount,
+                };
+                break;
+
+              case 'tool_call_delta':
+                break;
+
+              case 'tool_call_end':
+                pendingToolCalls.set(event.toolCallEnd.id, {
+                  name: event.toolCallEnd.name,
+                  arguments: event.toolCallEnd.arguments,
+                });
+                yield {
+                  type: 'tool_call_start',
+                  toolName: event.toolCallEnd.name,
+                  toolCallId: event.toolCallEnd.id,
+                  turnNumber: this.turnCount,
+                };
+                break;
+
+              case 'message_end':
+                stopReason = event.stopReason;
+                responseUsage = event.usage;
+                if (event.usage) {
+                  this.totalUsage.inputTokens += event.usage.inputTokens;
+                  this.totalUsage.outputTokens += event.usage.outputTokens;
+                }
+                // If stop reason is 'end_turn' and no tool calls, we're done
+                if (event.stopReason === 'end_turn' && pendingToolCalls.size === 0) {
+                  finishModelCall('completed');
+                  // Finalize this turn
+                  const assistantMsg: UnifiedMessage = {
+                    role: 'assistant',
+                    content: createAssistantContent(assistantText, assistantThinking),
+                  };
+                  this.config.contextAssembler.addMessage(assistantMsg);
+
+                  yield { type: 'turn_end', turnNumber: this.turnCount, usage: event.usage };
+
+                  // All done — nothing more to do
+                  yield {
+                    type: 'done',
+                    totalTurns: this.turnCount,
+                    totalUsage: this.totalUsage,
+                  };
+                  return;
+                }
+                break;
+
+              case 'error':
+                finishModelCall('error', event.error.message);
+                yield { type: 'error', error: event.error, turnNumber: this.turnCount };
+                return;
+            }
           }
+          finishModelCall(this.aborted ? 'interrupted' : 'completed');
+        } catch (error) {
+          finishModelCall(
+            this.aborted ? 'interrupted' : 'error',
+            this.aborted ? undefined : formatError(error),
+          );
+          throw error;
         }
 
         if (this.aborted) {
@@ -343,14 +441,31 @@ export class AgentLoop {
   getTotalUsage(): UsageInfo {
     return { ...this.totalUsage };
   }
+
+  private safeNotifyModelCallStart(call: ModelCallDebugStart): void {
+    try {
+      this.config.onModelCallStart?.(call);
+    } catch (error) {
+      log.warn(`Model call start hook failed: ${formatError(error)}`);
+    }
+  }
+
+  private safeNotifyModelCallEnd(call: ModelCallDebugEnd): void {
+    try {
+      this.config.onModelCallEnd?.(call);
+    } catch (error) {
+      log.warn(`Model call end hook failed: ${formatError(error)}`);
+    }
+  }
 }
 
-function createAssistantContent(
-  text: string,
-  thinking: string,
-): string | UnifiedContentBlock[] {
+function createAssistantContent(text: string, thinking: string): string | UnifiedContentBlock[] {
   if (!thinking) return text;
   const content: UnifiedContentBlock[] = [{ type: 'thinking', thinking }];
   if (text) content.push({ type: 'text', text });
   return content;
+}
+
+function formatError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

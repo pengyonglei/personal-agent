@@ -32,11 +32,13 @@ import {
 import zhCN from 'antd/es/locale/zh_CN';
 import {
   AppstoreOutlined,
+  BugOutlined,
   BulbOutlined,
   CaretRightOutlined,
   CheckCircleFilled,
   CloseOutlined,
   CodeOutlined,
+  CopyOutlined,
   DeleteOutlined,
   EditOutlined,
   FolderAddOutlined,
@@ -85,6 +87,8 @@ type ConnectionState = 'connecting' | 'online' | 'offline';
 type ProviderId = 'openai' | 'anthropic' | 'deepseek' | 'ollama';
 type PlanMessage = Extract<ServerMessage, { type: 'plan' }>;
 type PermissionRequest = Extract<ServerMessage, { type: 'permission_request' }>;
+type ModelCallStart = Extract<ServerMessage, { type: 'llm_call_start' }>['call'];
+type ModelCallEnd = Extract<ServerMessage, { type: 'llm_call_end' }>['call'];
 
 interface WorkspaceState {
   connection: ConnectionState;
@@ -131,6 +135,20 @@ interface ToolTimelineItem {
 }
 
 type TimelineItem = MessageTimelineItem | ToolTimelineItem;
+
+interface ModelCallTrace {
+  callId: string;
+  turnNumber: number;
+  provider: string;
+  model: string;
+  startedAt: string;
+  request: ModelCallStart['request'];
+  status: 'running' | ModelCallEnd['status'];
+  finishedAt?: string;
+  durationMs?: number;
+  response?: ModelCallEnd['response'];
+  error?: string;
+}
 
 interface ProviderFormValues {
   provider: ProviderId;
@@ -358,6 +376,9 @@ function AgentWorkspace({
   const [providerDeleting, setProviderDeleting] = useState<ProviderId>();
   const [providerSettings, setProviderSettings] = useState<ProviderSettingsInfo | null>(null);
   const [appVersion, setAppVersion] = useState('0.1.0');
+  const [debugModalOpen, setDebugModalOpen] = useState(false);
+  const [modelCalls, setModelCalls] = useState<ModelCallTrace[]>([]);
+  const [selectedModelCallId, setSelectedModelCallId] = useState<string>();
   const [rememberPermission, setRememberPermission] = useState(false);
   const [renamingTaskId, setRenamingTaskId] = useState<string>();
   const [renameTitle, setRenameTitle] = useState('');
@@ -462,6 +483,8 @@ function AgentWorkspace({
         }
         case 'history': {
           if (pendingTaskDraftRef.current) break;
+          setModelCalls([]);
+          setSelectedModelCallId(undefined);
           const restored: TimelineItem[] = [];
           for (const historyMessage of incoming.messages) {
             if (historyMessage.role === 'system') continue;
@@ -592,6 +615,23 @@ function AgentWorkspace({
           }
           break;
         case 'turn_start':
+          break;
+        case 'llm_call_start':
+          setModelCalls((current) => [
+            ...current,
+            {
+              ...incoming.call,
+              status: 'running',
+            },
+          ]);
+          setSelectedModelCallId(incoming.call.callId);
+          break;
+        case 'llm_call_end':
+          setModelCalls((current) =>
+            current.map((call) =>
+              call.callId === incoming.call.callId ? { ...call, ...incoming.call } : call,
+            ),
+          );
           break;
         case 'assistant_delta':
           updateTimeline((items) => {
@@ -829,6 +869,8 @@ function AgentWorkspace({
     setDraftTaskProjectId(projectId);
     setPrompt('');
     replaceTimeline([]);
+    setModelCalls([]);
+    setSelectedModelCallId(undefined);
     setShowScrollButton(false);
     patchState({
       activeProjectId: projectId,
@@ -852,6 +894,8 @@ function AgentWorkspace({
     ) {
       return;
     }
+    setModelCalls([]);
+    setSelectedModelCallId(undefined);
     const pendingTaskDraft = pendingTaskDraftRef.current;
     if (pendingTaskDraft) {
       pendingTaskDraftRef.current = { ...pendingTaskDraft, prompt: text };
@@ -1289,6 +1333,15 @@ function AgentWorkspace({
                 <span className="pa-button-label">{colorMode === 'light' ? '浅色' : '深色'}</span>
               </Button>
             </Tooltip>
+            <Tooltip title="模型调用调试">
+              <Badge count={modelCalls.length} size="small" overflowCount={99}>
+                <Button
+                  icon={<BugOutlined />}
+                  onClick={() => setDebugModalOpen(true)}
+                  aria-label="打开模型调用调试"
+                />
+              </Badge>
+            </Tooltip>
             <Tooltip title="运行详情">
               <Button
                 icon={<InfoCircleOutlined />}
@@ -1413,6 +1466,14 @@ function AgentWorkspace({
           onApprovePlan={() => send({ type: 'approve_plan' })}
         />
       </Drawer>
+
+      <ModelDebugModal
+        open={debugModalOpen}
+        calls={modelCalls}
+        selectedCallId={selectedModelCallId}
+        onSelectCall={setSelectedModelCallId}
+        onClose={() => setDebugModalOpen(false)}
+      />
 
       <Modal
         title="创建项目"
@@ -2419,6 +2480,157 @@ function Composer({
   );
 }
 
+function ModelDebugModal({
+  open,
+  calls,
+  selectedCallId,
+  onSelectCall,
+  onClose,
+}: {
+  open: boolean;
+  calls: ModelCallTrace[];
+  selectedCallId?: string;
+  onSelectCall: (callId: string) => void;
+  onClose: () => void;
+}) {
+  const selectedCall = calls.find((call) => call.callId === selectedCallId) ?? calls.at(-1);
+
+  return (
+    <Modal
+      title={
+        <div>
+          <span className="pa-eyebrow">LLM CALL TRACE</span>
+          <div>模型调用调试</div>
+        </div>
+      }
+      open={open}
+      width={1180}
+      footer={
+        <Button type="primary" onClick={onClose}>
+          关闭
+        </Button>
+      }
+      onCancel={onClose}
+      className="pa-debug-modal"
+    >
+      <Alert
+        type="info"
+        showIcon
+        message="这里展示当前这次用户请求触发的实际模型调用；数据仅保存在当前页面内存中，且不包含 API Key。"
+      />
+      {selectedCall ? (
+        <div className="pa-debug-layout">
+          <aside className="pa-debug-call-list" aria-label="模型调用列表">
+            <div className="pa-debug-call-list-heading">
+              <strong>调用记录</strong>
+              <Tag>{calls.length} 次</Tag>
+            </div>
+            {calls.map((call, index) => (
+              <button
+                type="button"
+                key={call.callId}
+                className={`pa-debug-call-item${call.callId === selectedCall.callId ? ' active' : ''}`}
+                onClick={() => onSelectCall(call.callId)}
+              >
+                <span className="pa-debug-call-item-title">
+                  <strong>第 {index + 1} 次调用</strong>
+                  <Tag color={modelCallStatusColor(call.status)}>
+                    {modelCallStatusLabel(call.status)}
+                  </Tag>
+                </span>
+                <span>
+                  {call.provider} · {call.model}
+                </span>
+                <small>
+                  Turn {call.turnNumber}
+                  {call.durationMs === undefined ? '' : ` · ${call.durationMs} ms`}
+                </small>
+              </button>
+            ))}
+          </aside>
+          <section className="pa-debug-detail">
+            <div className="pa-debug-metadata">
+              <div>
+                <span>Provider</span>
+                <strong>{selectedCall.provider}</strong>
+              </div>
+              <div>
+                <span>Model</span>
+                <strong>{selectedCall.model}</strong>
+              </div>
+              <div>
+                <span>开始时间</span>
+                <strong>{formatDebugTimestamp(selectedCall.startedAt)}</strong>
+              </div>
+              <div>
+                <span>耗时</span>
+                <strong>
+                  {selectedCall.durationMs === undefined
+                    ? '进行中'
+                    : `${selectedCall.durationMs} ms`}
+                </strong>
+              </div>
+            </div>
+            {selectedCall.error && <Alert type="error" showIcon message={selectedCall.error} />}
+            <div className="pa-debug-json-grid">
+              <DebugJsonPanel
+                title="请求入参"
+                value={{
+                  provider: selectedCall.provider,
+                  model: selectedCall.model,
+                  ...selectedCall.request,
+                }}
+              />
+              <DebugJsonPanel
+                title="响应出参"
+                value={
+                  selectedCall.response ?? {
+                    status: 'running',
+                    message: '等待模型返回…',
+                  }
+                }
+              />
+            </div>
+          </section>
+        </div>
+      ) : (
+        <Empty
+          image={Empty.PRESENTED_IMAGE_SIMPLE}
+          description="发送一条消息后，这里会显示模型调用的请求入参与响应出参。"
+        />
+      )}
+    </Modal>
+  );
+}
+
+function DebugJsonPanel({ title, value }: { title: string; value: unknown }) {
+  const { message: messageApi } = AntApp.useApp();
+  const json = prettyJson(value);
+
+  function copyJson() {
+    if (!navigator.clipboard) {
+      messageApi.error('当前浏览器不支持自动复制，请手动选择文本');
+      return;
+    }
+    void navigator.clipboard
+      .writeText(json)
+      .then(() => messageApi.success(`${title}已复制`))
+      .catch(() => messageApi.error('复制失败，请手动选择文本'));
+  }
+
+  return (
+    <section className="pa-debug-json-panel">
+      <div className="pa-debug-json-heading">
+        <strong>{title}</strong>
+        <Button type="text" size="small" icon={<CopyOutlined />} onClick={copyJson}>
+          复制
+        </Button>
+      </div>
+      <pre>{json}</pre>
+    </section>
+  );
+}
+
 function Inspector({
   state,
   activeProject,
@@ -2810,6 +3022,37 @@ function formatExecutionDuration(milliseconds: number): string {
     ? `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
     : `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
   return `${clock}.${tenths}`;
+}
+
+function modelCallStatusLabel(status: ModelCallTrace['status']): string {
+  return {
+    running: '调用中',
+    completed: '已完成',
+    error: '失败',
+    interrupted: '已中断',
+  }[status];
+}
+
+function modelCallStatusColor(status: ModelCallTrace['status']): string {
+  return {
+    running: 'processing',
+    completed: 'success',
+    error: 'error',
+    interrupted: 'warning',
+  }[status];
+}
+
+function formatDebugTimestamp(value: string): string {
+  return new Date(value).toLocaleTimeString('zh-CN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    fractionalSecondDigits: 3,
+  });
+}
+
+function prettyJson(value: unknown): string {
+  return JSON.stringify(value, null, 2) ?? String(value);
 }
 
 function formatError(error: unknown): string {

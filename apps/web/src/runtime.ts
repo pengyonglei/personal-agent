@@ -1178,6 +1178,8 @@ Execute in dependency order and use update_plan_step to report progress.`,
         maxTokens: this.runtime.config.agent.maxTokens,
         reasoningEffort: this.runtime.getReasoningEffort(),
       },
+      onModelCallStart: (call) => this.emit({ type: 'llm_call_start', call }),
+      onModelCallEnd: (call) => this.emit({ type: 'llm_call_end', call }),
     });
     if (history.length > 0) this.context.replaceHistory(history);
   }

@@ -10,6 +10,8 @@ import {
   SessionManager,
   SubAgentManager,
   TokenBudget,
+  type ModelCallDebugEnd,
+  type ModelCallDebugStart,
 } from '../src/index';
 
 test('plan engine enforces approval, dependencies, and completion', async () => {
@@ -109,6 +111,47 @@ test('agent loop applies dynamic tool blocking only when active', async () => {
     }
     assert.equal(executed, !blocked);
   }
+});
+
+test('agent loop reports model request and response diagnostics', async () => {
+  const starts: ModelCallDebugStart[] = [];
+  const ends: ModelCallDebugEnd[] = [];
+  const provider = createProvider(async function* () {
+    yield { type: 'message_start', messageId: 'message-1', model: 'mock-model' };
+    yield { type: 'text_delta', textDelta: 'hello' };
+    yield {
+      type: 'message_end',
+      stopReason: 'end_turn',
+      usage: { inputTokens: 3, outputTokens: 2 },
+    };
+  });
+  const loop = new AgentLoop({
+    provider: provider as never,
+    contextAssembler: createContext(),
+    tokenBudget: new TokenBudget(10_000),
+    toolDefinitions: [],
+    maxTurns: 1,
+    executeTool: async () => ({ success: true, content: '' }),
+    streamOptions: { temperature: 0.25, maxTokens: 128 },
+    onModelCallStart: (call) => starts.push(call),
+    onModelCallEnd: (call) => ends.push(call),
+  });
+
+  for await (const _event of loop.run('trace this request')) {
+    // Consume the full run.
+  }
+
+  assert.equal(starts.length, 1);
+  assert.equal(starts[0].provider, 'mock');
+  assert.equal(starts[0].model, 'mock');
+  assert.equal(starts[0].request.options.temperature, 0.25);
+  assert.equal(starts[0].request.messages.at(-1)?.content, 'trace this request');
+  assert.equal(ends.length, 1);
+  assert.equal(ends[0].callId, starts[0].callId);
+  assert.equal(ends[0].status, 'completed');
+  assert.equal(ends[0].response.messageId, 'message-1');
+  assert.equal(ends[0].response.text, 'hello');
+  assert.deepEqual(ends[0].response.usage, { inputTokens: 3, outputTokens: 2 });
 });
 
 test('session messages and metadata survive a reload', async () => {
