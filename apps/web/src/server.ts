@@ -253,19 +253,31 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
     const requestPermission = (
       toolName: string,
       params: Record<string, unknown>,
+      signal?: AbortSignal,
     ): Promise<{ approved: boolean; remember?: boolean }> => {
       const requestId = generateId();
       send({ type: 'permission_request', requestId, toolName, params });
       return new Promise((resolvePermission) => {
+        let settled = false;
+        const finish = (answer: { approved: boolean; remember?: boolean }): void => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeout);
+          signal?.removeEventListener('abort', onAbort);
+          pendingPermissions.delete(requestId);
+          resolvePermission(answer);
+        };
+        const onAbort = (): void => finish({ approved: false });
         const timeout = setTimeout(
           () => {
-            pendingPermissions.delete(requestId);
-            resolvePermission({ approved: false });
+            finish({ approved: false });
             send({ type: 'notice', message: `工具 ${toolName} 的审批已超时并被拒绝。` });
           },
           5 * 60 * 1000,
         );
-        pendingPermissions.set(requestId, { resolve: resolvePermission, timeout });
+        pendingPermissions.set(requestId, { resolve: finish, timeout });
+        if (signal?.aborted) onAbort();
+        else signal?.addEventListener('abort', onAbort, { once: true });
       });
     };
 

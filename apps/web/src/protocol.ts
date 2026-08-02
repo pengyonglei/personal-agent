@@ -128,6 +128,7 @@ export type ServerMessage =
   | { type: 'turn_start'; turnNumber: number }
   | { type: 'llm_call_start'; call: ModelCallDebugStart }
   | { type: 'llm_call_end'; call: ModelCallDebugEnd }
+  | { type: 'thinking_delta'; thinking: string; turnNumber: number }
   | { type: 'assistant_delta'; text: string; turnNumber: number }
   | { type: 'tool_start'; toolName: string; toolCallId: string; turnNumber: number }
   | { type: 'tool_progress'; toolCallId: string; content: string; turnNumber: number }

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import type { AgentEvent } from '@personal-agent/shared';
 import {
   AgentLoop,
   ContextAssembler,
@@ -154,6 +155,61 @@ test('agent loop reports model request and response diagnostics', async () => {
   assert.deepEqual(ends[0].response.usage, { inputTokens: 3, outputTokens: 2 });
 });
 
+test('agent loop interrupt stops waiting for a hung tool', async () => {
+  let notifyToolStarted: (() => void) | undefined;
+  const toolStarted = new Promise<void>((resolve) => {
+    notifyToolStarted = resolve;
+  });
+  let observedSignal: AbortSignal | undefined;
+  const provider = createProvider(async function* () {
+    yield {
+      type: 'tool_call_end',
+      toolCallEnd: {
+        id: 'hung-call',
+        name: 'hung_tool',
+        arguments: {},
+      },
+    };
+    yield {
+      type: 'message_end',
+      stopReason: 'tool_use',
+      usage: { inputTokens: 1, outputTokens: 1 },
+    };
+  });
+  const context = createContext();
+  const loop = new AgentLoop({
+    provider: provider as never,
+    contextAssembler: context,
+    tokenBudget: new TokenBudget(10_000),
+    toolDefinitions: [
+      { name: 'hung_tool', description: 'never finishes', inputSchema: { type: 'object' } },
+    ],
+    maxTurns: 2,
+    executeTool: async (_name, _input, signal) => {
+      observedSignal = signal;
+      notifyToolStarted?.();
+      return new Promise<never>(() => undefined);
+    },
+  });
+  const events: AgentEvent[] = [];
+  const run = (async () => {
+    for await (const event of loop.run('run the stuck tool')) events.push(event);
+  })();
+
+  await withTimeout(toolStarted, 500);
+  loop.interrupt();
+  await withTimeout(run, 500);
+
+  assert.equal(observedSignal?.aborted, true);
+  assert.equal(events.at(-1)?.type, 'interrupted');
+  const toolEnd = events.find(
+    (event): event is Extract<AgentEvent, { type: 'tool_call_end' }> =>
+      event.type === 'tool_call_end',
+  );
+  assert.equal(toolEnd?.result.metadata?.interrupted, true);
+  assert.match(String(context.getHistory().at(-1)?.content), /interrupted by user/);
+});
+
 test('session messages and metadata survive a reload', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'personal-agent-session-'));
   try {
@@ -293,4 +349,20 @@ function createProvider(streamFactory: () => AsyncGenerator<unknown>) {
     getModel: () => 'mock',
     streamChat: streamFactory,
   };
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`Timed out after ${timeoutMs}ms`)), timeoutMs);
+    void promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 }

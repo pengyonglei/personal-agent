@@ -63,11 +63,19 @@ export interface SubAgentHandle {
 
 export class SubAgentManager {
   private activeAgents = new Map<string, SubAgentHandle>();
-  private globalToolExecutor: (name: string, input: Record<string, unknown>) => Promise<ToolResult>;
+  private globalToolExecutor: (
+    name: string,
+    input: Record<string, unknown>,
+    signal?: AbortSignal,
+  ) => Promise<ToolResult>;
   private maxConcurrent: number;
 
   constructor(
-    toolExecutor: (name: string, input: Record<string, unknown>) => Promise<ToolResult>,
+    toolExecutor: (
+      name: string,
+      input: Record<string, unknown>,
+      signal?: AbortSignal,
+    ) => Promise<ToolResult>,
     options: { maxConcurrent?: number } = {},
   ) {
     this.globalToolExecutor = toolExecutor;
@@ -190,7 +198,7 @@ Do not spawn further sub-agents. Focus on using the allowed tools to complete yo
         tokenBudget,
         toolDefinitions,
         maxTurns,
-        executeTool: async (name, input) => {
+        executeTool: async (name, input, signal) => {
           if (!allowedTools.has(name)) {
             return {
               success: false,
@@ -199,7 +207,7 @@ Do not spawn further sub-agents. Focus on using the allowed tools to complete yo
             };
           }
           toolCallsMade++;
-          return this.globalToolExecutor(name, input);
+          return this.globalToolExecutor(name, input, signal);
         },
       });
       onLoopReady(agentLoop);

@@ -682,10 +682,48 @@ select {
 }
 
 .pa-message-body.user {
+  position: relative;
   padding: 10px 14px;
   border: 1px solid color-mix(in srgb, var(--pa-accent), transparent 68%);
   border-radius: 14px 4px 14px 14px;
   background: var(--pa-accent-soft);
+}
+
+.pa-user-message-actions {
+  position: absolute;
+  z-index: 1;
+  top: calc(100% + 1px);
+  right: 2px;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-2px);
+  transition:
+    opacity 140ms ease,
+    transform 140ms ease;
+}
+
+.pa-message-body.user:hover .pa-user-message-actions,
+.pa-message-body.user:focus-within .pa-user-message-actions {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+.pa-user-message-copy.ant-btn {
+  width: 22px;
+  min-width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--pa-border);
+  border-radius: 6px;
+  color: var(--pa-muted);
+  background: var(--pa-panel);
+  box-shadow: 0 4px 10px var(--pa-shadow);
+}
+
+.pa-user-message-copy.ant-btn:hover {
+  color: var(--pa-accent);
+  background: var(--pa-panel);
 }
 
 .pa-message-body.system {
@@ -825,6 +863,124 @@ select {
   animation: pa-cursor 0.8s steps(2, end) infinite;
 }
 
+.pa-thinking-block {
+  width: 100%;
+  margin-bottom: 10px;
+}
+
+.pa-thinking-block .ant-collapse {
+  overflow: hidden;
+  border-color: var(--pa-border);
+  background: var(--pa-panel-soft);
+}
+
+.pa-thinking-block .ant-collapse-header {
+  align-items: center !important;
+}
+
+.pa-thinking-block .ant-collapse-expand-icon {
+  display: flex;
+  align-items: center;
+}
+
+.pa-thinking-block .ant-collapse-content-box {
+  padding: 10px !important;
+}
+
+.pa-thinking-label,
+.pa-thinking-tool-head {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.pa-thinking-label strong,
+.pa-thinking-tool-head strong {
+  overflow: hidden;
+  flex: 1;
+  color: var(--pa-text);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pa-thinking-label > span:last-child,
+.pa-thinking-tool-head > span:last-child {
+  color: var(--pa-muted);
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.pa-thinking-details {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pa-thinking-content {
+  max-height: 320px;
+  padding: 11px 12px;
+  overflow: auto;
+  border: 1px solid var(--pa-border);
+  border-radius: 8px;
+  color: var(--pa-muted);
+  background: var(--pa-code);
+  font-size: 11px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+
+.pa-thinking-content > :first-child {
+  margin-top: 0;
+}
+
+.pa-thinking-content > :last-child {
+  margin-bottom: 0;
+}
+
+.pa-thinking-content p,
+.pa-thinking-content ul,
+.pa-thinking-content ol,
+.pa-thinking-content pre {
+  margin: 0.6em 0;
+}
+
+.pa-thinking-content pre {
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+.pa-thinking-tools {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pa-thinking-tool {
+  padding: 9px;
+  border: 1px solid color-mix(in srgb, var(--pa-accent), transparent 72%);
+  border-radius: 8px;
+  background: var(--pa-panel);
+}
+
+.pa-thinking-tool.failed {
+  border-color: color-mix(in srgb, var(--pa-danger), transparent 55%);
+}
+
+.pa-thinking-tool.interrupted {
+  border-color: var(--pa-border-strong);
+  background: var(--pa-panel-soft);
+}
+
+.pa-thinking-tool-head {
+  margin-bottom: 8px;
+}
+
 .pa-tool-entry {
   width: calc(100% - 44px);
   margin: -8px 0 18px 43px;
@@ -841,6 +997,10 @@ select {
 
 .pa-tool-entry.failed .ant-collapse {
   border-color: color-mix(in srgb, var(--pa-danger), transparent 55%);
+}
+
+.pa-tool-entry.interrupted .ant-collapse {
+  border-color: var(--pa-border-strong);
 }
 
 .pa-tool-label {

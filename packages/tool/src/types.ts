@@ -348,6 +348,10 @@ export class ToolExecutor {
   ): Promise<ToolResult> {
     const startTime = Date.now();
 
+    if (context.signal?.aborted) {
+      return interruptedToolResult(0);
+    }
+
     // 1. Lookup
     const tool = this.registry.get(name);
     if (!tool) {
@@ -415,6 +419,9 @@ export class ToolExecutor {
     }
 
     // 5. Execute
+    if (context.signal?.aborted) {
+      return interruptedToolResult(Date.now() - startTime);
+    }
     try {
       const result = await tool.execute(params, context);
       const duration = Date.now() - startTime;
@@ -423,6 +430,7 @@ export class ToolExecutor {
       return this.postProcess(result, duration);
     } catch (err) {
       const duration = Date.now() - startTime;
+      if (context.signal?.aborted) return interruptedToolResult(duration);
       return {
         success: false,
         content: '',
@@ -472,4 +480,13 @@ export class ToolExecutor {
       },
     };
   }
+}
+
+function interruptedToolResult(duration: number): ToolResult {
+  return {
+    success: false,
+    content: '',
+    error: 'Tool execution interrupted by user',
+    metadata: { duration, interrupted: true },
+  };
 }

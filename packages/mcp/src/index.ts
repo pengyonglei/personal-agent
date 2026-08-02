@@ -53,6 +53,7 @@ class MCPToolWrapper extends BaseTool {
     private readonly callFn: (
       toolName: string,
       args: Record<string, unknown>,
+      signal?: AbortSignal,
     ) => Promise<ToolResult>,
   ) {
     super();
@@ -65,8 +66,8 @@ class MCPToolWrapper extends BaseTool {
     this.isDangerous = !approved;
   }
 
-  async execute(params: Record<string, unknown>, _context: ToolContext): Promise<ToolResult> {
-    return this.callFn(this.remoteToolName, params);
+  async execute(params: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
+    return this.callFn(this.remoteToolName, params, context.signal);
   }
 }
 
@@ -189,7 +190,7 @@ export class MCPClientManager {
             serverName,
             tool,
             connection.config.autoApprove ?? [],
-            (toolName, args) => this.callTool(serverName, toolName, args),
+            (toolName, args, signal) => this.callTool(serverName, toolName, args, signal),
           ),
         );
       }
@@ -237,6 +238,7 @@ export class MCPClientManager {
     serverName: string,
     toolName: string,
     args: Record<string, unknown>,
+    signal?: AbortSignal,
   ): Promise<ToolResult> {
     const connection = this.connections.get(serverName);
     if (!connection?.connected) {
@@ -248,10 +250,14 @@ export class MCPClientManager {
     }
 
     try {
-      const result = await connection.client.callTool({
-        name: toolName,
-        arguments: args,
-      });
+      const result = await connection.client.callTool(
+        {
+          name: toolName,
+          arguments: args,
+        },
+        undefined,
+        signal ? { signal } : undefined,
+      );
       const blocks = Array.isArray(result.content) ? result.content : [];
       const content = blocks.map(formatMCPContent).filter(Boolean).join('\n');
       return {
@@ -260,10 +266,14 @@ export class MCPClientManager {
         error: result.isError === true ? content || 'MCP tool returned an error' : undefined,
       };
     } catch (error) {
+      const interrupted = signal?.aborted === true;
       return {
         success: false,
         content: '',
-        error: `MCP tool error: ${error instanceof Error ? error.message : String(error)}`,
+        error: interrupted
+          ? 'MCP tool execution interrupted by user'
+          : `MCP tool error: ${error instanceof Error ? error.message : String(error)}`,
+        metadata: interrupted ? { duration: 0, interrupted: true } : undefined,
       };
     }
   }

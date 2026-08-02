@@ -193,6 +193,7 @@ export interface ToolResult {
     tokensUsed?: number;
     fileModified?: string[];
     truncated?: boolean;
+    interrupted?: boolean;
   };
 }
 

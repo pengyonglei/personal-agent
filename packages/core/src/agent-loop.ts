@@ -26,7 +26,11 @@ export interface AgentLoopConfig {
   toolDefinitions: UnifiedToolDefinition[];
   maxTurns: number;
   /** Called to execute a tool */
-  executeTool: (name: string, input: Record<string, unknown>) => Promise<ToolResult>;
+  executeTool: (
+    name: string,
+    input: Record<string, unknown>,
+    signal: AbortSignal,
+  ) => Promise<ToolResult>;
   /** Optional: override the tool definitions used for the LLM prompt (e.g., readonly subset) */
   exposedToolDefinitions?: UnifiedToolDefinition[];
   /** Optional: resolve tool definitions for every turn (e.g., when plan mode changes). */
@@ -36,7 +40,11 @@ export interface AgentLoopConfig {
   /** Optional: dynamically decide whether a tool is blocked. */
   isToolBlocked?: (toolName: string) => boolean;
   /** Called to request user permission for a tool */
-  requestPermission?: (toolName: string, params: Record<string, unknown>) => Promise<boolean>;
+  requestPermission?: (
+    toolName: string,
+    params: Record<string, unknown>,
+    signal: AbortSignal,
+  ) => Promise<boolean>;
   /** Provider options applied to every model turn. */
   streamOptions?: Omit<StreamOptions, 'signal'>;
   /** Optional diagnostics hook fired immediately before every provider request. */
@@ -320,73 +328,117 @@ export class AgentLoop {
           };
           this.config.contextAssembler.addMessage(assistantMsg);
 
-          // Execute each tool call
-          for (const [id, tc] of pendingToolCalls) {
-            log.info(`Executing tool: ${tc.name}`);
+          // Execute each tool call. Waiting is raced against the agent signal so a
+          // non-cooperative or stuck tool cannot keep the whole conversation busy.
+          const completedToolCalls = new Set<string>();
+          try {
+            for (const [id, tc] of pendingToolCalls) {
+              if (this.aborted) throw new AgentInterruptedError();
+              log.info(`Executing tool: ${tc.name}`);
 
-            // Blocked tool check (e.g., plan mode)
-            const isBlocked =
-              this.config.isToolBlocked?.(tc.name) ??
-              this.config.blockedTools?.has(tc.name) ??
-              false;
-            if (isBlocked) {
-              const blockedResult: ToolResult = {
-                success: false,
-                content: '',
-                error: `Tool '${tc.name}' is not available in plan mode. Use /exit-plan to leave plan mode and unlock tools.`,
-              };
-              yield {
-                type: 'tool_call_end',
-                toolCallId: id,
-                result: blockedResult,
-                turnNumber: this.turnCount,
-              };
-              this.config.contextAssembler.addMessage({
-                role: 'tool',
-                toolCallId: id,
-                content: `Tool '${tc.name}' is not available in plan mode. Use /exit-plan to unlock.`,
-              });
-              continue;
-            }
-
-            // Permission check
-            if (this.config.requestPermission) {
-              const approved = await this.config.requestPermission(tc.name, tc.arguments);
-              if (!approved) {
-                const deniedResult: ToolResult = {
+              // Blocked tool check (e.g., plan mode)
+              const isBlocked =
+                this.config.isToolBlocked?.(tc.name) ??
+                this.config.blockedTools?.has(tc.name) ??
+                false;
+              if (isBlocked) {
+                const blockedResult: ToolResult = {
                   success: false,
                   content: '',
-                  error: 'User denied permission',
-                };
-                yield {
-                  type: 'tool_call_end',
-                  toolCallId: id,
-                  result: deniedResult,
-                  turnNumber: this.turnCount,
+                  error: `Tool '${tc.name}' is not available in plan mode. Use /exit-plan to leave plan mode and unlock tools.`,
                 };
                 this.config.contextAssembler.addMessage({
                   role: 'tool',
                   toolCallId: id,
-                  content: `Permission denied: ${tc.name}`,
+                  content: `Tool '${tc.name}' is not available in plan mode. Use /exit-plan to unlock.`,
                 });
+                completedToolCalls.add(id);
+                yield {
+                  type: 'tool_call_end',
+                  toolCallId: id,
+                  result: blockedResult,
+                  turnNumber: this.turnCount,
+                };
                 continue;
               }
+
+              // Permission check
+              if (this.config.requestPermission) {
+                const approved = await awaitWithAbort(
+                  this.config.requestPermission(tc.name, tc.arguments, this.controller.signal),
+                  this.controller.signal,
+                );
+                if (this.aborted) throw new AgentInterruptedError();
+                if (!approved) {
+                  const deniedResult: ToolResult = {
+                    success: false,
+                    content: '',
+                    error: 'User denied permission',
+                  };
+                  this.config.contextAssembler.addMessage({
+                    role: 'tool',
+                    toolCallId: id,
+                    content: `Permission denied: ${tc.name}`,
+                  });
+                  completedToolCalls.add(id);
+                  yield {
+                    type: 'tool_call_end',
+                    toolCallId: id,
+                    result: deniedResult,
+                    turnNumber: this.turnCount,
+                  };
+                  continue;
+                }
+              }
+
+              const result = await awaitWithAbort(
+                this.config.executeTool(tc.name, tc.arguments, this.controller.signal),
+                this.controller.signal,
+              );
+              if (this.aborted) throw new AgentInterruptedError();
+
+              // Add tool result to history before yielding so interruption cannot
+              // leave a completed tool call without its matching result message.
+              this.config.contextAssembler.addMessage({
+                role: 'tool',
+                toolCallId: id,
+                content: result.success ? result.content : `Error: ${result.error}`,
+              });
+              completedToolCalls.add(id);
+              yield {
+                type: 'tool_call_end',
+                toolCallId: id,
+                result,
+                turnNumber: this.turnCount,
+              };
             }
+          } catch (error) {
+            if (!(error instanceof AgentInterruptedError) && !this.aborted) throw error;
 
-            const result = await this.config.executeTool(tc.name, tc.arguments);
-            yield {
-              type: 'tool_call_end',
-              toolCallId: id,
-              result,
-              turnNumber: this.turnCount,
-            };
+            // Complete every outstanding tool call with an interrupted result. This
+            // keeps provider history valid and lets the UI clear all running tools.
+            for (const [id] of pendingToolCalls) {
+              if (completedToolCalls.has(id)) continue;
+              const interruptedResult = createInterruptedToolResult();
+              this.config.contextAssembler.addMessage({
+                role: 'tool',
+                toolCallId: id,
+                content: `Error: ${interruptedResult.error}`,
+              });
+              yield {
+                type: 'tool_call_end',
+                toolCallId: id,
+                result: interruptedResult,
+                turnNumber: this.turnCount,
+              };
+            }
+            yield { type: 'interrupted' };
+            return;
+          }
 
-            // Add tool result to history
-            this.config.contextAssembler.addMessage({
-              role: 'tool',
-              toolCallId: id,
-              content: result.success ? result.content : `Error: ${result.error}`,
-            });
+          if (this.aborted) {
+            yield { type: 'interrupted' };
+            return;
           }
 
           // Continue loop — LLM will process tool results
@@ -464,6 +516,46 @@ function createAssistantContent(text: string, thinking: string): string | Unifie
   const content: UnifiedContentBlock[] = [{ type: 'thinking', thinking }];
   if (text) content.push({ type: 'text', text });
   return content;
+}
+
+class AgentInterruptedError extends Error {
+  constructor() {
+    super('Agent execution interrupted');
+    this.name = 'AgentInterruptedError';
+  }
+}
+
+function awaitWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(new AgentInterruptedError());
+
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => {
+      cleanup();
+      reject(new AgentInterruptedError());
+    };
+    const cleanup = (): void => signal.removeEventListener('abort', onAbort);
+
+    signal.addEventListener('abort', onAbort, { once: true });
+    void promise.then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error) => {
+        cleanup();
+        reject(error);
+      },
+    );
+  });
+}
+
+function createInterruptedToolResult(): ToolResult {
+  return {
+    success: false,
+    content: '',
+    error: 'Tool execution interrupted by user',
+    metadata: { duration: 0, interrupted: true },
+  };
 }
 
 function formatError(error: unknown): string {

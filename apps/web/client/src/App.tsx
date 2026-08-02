@@ -77,6 +77,7 @@ import type {
   ServerMessage,
   TaskSummary,
 } from '../../src/protocol';
+import { assistantTurnId } from './timeline';
 
 const { Header, Content, Sider } = Layout;
 const { Text, Title } = Typography;
@@ -121,6 +122,9 @@ interface MessageTimelineItem {
   time: string;
   streaming?: boolean;
   error?: boolean;
+  turnNumber?: number;
+  thinking?: string;
+  tools?: ToolTimelineItem[];
 }
 
 interface ToolTimelineItem {
@@ -128,7 +132,7 @@ interface ToolTimelineItem {
   kind: 'tool';
   toolCallId: string;
   name: string;
-  status: 'running' | 'success' | 'failed';
+  status: 'running' | 'success' | 'failed' | 'interrupted';
   output: string;
   duration?: number;
   restored?: boolean;
@@ -356,6 +360,8 @@ function AgentWorkspace({
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectAttemptsRef = useRef(0);
   const sequenceRef = useRef(0);
+  const responseSequenceRef = useRef(0);
+  const activeResponseSequenceRef = useRef(0);
   const [timeline, setTimeline] = useState<TimelineItem[]>([]);
   const timelineRef = useRef(timeline);
   const transcriptRef = useRef<HTMLDivElement | null>(null);
@@ -486,9 +492,11 @@ function AgentWorkspace({
           setModelCalls([]);
           setSelectedModelCallId(undefined);
           const restored: TimelineItem[] = [];
+          const restoredToolOwners = new Map<string, number>();
           for (const historyMessage of incoming.messages) {
             if (historyMessage.role === 'system') continue;
             const text = extractMessageText(historyMessage);
+            const thinking = extractMessageThinking(historyMessage);
             if (historyMessage.role === 'user') {
               restored.push({
                 id: nextId('history-user'),
@@ -497,24 +505,48 @@ function AgentWorkspace({
                 text,
                 time: currentTime(),
               });
-            } else if (historyMessage.role === 'assistant' && text) {
+            } else if (historyMessage.role === 'assistant') {
+              const tools = extractAssistantTools(historyMessage);
+              if (!text && !thinking && tools.length === 0) continue;
+              const itemIndex = restored.length;
               restored.push({
                 id: nextId('history-assistant'),
                 kind: 'message',
                 role: 'assistant',
                 text,
+                thinking,
+                tools,
                 time: currentTime(),
               });
+              for (const tool of tools) restoredToolOwners.set(tool.toolCallId, itemIndex);
             } else if (historyMessage.role === 'tool') {
-              restored.push({
-                id: nextId('history-tool'),
-                kind: 'tool',
-                toolCallId: historyMessage.toolCallId ?? nextId('tool-call'),
-                name: historyMessage.name ?? '历史工具结果',
-                status: 'success',
-                output: text,
-                restored: true,
-              });
+              const toolCallId = historyMessage.toolCallId ?? nextId('tool-call');
+              const ownerIndex = restoredToolOwners.get(toolCallId);
+              const owner = ownerIndex === undefined ? undefined : restored[ownerIndex];
+              if (ownerIndex !== undefined && owner?.kind === 'message') {
+                restored[ownerIndex] = {
+                  ...owner,
+                  tools: (owner.tools ?? []).map((tool) =>
+                    tool.toolCallId === toolCallId
+                      ? {
+                          ...tool,
+                          status: getRestoredToolStatus(text),
+                          output: text || '(无输出)',
+                        }
+                      : tool,
+                  ),
+                };
+              } else {
+                restored.push({
+                  id: nextId('history-tool'),
+                  kind: 'tool',
+                  toolCallId,
+                  name: historyMessage.name ?? '历史工具结果',
+                  status: getRestoredToolStatus(text),
+                  output: text || '(无输出)',
+                  restored: true,
+                });
+              }
             }
           }
           followOutputRef.current = true;
@@ -605,6 +637,10 @@ function AgentWorkspace({
           patchState({ sessionId: incoming.sessionId });
           break;
         case 'busy':
+          if (incoming.busy && !stateRef.current.busy) {
+            responseSequenceRef.current += 1;
+            activeResponseSequenceRef.current = responseSequenceRef.current;
+          }
           patchState({ busy: incoming.busy });
           if (!incoming.busy) {
             updateTimeline((items) =>
@@ -633,65 +669,92 @@ function AgentWorkspace({
             ),
           );
           break;
+        case 'thinking_delta':
+          updateTimeline((items) =>
+            updateAssistantTurn(
+              items,
+              activeResponseSequenceRef.current,
+              incoming.turnNumber,
+              (item) => ({
+                ...item,
+                thinking: `${item.thinking ?? ''}${incoming.thinking}`,
+                streaming: true,
+              }),
+            ),
+          );
+          break;
         case 'assistant_delta':
-          updateTimeline((items) => {
-            const id = `assistant-turn-${incoming.turnNumber}`;
-            const index = items.findIndex((item) => item.id === id);
-            if (index === -1) {
-              return [
-                ...items,
-                {
-                  id,
-                  kind: 'message',
-                  role: 'assistant',
-                  text: incoming.text,
-                  time: currentTime(),
-                  streaming: true,
-                },
-              ];
-            }
-            return items.map((item, itemIndex) =>
-              itemIndex === index && item.kind === 'message'
-                ? { ...item, text: `${item.text}${incoming.text}`, streaming: true }
-                : item,
-            );
-          });
+          updateTimeline((items) =>
+            updateAssistantTurn(
+              items,
+              activeResponseSequenceRef.current,
+              incoming.turnNumber,
+              (item) => ({
+                ...item,
+                text: `${item.text}${incoming.text}`,
+                streaming: true,
+              }),
+            ),
+          );
           break;
         case 'tool_start':
-          updateTimeline((items) => [
-            ...items,
-            {
-              id: `tool-${incoming.toolCallId}`,
-              kind: 'tool',
-              toolCallId: incoming.toolCallId,
-              name: incoming.toolName,
-              status: 'running',
-              output: '等待工具返回…',
-            },
-          ]);
+          updateTimeline((items) =>
+            updateAssistantTurn(
+              items,
+              activeResponseSequenceRef.current,
+              incoming.turnNumber,
+              (item) => ({
+                ...item,
+                streaming: true,
+                tools: upsertTurnTool(item.tools ?? [], {
+                  id: `tool-${incoming.toolCallId}`,
+                  kind: 'tool',
+                  toolCallId: incoming.toolCallId,
+                  name: incoming.toolName,
+                  status: 'running',
+                  output: '等待工具返回…',
+                }),
+              }),
+            ),
+          );
           break;
         case 'tool_progress':
           updateTimeline((items) =>
-            items.map((item) =>
-              item.kind === 'tool' && item.toolCallId === incoming.toolCallId
-                ? { ...item, output: incoming.content }
-                : item,
+            updateAssistantTurn(
+              items,
+              activeResponseSequenceRef.current,
+              incoming.turnNumber,
+              (item) => ({
+                ...item,
+                tools: updateTurnTool(item.tools ?? [], incoming.toolCallId, (tool) => ({
+                  ...tool,
+                  output: incoming.content,
+                })),
+              }),
             ),
           );
           break;
         case 'tool_end':
           updateTimeline((items) =>
-            items.map((item) =>
-              item.kind === 'tool' && item.toolCallId === incoming.toolCallId
-                ? {
-                    ...item,
-                    status: incoming.result.success ? 'success' : 'failed',
-                    output:
-                      (incoming.result.success ? incoming.result.content : incoming.result.error) ||
-                      '(无输出)',
-                    duration: incoming.result.metadata?.duration,
-                  }
-                : item,
+            updateAssistantTurn(
+              items,
+              activeResponseSequenceRef.current,
+              incoming.turnNumber,
+              (item) => ({
+                ...item,
+                tools: updateTurnTool(item.tools ?? [], incoming.toolCallId, (tool) => ({
+                  ...tool,
+                  status: incoming.result.metadata?.interrupted
+                    ? 'interrupted'
+                    : incoming.result.success
+                      ? 'success'
+                      : 'failed',
+                  output:
+                    (incoming.result.success ? incoming.result.content : incoming.result.error) ||
+                    '(无输出)',
+                  duration: incoming.result.metadata?.duration,
+                })),
+              }),
             ),
           );
           break;
@@ -702,7 +765,8 @@ function AgentWorkspace({
         case 'turn_end':
           updateTimeline((items) =>
             items.map((item) =>
-              item.id === `assistant-turn-${incoming.turnNumber}` && item.kind === 'message'
+              item.id === assistantTurnId(activeResponseSequenceRef.current, incoming.turnNumber) &&
+              item.kind === 'message'
                 ? { ...item, streaming: false }
                 : item,
             ),
@@ -717,6 +781,21 @@ function AgentWorkspace({
           break;
         case 'interrupted':
           messageApi.info('已停止生成');
+          patchState({ pendingPermission: undefined });
+          updateTimeline((items) =>
+            items.map((item) => {
+              if (item.kind === 'tool') {
+                return item.status === 'running' ? { ...item, status: 'interrupted' } : item;
+              }
+              return {
+                ...item,
+                streaming: false,
+                tools: item.tools?.map((tool) =>
+                  tool.status === 'running' ? { ...tool, status: 'interrupted' } : tool,
+                ),
+              };
+            }),
+          );
           break;
         case 'permission_mode':
           patchState({ permissionMode: incoming.mode });
@@ -2217,15 +2296,19 @@ function Welcome({ onSelectPrompt }: { onSelectPrompt: (prompt: string) => void 
 }
 
 function TimelineEntry({ item }: { item: TimelineItem }) {
+  const { message: messageApi } = AntApp.useApp();
+
   if (item.kind === 'tool') {
     const status =
       item.status === 'running'
         ? '正在运行'
-        : item.status === 'success'
-          ? item.duration !== undefined
-            ? `${item.duration} ms`
-            : '已完成'
-          : '执行失败';
+        : item.status === 'interrupted'
+          ? '已停止'
+          : item.status === 'success'
+            ? item.duration !== undefined
+              ? `${item.duration} ms`
+              : '已完成'
+            : '执行失败';
     return (
       <div className={`pa-tool-entry ${item.status}`}>
         <Collapse
@@ -2236,7 +2319,13 @@ function TimelineEntry({ item }: { item: TimelineItem }) {
               key: 'tool',
               label: (
                 <div className="pa-tool-label">
-                  {item.status === 'running' ? <Spin size="small" /> : <ToolOutlined />}
+                  {item.status === 'running' ? (
+                    <Spin size="small" />
+                  ) : item.status === 'interrupted' ? (
+                    <StopOutlined />
+                  ) : (
+                    <ToolOutlined />
+                  )}
                   <strong>{item.restored ? '历史工具结果' : item.name}</strong>
                   <span>{status}</span>
                 </div>
@@ -2251,6 +2340,12 @@ function TimelineEntry({ item }: { item: TimelineItem }) {
 
   const user = item.role === 'user';
   const system = item.role === 'system';
+  const showThinking = !user && !system && (Boolean(item.thinking) || Boolean(item.tools?.length));
+  const copyUserMessage = (): void => {
+    void copyTextToClipboard(item.text)
+      .then(() => messageApi.success('用户输入已复制'))
+      .catch(() => messageApi.error('复制失败，请手动选择文本'));
+  };
   const avatar = (
     <Avatar
       className={`pa-message-avatar ${item.role}`}
@@ -2263,29 +2358,32 @@ function TimelineEntry({ item }: { item: TimelineItem }) {
         <strong>{user ? '你' : system ? '系统' : 'personal-agent'}</strong>
         <time>{item.time}</time>
       </div>
-      <div className={`pa-message-content${item.streaming ? ' streaming' : ''}`}>
-        {system ? (
-          item.text
-        ) : (
-          <ReactMarkdown
-            remarkPlugins={[remarkGfm]}
-            components={{
-              a: ({ children, ...props }) => (
-                <a {...props} target="_blank" rel="noreferrer">
-                  {children}
-                </a>
-              ),
-              code: ({ children, className, ...props }) => (
-                <code className={className} {...props}>
-                  {children}
-                </code>
-              ),
-            }}
-          >
-            {item.text}
-          </ReactMarkdown>
-        )}
-      </div>
+      {showThinking && (
+        <ThinkingBlock
+          thinking={item.thinking ?? ''}
+          tools={item.tools ?? []}
+          streaming={Boolean(item.streaming)}
+        />
+      )}
+      {(item.text || user || system) && (
+        <div className={`pa-message-content${item.streaming && item.text ? ' streaming' : ''}`}>
+          {system ? item.text : <MarkdownContent text={item.text} />}
+        </div>
+      )}
+      {user && (
+        <div className="pa-user-message-actions">
+          <Tooltip title="复制">
+            <Button
+              className="pa-user-message-copy"
+              type="text"
+              size="small"
+              aria-label="复制用户输入"
+              icon={<CopyOutlined />}
+              onClick={copyUserMessage}
+            />
+          </Tooltip>
+        </div>
+      )}
     </div>
   );
 
@@ -2303,6 +2401,118 @@ function TimelineEntry({ item }: { item: TimelineItem }) {
         </>
       )}
     </article>
+  );
+}
+
+function ThinkingBlock({
+  thinking,
+  tools,
+  streaming,
+}: {
+  thinking: string;
+  tools: ToolTimelineItem[];
+  streaming: boolean;
+}) {
+  const runningTools = tools.filter((tool) => tool.status === 'running').length;
+  const failedTools = tools.filter((tool) => tool.status === 'failed').length;
+  const interruptedTools = tools.filter((tool) => tool.status === 'interrupted').length;
+  const summary = runningTools
+    ? `${runningTools} 个工具执行中`
+    : failedTools
+      ? `${tools.length} 个工具 · ${failedTools} 个失败`
+      : interruptedTools
+        ? `${tools.length} 个工具 · ${interruptedTools} 个已停止`
+        : tools.length
+          ? `${tools.length} 个工具`
+          : streaming
+            ? '思考中'
+            : '思考完成';
+
+  return (
+    <div className="pa-thinking-block">
+      <Collapse
+        size="small"
+        items={[
+          {
+            key: 'thinking',
+            label: (
+              <div className="pa-thinking-label">
+                {streaming || runningTools > 0 ? <Spin size="small" /> : <BulbOutlined />}
+                <strong>thinking...</strong>
+                <span>{summary}</span>
+              </div>
+            ),
+            children: (
+              <div className="pa-thinking-details">
+                {thinking && (
+                  <div className="pa-thinking-content">
+                    <MarkdownContent text={thinking} />
+                  </div>
+                )}
+                {tools.length > 0 && (
+                  <div className="pa-thinking-tools">
+                    {tools.map((tool) => (
+                      <ThinkingTool key={tool.toolCallId} tool={tool} />
+                    ))}
+                  </div>
+                )}
+              </div>
+            ),
+          },
+        ]}
+      />
+    </div>
+  );
+}
+
+function ThinkingTool({ tool }: { tool: ToolTimelineItem }) {
+  const status =
+    tool.status === 'running'
+      ? '正在运行'
+      : tool.status === 'interrupted'
+        ? '已停止'
+        : tool.status === 'success'
+          ? tool.duration !== undefined
+            ? `${tool.duration} ms`
+            : '已完成'
+          : '执行失败';
+  return (
+    <div className={`pa-thinking-tool ${tool.status}`}>
+      <div className="pa-thinking-tool-head">
+        {tool.status === 'running' ? (
+          <Spin size="small" />
+        ) : tool.status === 'interrupted' ? (
+          <StopOutlined />
+        ) : (
+          <ToolOutlined />
+        )}
+        <strong>{tool.name}</strong>
+        <span>{status}</span>
+      </div>
+      <pre className="pa-tool-output">{tool.output}</pre>
+    </div>
+  );
+}
+
+function MarkdownContent({ text }: { text: string }) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      components={{
+        a: ({ children, ...props }) => (
+          <a {...props} target="_blank" rel="noreferrer">
+            {children}
+          </a>
+        ),
+        code: ({ children, className, ...props }) => (
+          <code className={className} {...props}>
+            {children}
+          </code>
+        ),
+      }}
+    >
+      {text}
+    </ReactMarkdown>
   );
 }
 
@@ -2812,12 +3022,100 @@ function useExecutionTimer(busy: boolean): string | undefined {
   return label;
 }
 
+function updateAssistantTurn(
+  items: TimelineItem[],
+  responseSequence: number,
+  turnNumber: number,
+  updater: (item: MessageTimelineItem) => MessageTimelineItem,
+): TimelineItem[] {
+  const id = assistantTurnId(responseSequence, turnNumber);
+  const index = items.findIndex((item) => item.id === id);
+  const current: MessageTimelineItem =
+    index >= 0 && items[index]?.kind === 'message'
+      ? items[index]
+      : {
+          id,
+          kind: 'message',
+          role: 'assistant',
+          text: '',
+          thinking: '',
+          tools: [],
+          turnNumber,
+          time: currentTime(),
+          streaming: true,
+        };
+  const updated = updater(current);
+  if (index === -1) return [...items, updated];
+  return items.map((item, itemIndex) => (itemIndex === index ? updated : item));
+}
+
+function upsertTurnTool(tools: ToolTimelineItem[], value: ToolTimelineItem): ToolTimelineItem[] {
+  const index = tools.findIndex((tool) => tool.toolCallId === value.toolCallId);
+  if (index === -1) return [...tools, value];
+  return tools.map((tool, toolIndex) => (toolIndex === index ? value : tool));
+}
+
+function updateTurnTool(
+  tools: ToolTimelineItem[],
+  toolCallId: string,
+  updater: (tool: ToolTimelineItem) => ToolTimelineItem,
+): ToolTimelineItem[] {
+  return tools.map((tool) => (tool.toolCallId === toolCallId ? updater(tool) : tool));
+}
+
 function extractMessageText(message: UnifiedMessage): string {
   if (typeof message.content === 'string') return message.content;
   return message.content
     .filter((block) => block.type === 'text')
     .map((block) => block.text)
     .join('\n');
+}
+
+function extractMessageThinking(message: UnifiedMessage): string {
+  if (typeof message.content === 'string') return '';
+  return message.content
+    .filter((block) => block.type === 'thinking')
+    .map((block) => block.thinking)
+    .join('\n');
+}
+
+function extractAssistantTools(message: UnifiedMessage): ToolTimelineItem[] {
+  const tools = new Map<string, ToolTimelineItem>();
+  if (typeof message.content !== 'string') {
+    for (const block of message.content) {
+      if (block.type !== 'tool_use') continue;
+      tools.set(block.id, {
+        id: `history-tool-${block.id}`,
+        kind: 'tool',
+        toolCallId: block.id,
+        name: block.name,
+        status: 'running',
+        output: '等待工具返回…',
+        restored: true,
+      });
+    }
+  }
+  for (const toolCall of message.toolCalls ?? []) {
+    if (tools.has(toolCall.id)) continue;
+    tools.set(toolCall.id, {
+      id: `history-tool-${toolCall.id}`,
+      kind: 'tool',
+      toolCallId: toolCall.id,
+      name: toolCall.function.name,
+      status: 'running',
+      output: '等待工具返回…',
+      restored: true,
+    });
+  }
+  return [...tools.values()];
+}
+
+function getRestoredToolStatus(
+  output: string,
+): Extract<ToolTimelineItem['status'], 'success' | 'failed' | 'interrupted'> {
+  const normalized = output.trim();
+  if (/tool (?:execution )?interrupted by user/iu.test(normalized)) return 'interrupted';
+  return /^(?:Error:|Permission denied:)/iu.test(normalized) ? 'failed' : 'success';
 }
 
 function upsertById<T extends { id: string }>(items: T[], value: T): T[] {
@@ -3071,6 +3369,28 @@ function formatDebugTimestamp(value: string): string {
 
 function prettyJson(value: unknown): string {
   return JSON.stringify(value, null, 2) ?? String(value);
+}
+
+async function copyTextToClipboard(value: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = value;
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  let copied = false;
+  try {
+    textarea.focus();
+    textarea.select();
+    copied = document.execCommand('copy');
+  } finally {
+    textarea.remove();
+  }
+  if (!copied) throw new Error('Clipboard API is unavailable');
 }
 
 function formatError(error: unknown): string {

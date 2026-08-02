@@ -453,7 +453,7 @@ program
       },
       isToolBlocked: (name) => planModeState.active && !planModeToolNames.has(name),
       maxTurns: mergedConfig.agent.maxTurns,
-      executeTool: async (name: string, input: Record<string, unknown>) => {
+      executeTool: async (name: string, input: Record<string, unknown>, signal: AbortSignal) => {
         if (planModeState.active && !planModeToolNames.has(name)) {
           return {
             success: false,
@@ -464,6 +464,7 @@ program
         const toolCtx: ToolContext = {
           sessionId: session.getSessionId(),
           workingDirectory: process.cwd(),
+          signal,
         };
         await pluginLoader.dispatchHook('on_tool_execute', {
           sessionId: session.getSessionId(),
@@ -497,10 +498,11 @@ program
 
     // Initialize sub-agent manager and register spawn_sub_agent tool
     const subAgentManager = new SubAgentManager(
-      async (toolName: string, toolInput: Record<string, unknown>) => {
+      async (toolName: string, toolInput: Record<string, unknown>, signal?: AbortSignal) => {
         const toolCtx: ToolContext = {
           sessionId: session.getSessionId(),
           workingDirectory: process.cwd(),
+          signal,
         };
         return toolExecutor.execute(toolName, toolInput, toolCtx);
       },

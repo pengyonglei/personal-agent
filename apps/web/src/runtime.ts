@@ -50,6 +50,7 @@ export type RuntimeEmitter = (message: ServerMessage) => void;
 export type PermissionRequester = (
   toolName: string,
   params: Record<string, unknown>,
+  signal?: AbortSignal,
 ) => Promise<{ approved: boolean; remember?: boolean }>;
 
 export interface ProviderSettingsInput {
@@ -611,6 +612,7 @@ export class WebAgentRuntime {
     conversation: WebConversation,
     name: string,
     input: Record<string, unknown>,
+    signal?: AbortSignal,
   ): Promise<ToolResult> {
     await this.pluginLoader.dispatchHook('on_tool_execute', {
       sessionId: conversation.sessionId,
@@ -620,6 +622,7 @@ export class WebAgentRuntime {
     const context: ToolContext = {
       sessionId: conversation.sessionId,
       workingDirectory: conversation.workingDirectory,
+      signal,
     };
     const result = await this.toolExecutor.executeWithPermission(name, input, context, true);
     await this.pluginLoader.dispatchHook('on_tool_result', {
@@ -635,6 +638,7 @@ export class WebAgentRuntime {
     conversation: WebConversation,
     toolName: string,
     params: Record<string, unknown>,
+    signal?: AbortSignal,
   ): Promise<boolean> {
     const mode = conversation.getPermissionMode();
     if (mode === 'allow') return true;
@@ -644,7 +648,7 @@ export class WebAgentRuntime {
 
     const tool = this.toolRegistry.get(toolName);
     if (mode === 'approval') {
-      const answer = await conversation.askPermission(toolName, params);
+      const answer = await conversation.askPermission(toolName, params, signal);
       if (answer.remember) conversation.rememberPermission(toolName, answer.approved);
       return answer.approved;
     }
@@ -655,7 +659,7 @@ export class WebAgentRuntime {
       return true;
     }
 
-    const answer = await conversation.askPermission(toolName, params);
+    const answer = await conversation.askPermission(toolName, params, signal);
     if (answer.remember) conversation.rememberPermission(toolName, answer.approved);
     return answer.approved;
   }
@@ -1100,8 +1104,9 @@ Execute in dependency order and use update_plan_step to report progress.`,
   askPermission(
     toolName: string,
     params: Record<string, unknown>,
+    signal?: AbortSignal,
   ): Promise<{ approved: boolean; remember?: boolean }> {
-    return this.permissionRequester(toolName, params);
+    return this.permissionRequester(toolName, params, signal);
   }
 
   rememberPermission(toolName: string, approved: boolean): void {
@@ -1171,8 +1176,9 @@ Execute in dependency order and use update_plan_step to report progress.`,
       },
       isToolBlocked: (name) => this.planModeActive && !PLAN_MODE_TOOLS.has(name),
       maxTurns: this.runtime.config.agent.maxTurns,
-      executeTool: (name, input) => this.runtime.executeTool(this, name, input),
-      requestPermission: (name, params) => this.runtime.requestToolPermission(this, name, params),
+      executeTool: (name, input, signal) => this.runtime.executeTool(this, name, input, signal),
+      requestPermission: (name, params, signal) =>
+        this.runtime.requestToolPermission(this, name, params, signal),
       streamOptions: {
         temperature: this.runtime.config.agent.temperature,
         maxTokens: this.runtime.config.agent.maxTokens,
@@ -1188,6 +1194,13 @@ Execute in dependency order and use update_plan_step to report progress.`,
     switch (event.type) {
       case 'turn_start':
         this.emit(event);
+        break;
+      case 'assistant_thinking_delta':
+        this.emit({
+          type: 'thinking_delta',
+          thinking: event.thinkingDelta,
+          turnNumber: event.turnNumber,
+        });
         break;
       case 'assistant_text_delta':
         this.emit({
