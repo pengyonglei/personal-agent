@@ -3,6 +3,13 @@ const { readdir, unlink } = require('node:fs/promises');
 
 const electronMirror = process.env.ELECTRON_MIRROR || 'https://npmmirror.com/mirrors/electron/';
 const packagedLocales = new Set(['en-US.pak', 'zh-CN.pak', 'zh-TW.pak']);
+const requestedVersion = process.env.PERSONAL_AGENT_RELEASE_VERSION?.trim() || '';
+const normalizedVersion = requestedVersion.replace(/^v/iu, '');
+const versionLabel = normalizedVersion ? `v${normalizedVersion}` : '';
+const executableName = versionLabel ? `PersonalAgent-${versionLabel}` : 'PersonalAgent';
+const setupExe = versionLabel
+  ? `PersonalAgent-${versionLabel}-Setup.exe`
+  : 'PersonalAgent-Setup.exe';
 
 function removeUnusedElectronLocales(buildPath, _electronVersion, platform, _arch, callback) {
   if (platform !== 'win32') {
@@ -25,9 +32,16 @@ function removeUnusedElectronLocales(buildPath, _electronVersion, platform, _arc
 }
 
 module.exports = {
+  hooks: {
+    readPackageJson: async (_forgeConfig, packageJson) => {
+      if (!normalizedVersion) return packageJson;
+      return { ...packageJson, version: normalizedVersion };
+    },
+  },
   packagerConfig: {
     asar: true,
-    executableName: 'PersonalAgent',
+    ...(normalizedVersion ? { appVersion: normalizedVersion } : {}),
+    executableName,
     overwrite: true,
     // The main process is fully bundled; excluding pnpm's symlinked node_modules
     // also keeps Forge's dependency walker away from workspace-only build deps.
@@ -50,7 +64,7 @@ module.exports = {
       CompanyName: 'personal-agent',
       FileDescription: 'Personal Agent desktop application',
       InternalName: 'PersonalAgent',
-      OriginalFilename: 'PersonalAgent.exe',
+      OriginalFilename: `${executableName}.exe`,
       ProductName: 'Personal Agent',
     },
   },
@@ -61,7 +75,7 @@ module.exports = {
         name: 'PersonalAgent',
         authors: 'personal-agent',
         description: 'Local-first AI coding agent',
-        setupExe: 'PersonalAgent-Setup.exe',
+        setupExe,
         noDelta: true,
       },
     },

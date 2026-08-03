@@ -460,32 +460,34 @@ pnpm desktop
 生成 x64 Windows 安装程序：
 
 ```powershell
-pnpm desktop:make
+pnpm desktop:make -- --version v0.1.2
 ```
+
+也可以省略参数，命令会交互式询问版本号；版本号支持 `v0.1.2` 或 `0.1.2`。生成的应用本体和安装程序分别类似于 `PersonalAgent-v0.1.2.exe`、`PersonalAgent-v0.1.2-Setup.exe`。
 
 该命令使用 Turbo 缓存工作区构建，并将“生成可运行目录”和“压缩安装程序”拆成两个可单独重试的阶段。如果 Forge 已经成功完成 `Packaging application`，但在 `Making a squirrel distributable` 阶段被中断，可以跳过重新构建和打包，直接重试安装程序生成：
 
 ```powershell
-pnpm desktop:make:installer
+pnpm desktop:make:installer -- --version v0.1.2
 ```
 
 如果只需要本机可运行目录，不需要 Squirrel 安装程序，使用下列命令可以避开最慢的安装包压缩阶段：
 
 ```powershell
-pnpm desktop:package
+pnpm desktop:package -- --version v0.1.2
 ```
 
 如果当前网络访问 GitHub Release 较慢，可在当前 PowerShell 会话使用 Electron 官方文档列出的镜像变量：
 
 ```powershell
 $env:ELECTRON_MIRROR = 'https://npmmirror.com/mirrors/electron/'
-pnpm desktop:make
+pnpm desktop:make -- --version v0.1.2
 ```
 
 生成 ARM64 Windows 安装程序：
 
 ```powershell
-pnpm desktop:make:arm64
+pnpm desktop:make:arm64 -- --version v0.1.2
 ```
 
 构建产物位于 `apps/desktop/out/make`。未签名的安装程序可能触发 Windows SmartScreen 提示；正式分发时应在 `apps/desktop/forge.config.cjs` 中配置代码签名证书。
