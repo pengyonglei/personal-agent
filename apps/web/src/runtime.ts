@@ -19,6 +19,7 @@ import {
   type Plan,
 } from '@personal-agent/core';
 import { MCPClientManager } from '@personal-agent/mcp';
+import { ModelRequestRecorder, UsageStore } from '@personal-agent/stats';
 import { FileSystemMemoryStore } from '@personal-agent/memory';
 import { PluginLoader } from '@personal-agent/plugin';
 import { ProviderRegistry, type LLMProvider } from '@personal-agent/provider';
@@ -114,6 +115,8 @@ export class WebAgentRuntime {
   private pluginLoader: PluginLoader;
   private initializationError: string | undefined;
   private conversations = new Map<string, WebConversation>();
+  /** Shared stats store for all conversations (null when unavailable). */
+  readonly statsStore: UsageStore | null;
 
   private constructor(
     config: AppConfig,
@@ -152,6 +155,7 @@ export class WebAgentRuntime {
     for (const tool of SAFE_TOOLS) {
       this.permissionManager.addRule({ tool, action: 'allow', scope: 'session' });
     }
+    this.statsStore = createRuntimeStatsStore(config.stats);
   }
 
   static async create(
@@ -160,6 +164,8 @@ export class WebAgentRuntime {
       configPath?: string;
       projectStoragePath?: string;
       sessionsDirectory?: string;
+      /** Stats SQLite path override (defaults to config stats.dbPath). */
+      statsDbPath?: string;
     } = {},
   ): Promise<WebAgentRuntime> {
     const workingDirectory =
@@ -169,6 +175,7 @@ export class WebAgentRuntime {
     const config = normalizeRuntimeConfig(
       loadConfig({ cwd: workingDirectory, configPath: options.configPath }),
     );
+    if (options.statsDbPath) config.stats.dbPath = options.statsDbPath;
     const runtime = new WebAgentRuntime(
       config,
       workingDirectory,
@@ -709,6 +716,7 @@ export class WebAgentRuntime {
     }
     await this.mcpManager.disconnectAll();
     await this.providerRegistry?.disposeAll();
+    this.statsStore?.close();
   }
 
   private registerMemoryTools(): void {
@@ -920,6 +928,7 @@ export class WebConversation {
   private closed = false;
   private rememberedPermissions = new Map<string, boolean>();
   private permissionMode: PermissionMode = 'ask';
+  private statsRecorder: ModelRequestRecorder | null = null;
 
   constructor(
     private runtime: WebAgentRuntime,
@@ -1204,6 +1213,9 @@ Execute in dependency order and use update_plan_step to report progress.`,
       mode: 'chat',
     });
     this.planEngine = new PlanModeEngine();
+    this.statsRecorder = this.runtime.statsStore
+      ? new ModelRequestRecorder(this.runtime.statsStore, () => this.sessionId)
+      : null;
     this.planModeActive = false;
     this.rememberedPermissions.clear();
     this.tokenBudget = new TokenBudget(
@@ -1232,8 +1244,12 @@ Execute in dependency order and use update_plan_step to report progress.`,
         maxTokens: this.runtime.config.agent.maxTokens,
         reasoningEffort: this.runtime.getReasoningEffort(),
       },
-      onModelCallStart: (call) => this.emit({ type: 'llm_call_start', call }),
+      onModelCallStart: (call) => {
+        this.statsRecorder?.onModelCallStart(call);
+        this.emit({ type: 'llm_call_start', call });
+      },
       onModelCallEnd: (call) => {
+        this.statsRecorder?.onModelCallEnd(call);
         this.emit({ type: 'llm_call_end', call });
         // 每次模型请求结束立即刷新“已使用上下文”：即使一次任务执行中
         // 会循环调用多次模型，UI 上的 token 数也能实时更新。
@@ -1513,6 +1529,25 @@ function formatPlan(plan: Plan): string {
     )
     .join('\n');
   return `${plan.title}\n${plan.description}\n\n${steps}`;
+}
+
+function createRuntimeStatsStore(statsConfig: {
+  enabled?: boolean;
+  dbPath?: string;
+  recordPayloads?: boolean;
+}): UsageStore | null {
+  if (statsConfig.enabled === false || !UsageStore.isAvailable()) return null;
+  try {
+    const store = new UsageStore({
+      dbPath: statsConfig.dbPath || undefined,
+      recordPayloads: statsConfig.recordPayloads,
+    });
+    store.initialize();
+    return store;
+  } catch (error) {
+    console.warn(`[web] Stats store unavailable: ${formatError(error)}`);
+    return null;
+  }
 }
 
 function formatError(error: unknown): string {

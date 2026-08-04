@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
-import { loadConfig, mergeCliFlags } from '@personal-agent/config';
+import { loadConfig, mergeCliFlags, type StatsConfig } from '@personal-agent/config';
 import { ProviderRegistry, type LLMProvider } from '@personal-agent/provider';
 import {
   AgentLoop,
@@ -19,13 +19,74 @@ import {
   type ToolContext,
   type ToolResult,
 } from '@personal-agent/tool';
-import { createLogger, setLogLevel, LogLevel } from '@personal-agent/shared';
+import { createLogger, setLogLevel, LogLevel, type ModelInfo } from '@personal-agent/shared';
 import { FileSystemMemoryStore } from '@personal-agent/memory';
+import {
+  ModelRequestRecorder,
+  UsageStore,
+  formatRecentText,
+  formatStatsText,
+  getByDay,
+  getByModel,
+  getSummary,
+  type PricingMap,
+} from '@personal-agent/stats';
 import { MCPClientManager } from '@personal-agent/mcp';
 import { PluginLoader } from '@personal-agent/plugin';
 import * as readline from 'node:readline';
 
 const log = createLogger('cli');
+
+// ---------------------------------------------------------------------------
+// Model request stats (SQLite) helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Create the stats store for the current process. Returns null (with a warn
+ * log) when stats are unavailable — e.g. old Node without node:sqlite or a
+ * database failure — so the main flow is never affected.
+ */
+function createStatsStore(statsConfig: StatsConfig): UsageStore | null {
+  if (!UsageStore.isAvailable()) {
+    log.warn(
+      'node:sqlite is not available on this Node runtime (>= 22.13 required) — model request stats disabled.',
+    );
+    return null;
+  }
+  try {
+    const store = new UsageStore({
+      dbPath: statsConfig.dbPath || undefined,
+      recordPayloads: statsConfig.recordPayloads,
+    });
+    store.initialize();
+    if (statsConfig.retentionDays > 0) {
+      try {
+        store.prune(statsConfig.retentionDays);
+      } catch (err) {
+        log.warn(`Stats prune failed: ${(err as Error).message}`);
+      }
+    }
+    return store;
+  } catch (err) {
+    log.warn(`Failed to initialize stats store: ${(err as Error).message}`);
+    return null;
+  }
+}
+
+/** Build a PricingMap from the active provider's model list (if pricing known). */
+function buildPricingMap(provider: { getModelList?: () => ModelInfo[] }): PricingMap {
+  const map: PricingMap = {};
+  if (!provider.getModelList) return map;
+  for (const model of provider.getModelList()) {
+    if (model.pricing) {
+      map[`${model.provider}:${model.id}`] = {
+        inputPer1k: model.pricing.inputPer1k,
+        outputPer1k: model.pricing.outputPer1k,
+      };
+    }
+  }
+  return map;
+}
 
 // ---------------------------------------------------------------------------
 // CLI definition
@@ -315,6 +376,12 @@ program
     const planEngine = new PlanModeEngine();
     const planModeState: PlanModeState = { active: false };
 
+    // Model request stats tracking (SQLite, graceful degradation)
+    const statsStore = mergedConfig.stats.enabled ? createStatsStore(mergedConfig.stats) : null;
+    const statsRecorder = statsStore
+      ? new ModelRequestRecorder(statsStore, () => session.getSessionId())
+      : null;
+
     const submitPlanTool = new (class extends BaseTool {
       readonly name = 'submit_plan';
       readonly description =
@@ -446,6 +513,8 @@ program
     ]);
 
     const agentLoop = new AgentLoop({
+      onModelCallStart: (call) => statsRecorder?.onModelCallStart(call),
+      onModelCallEnd: (call) => statsRecorder?.onModelCallEnd(call),
       provider,
       contextAssembler,
       tokenBudget,
@@ -599,6 +668,7 @@ When the user is satisfied, they will use /exit-plan to leave plan mode. Then yo
     if (prompt) {
       console.log(`\x1b[2m> ${prompt}\x1b[0m\n`);
       await runSinglePrompt(agentLoop, prompt, session, contextAssembler);
+      statsStore?.close();
       await pluginLoader.dispatchHook('on_session_end', {
         sessionId: session.getSessionId(),
       });
@@ -619,8 +689,10 @@ When the user is satisfied, they will use /exit-plan to leave plan mode. Then yo
         autoApprove,
         planEngine,
         injectMemoryContext,
+        statsStore,
         planModeState,
         onExit: async () => {
+          statsStore?.close();
           await pluginLoader.dispatchHook('on_session_end', {
             sessionId: session.getSessionId(),
           });
@@ -661,6 +733,7 @@ When the user is satisfied, they will use /exit-plan to leave plan mode. Then yo
           permissionManager,
           session,
           autoApprove,
+          statsStore,
           planEngine,
           planModeState,
         });
@@ -674,6 +747,8 @@ When the user is satisfied, they will use /exit-plan to leave plan mode. Then yo
           await mcpManager.disconnectAll();
           await provider.dispose();
           rl.close();
+          statsStore?.close();
+          process.exit(0);
           process.exit(0);
         }
         if (result.output) {
@@ -700,6 +775,7 @@ When the user is satisfied, they will use /exit-plan to leave plan mode. Then yo
 
     rl.on('close', async () => {
       console.log('\nGoodbye!');
+      statsStore?.close();
       syncSessionMessages(session, contextAssembler);
       await session.save();
       await pluginLoader.dispatchHook('on_session_end', {
@@ -731,6 +807,7 @@ interface TuiModeOptions {
     displayName: string;
     getModel(): string;
     dispose(): Promise<void>;
+    getModelList(): ModelInfo[];
   };
   session: SessionManager;
   contextAssembler: ContextAssembler;
@@ -739,6 +816,7 @@ interface TuiModeOptions {
     getRules(): Array<{ tool: string; action: string; scope: string }>;
   };
   autoApprove: boolean;
+  statsStore: UsageStore | null;
   planEngine?: PlanModeEngine;
   injectMemoryContext?: (userInput: string) => Promise<void>;
   planModeState: PlanModeState;
@@ -815,10 +893,12 @@ async function runTuiMode(opts: TuiModeOptions) {
               displayName: opts.provider.displayName,
               getModel: opts.provider.getModel,
               dispose: opts.provider.dispose,
+              getModelList: opts.provider.getModelList,
             },
             permissionManager: opts.permissionManager,
             session: opts.session,
             autoApprove: opts.autoApprove,
+            statsStore: opts.statsStore,
             planEngine: opts.planEngine,
             planModeState: opts.planModeState,
           };
@@ -1047,6 +1127,7 @@ interface CommandContext {
     displayName: string;
     getModel(): string;
     dispose(): Promise<void>;
+    getModelList(): ModelInfo[];
   };
   permissionManager: {
     addRule(r: { tool: string; action: 'allow' | 'ask' | 'approval'; scope: string }): void;
@@ -1054,6 +1135,7 @@ interface CommandContext {
   };
   session: SessionManager;
   autoApprove: boolean;
+  statsStore: UsageStore | null;
   planEngine?: PlanModeEngine;
   planModeState: PlanModeState;
 }
@@ -1086,6 +1168,8 @@ async function handleSlashCommand(
         '  /permissions       Show permission rules',
         '  /allow <tool>      Allow a tool (session)',
         '  /approval <tool>   Require approval for a tool (session)',
+        '  /stats [days]      Show model request stats (default 7 days)',
+        '  /stats-recent <n>  Show the N most recent model requests',
         '  /exit, /quit       Exit',
         '',
         'Keyboard shortcuts:',
@@ -1095,6 +1179,34 @@ async function handleSlashCommand(
         '  Ctrl+C  Interrupt',
       ].join('\n');
       return { status: 'ok', output: helpText };
+    }
+
+    case 'stats': {
+      if (!ctx.statsStore) {
+        return {
+          status: 'ok',
+          output: 'Stats tracking is disabled (set stats.enabled=true in config).',
+        };
+      }
+      const days = Math.min(365, Math.max(1, parseInt(args[0] ?? '7', 10) || 7));
+      const to = Date.now();
+      const from = to - days * 24 * 60 * 60 * 1000;
+      const pricing = buildPricingMap(ctx.provider);
+      const summary = getSummary(ctx.statsStore, from, to, pricing);
+      const byModel = getByModel(ctx.statsStore, from, to, pricing);
+      const byDay = getByDay(ctx.statsStore, from, to);
+      return { status: 'ok', output: formatStatsText(summary, byModel, byDay, days) };
+    }
+
+    case 'stats-recent': {
+      if (!ctx.statsStore) {
+        return {
+          status: 'ok',
+          output: 'Stats tracking is disabled (set stats.enabled=true in config).',
+        };
+      }
+      const limit = Math.min(100, Math.max(1, parseInt(args[0] ?? '10', 10) || 10));
+      return { status: 'ok', output: formatRecentText(ctx.statsStore.getRecent(limit)) };
     }
 
     case 'plan': {

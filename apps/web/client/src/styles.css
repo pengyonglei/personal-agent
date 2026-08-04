@@ -2205,3 +2205,64 @@ select {
     animation: none;
   }
 }
+
+/* Model stats modal */
+.pa-stats-modal .pa-stats-toolbar {
+  margin: 12px 0;
+}
+.pa-stats-modal .pa-stats-loading {
+  padding: 48px 0;
+  text-align: center;
+}
+.pa-stats-modal .pa-stats-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.pa-stats-modal .pa-stats-summary .ant-statistic {
+  background: rgba(127, 127, 127, 0.08);
+  border-radius: 8px;
+  padding: 12px;
+}
+.pa-stats-modal .pa-stats-body .ant-table-wrapper {
+  margin-bottom: 16px;
+}
+/* Settings general panel */
+.pa-settings-general .pa-settings-heading {
+  margin-bottom: 16px;
+}
+
+.pa-stats-modal .pa-stats-payload {
+  display: inline-block;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+
+.pa-stats-modal .pa-stats-body .ant-tabs {
+  margin-top: 4px;
+}
+
+.pa-stats-modal .pa-stats-payload-cell {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 240px;
+}
+.pa-stats-modal .pa-stats-payload-cell .pa-stats-payload-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pa-stats-modal .pa-stats-copy-btn {
+  opacity: 0;
+  transition: opacity 0.15s;
+  flex-shrink: 0;
+}
+.pa-stats-modal .pa-stats-payload-cell:hover .pa-stats-copy-btn {
+  opacity: 1;
+}

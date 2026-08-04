@@ -65,6 +65,19 @@ const tuiConfigSchema = z.object({
   enableMouse: z.boolean().default(false),
 });
 
+const statsConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  /** SQLite database file path. Defaults to ~/.personal-agent/stats/model-requests.db */
+  dbPath: z.string().optional(),
+  /**
+   * Whether to persist full request payloads (messages / tools / options) as
+   * JSON. Default false — payloads can be large. Only affects NEW requests.
+   */
+  recordPayloads: z.boolean().default(false),
+  /** Delete records older than this many days. 0 = keep everything. */
+  retentionDays: z.number().int().min(0).default(90),
+});
+
 export const appConfigSchema = z.object({
   providers: z
     .object({
@@ -103,6 +116,7 @@ export const appConfigSchema = z.object({
     })
     .default({}),
   tui: tuiConfigSchema.default({}),
+  stats: statsConfigSchema.default({}),
   memory: z
     .object({
       enabled: z.boolean().default(true),
@@ -122,5 +136,6 @@ export const appConfigSchema = z.object({
 export type AppConfig = z.infer<typeof appConfigSchema>;
 export type ModelConfig = z.infer<typeof modelConfigSchema>;
 export type ToolSandboxConfig = z.infer<typeof sandboxSchema>;
+export type StatsConfig = z.infer<typeof statsConfigSchema>;
 export type PermissionRuleConfig = z.infer<typeof permissionRuleSchema>;
 export type MCPServerConfig = z.infer<typeof mcpServerConfigSchema>;

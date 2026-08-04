@@ -34,6 +34,11 @@ export const DEFAULT_CONFIG: AppConfig = {
     showCostEstimates: true,
     enableMouse: false,
   },
+  stats: {
+    enabled: true,
+    recordPayloads: false,
+    retentionDays: 90,
+  },
   memory: {
     enabled: true,
     store: 'filesystem',

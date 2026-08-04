@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-blue)](https://www.typescriptlang.org/)
-[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D20-green)](https://nodejs.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22.13-green)](https://nodejs.org/)
 [![pnpm](https://img.shields.io/badge/pnpm-11-orange)](https://pnpm.io/)
 
 ## 目录
@@ -42,6 +42,7 @@
 - 工具参数校验、权限确认、路径沙箱和危险命令拦截
 - 会话自动持久化与最近会话恢复
 - 文件系统长期记忆及相关上下文自动注入
+- 模型请求统计（SQLite）：每次模型调用的 token、状态、耗时明细，`/stats` 与 `/stats-recent` 命令
 - MCP `stdio`、SSE、Streamable HTTP 工具接入
 - 插件工具、Markdown Skill 和生命周期 Hook
 - 只读 Plan 模式及结构化执行进度
@@ -323,6 +324,11 @@ memory:
   enabled: true
   store: filesystem
   maxEntries: 1000
+
+stats:
+  enabled: true
+  # recordPayloads: true   # 开启后新请求才存储完整入参出参（messages/tools/options）
+  retentionDays: 90        # 0 = 不自动清理
 
 plugins:
   enabled: true
@@ -655,6 +661,7 @@ http://<host>:5678/?token=<long-random-token>
 | `~/.personal-agent/projects.json`         | Web 项目、任务、权限模式和会话关联     |
 | `~/.personal-agent/sessions/`             | 会话 JSON 文件与 `_index.json`         |
 | `~/.personal-agent/memory/index.json`     | 长期记忆索引                           |
+| `~/.personal-agent/stats/model-requests.db` | 模型请求统计 SQLite 数据库（token/入参出参/耗时等） |
 | `~/.personal-agent/plugins/`              | 用户级插件                             |
 | `<workspace>/.personal-agent/plugins/`    | 工作区插件                             |
 

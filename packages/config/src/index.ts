@@ -1,5 +1,5 @@
 export { loadConfig, mergeCliFlags, type ConfigLoadOptions, type CliFlags } from './loader';
-export { appConfigSchema, type AppConfig, type ModelConfig } from './schema';
+export { appConfigSchema, type AppConfig, type ModelConfig, type StatsConfig } from './schema';
 export { DEFAULT_CONFIG } from './defaults';
 export {
   PROVIDER_IDS,
@@ -9,3 +9,4 @@ export {
   type ProviderId,
   type ProviderSettingsUpdate,
 } from './provider-settings';
+export { saveStatsSettings, type StatsSettingsUpdate } from './stats-settings';

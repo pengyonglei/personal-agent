@@ -38,7 +38,8 @@
     "react": "^18.3.0",
     "@personal-agent/memory": "workspace:*",
     "@personal-agent/mcp": "workspace:*",
-    "@personal-agent/plugin": "workspace:*"
+    "@personal-agent/plugin": "workspace:*",
+    "@personal-agent/stats": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

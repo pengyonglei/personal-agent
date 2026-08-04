@@ -7,6 +7,8 @@ import { fileURLToPath } from 'node:url';
 import type { ViteDevServer } from 'vite';
 import { WebSocket, WebSocketServer } from 'ws';
 import { generateId } from '@personal-agent/shared';
+import { loadConfig, saveStatsSettings } from '@personal-agent/config';
+import { UsageStore, getByDay, getByModel, getSummary } from '@personal-agent/stats';
 import {
   WebAgentRuntime,
   type ProviderSettingsInput,
@@ -48,6 +50,8 @@ export interface WebServerOptions {
   projectStoragePath?: string;
   sessionsDirectory?: string;
   clientBuildDirectory?: string;
+  /** Stats SQLite database path. Defaults to ~/.personal-agent/stats/model-requests.db */
+  statsDbPath?: string;
   viteDev?: boolean;
 }
 
@@ -76,7 +80,21 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
     configPath: options.configPath ?? process.env.PERSONAL_AGENT_CONFIG,
     projectStoragePath: options.projectStoragePath ?? process.env.PERSONAL_AGENT_PROJECTS_PATH,
     sessionsDirectory: options.sessionsDirectory ?? process.env.PERSONAL_AGENT_SESSIONS_PATH,
+    statsDbPath: options.statsDbPath,
   });
+  // Model request stats (SQLite) — graceful degradation when node:sqlite is
+  // unavailable on the runtime (Node < 22.13). Never blocks server startup.
+  const statsConfigPath = options.configPath ?? process.env.PERSONAL_AGENT_CONFIG;
+  let statsStore: UsageStore | null = null;
+  if (UsageStore.isAvailable()) {
+    try {
+      const store = new UsageStore({ dbPath: options.statsDbPath });
+      store.initialize();
+      statsStore = store;
+    } catch (error) {
+      console.warn(`[web] Stats store unavailable: ${formatError(error)}`);
+    }
+  }
   const app = express();
   const server = createServer(app);
   const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
@@ -157,6 +175,65 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
     } catch (error) {
       const message = formatError(error);
       res.status(message.includes('正在运行') ? 409 : 400).json({ error: message });
+    }
+  });
+
+  app.get('/api/stats', (req, res) => {
+    if (!isAuthorized(req.headers.authorization, req.query.token, authToken)) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    if (!statsStore) {
+      res.json({ available: false });
+      return;
+    }
+    try {
+      const days = Math.min(365, Math.max(1, Number(req.query.days ?? 7) || 7));
+      const page = Math.max(1, Number(req.query.page ?? 1) || 1);
+      const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize ?? 20) || 20));
+      const pageResult = statsStore.getPage(page, pageSize);
+      const to = Date.now();
+      const from = to - days * 24 * 60 * 60 * 1000;
+      res.json({
+        available: true,
+        days,
+        summary: getSummary(statsStore, from, to),
+        byModel: getByModel(statsStore, from, to),
+        byDay: getByDay(statsStore, from, to),
+        total: pageResult.total,
+        records: pageResult.records,
+      });
+    } catch (error) {
+      res.status(500).json({ error: formatError(error) });
+    }
+  });
+
+  app.get('/api/stats-config', (req, res) => {
+    if (!isAuthorized(req.headers.authorization, req.query.token, authToken)) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    const config = loadConfig({ cwd: runtime.workingDirectory, configPath: statsConfigPath });
+    res.json({ recordPayloads: config.stats.recordPayloads });
+  });
+
+  app.put('/api/stats-config', async (req, res) => {
+    if (!isAuthorized(req.headers.authorization, req.query.token, authToken)) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    try {
+      const body = req.body as Record<string, unknown> | undefined;
+      if (typeof body?.recordPayloads !== 'boolean') {
+        throw new Error('recordPayloads 格式无效。');
+      }
+      await saveStatsSettings({ recordPayloads: body.recordPayloads }, statsConfigPath);
+      // Take effect immediately for new requests in the running process.
+      statsStore?.setRecordPayloads(body.recordPayloads);
+      runtime.statsStore?.setRecordPayloads(body.recordPayloads);
+      res.json({ recordPayloads: body.recordPayloads });
+    } catch (error) {
+      res.status(400).json({ error: formatError(error) });
     }
   });
 
@@ -690,6 +767,7 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
         server.close((error) => (error ? rejectClose(error) : resolveClose())),
       );
       await viteDevServer?.close();
+      statsStore?.close();
       await runtime.dispose();
     },
   };

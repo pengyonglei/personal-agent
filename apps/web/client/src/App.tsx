@@ -24,6 +24,10 @@ import {
   Select,
   Space,
   Spin,
+  Statistic,
+  Switch,
+  Table,
+  Tabs,
   Tag,
   Tooltip,
   Tree,
@@ -33,6 +37,7 @@ import {
 import zhCN from 'antd/es/locale/zh_CN';
 import {
   AppstoreOutlined,
+  BarChartOutlined,
   BugOutlined,
   BulbOutlined,
   CaretRightOutlined,
@@ -401,6 +406,7 @@ function AgentWorkspace({
   const [directoryTreeData, setDirectoryTreeData] = useState<DirectoryTreeNode[]>([]);
   const [selectedDirectory, setSelectedDirectory] = useState<string>();
   const [providerModalOpen, setProviderModalOpen] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<'providers' | 'general'>('providers');
   const [providerView, setProviderView] = useState<'list' | 'form'>('list');
   const [providerLoading, setProviderLoading] = useState(false);
   const [providerSaving, setProviderSaving] = useState(false);
@@ -409,6 +415,7 @@ function AgentWorkspace({
   const [providerSettings, setProviderSettings] = useState<ProviderSettingsInfo | null>(null);
   const [appVersion, setAppVersion] = useState('0.1.0');
   const [debugModalOpen, setDebugModalOpen] = useState(false);
+  const [statsModalOpen, setStatsModalOpen] = useState(false);
   const [modelCalls, setModelCalls] = useState<ModelCallTrace[]>([]);
   const [selectedModelCallId, setSelectedModelCallId] = useState<string>();
   const [rememberPermission, setRememberPermission] = useState(false);
@@ -1533,6 +1540,13 @@ function AgentWorkspace({
                 />
               </Badge>
             </Tooltip>
+            <Tooltip title="模型统计">
+              <Button
+                icon={<BarChartOutlined />}
+                onClick={() => setStatsModalOpen(true)}
+                aria-label="打开模型统计"
+              />
+            </Tooltip>
             <Tooltip title="运行详情">
               <Button
                 icon={<InfoCircleOutlined />}
@@ -1677,6 +1691,7 @@ function AgentWorkspace({
         />
       </Drawer>
 
+      <StatsModal open={statsModalOpen} onClose={() => setStatsModalOpen(false)} />
       <ModelDebugModal
         open={debugModalOpen}
         calls={modelCalls}
@@ -1805,8 +1820,14 @@ function AgentWorkspace({
           <nav className="pa-settings-nav" aria-label="设置菜单">
             <Menu
               mode="inline"
-              selectedKeys={['providers']}
+              onClick={({ key }) => setSettingsTab(key as 'providers' | 'general')}
+              selectedKeys={[settingsTab]}
               items={[
+                {
+                  key: 'general',
+                  icon: <SettingOutlined />,
+                  label: '通用',
+                },
                 {
                   key: 'providers',
                   icon: <RobotOutlined />,
@@ -1816,7 +1837,15 @@ function AgentWorkspace({
             />
           </nav>
           <Spin spinning={providerLoading} className="pa-settings-spin">
-            <section className="pa-settings-content">
+            {settingsTab === 'general' && (
+              <section className="pa-settings-content">
+                <GeneralSettingsPanel />
+              </section>
+            )}
+            <section
+              className="pa-settings-content"
+              style={settingsTab === 'general' ? { display: 'none' } : undefined}
+            >
               <div className="pa-settings-heading">
                 <div>
                   <Title level={4}>模型提供商</Title>
@@ -3118,6 +3147,420 @@ function ModelDebugModal({
         />
       )}
     </Modal>
+  );
+}
+
+interface StatsSummaryData {
+  count: number;
+  errorCount: number;
+  interruptedCount: number;
+  inputTokens: number;
+  outputTokens: number;
+  avgDurationMs: number;
+}
+
+interface StatsByModelRow {
+  provider: string;
+  model: string;
+  count: number;
+  errorCount: number;
+  inputTokens: number;
+  outputTokens: number;
+}
+
+interface StatsByDayRow {
+  day: string;
+  count: number;
+  inputTokens: number;
+  outputTokens: number;
+}
+
+interface StatsRecordRow {
+  id: number;
+  createdAt?: number;
+  provider: string;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  requestMessages?: unknown;
+  response?: {
+    text?: string;
+    thinking?: string;
+    toolCalls?: unknown;
+    messageId?: string;
+  };
+  error?: string;
+}
+
+interface StatsModalResponse {
+  available: boolean;
+  days: number;
+  summary?: StatsSummaryData;
+  byModel?: StatsByModelRow[];
+  byDay?: StatsByDayRow[];
+  total?: number;
+  records?: StatsRecordRow[];
+}
+
+function StatsModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const [days, setDays] = useState(7);
+  const [refreshTick, setRefreshTick] = useState(0);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+  const [statsTab, setStatsTab] = useState<'overview' | 'records'>('overview');
+  const [data, setData] = useState<StatsModalResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    apiFetch(`/api/stats?days=${days}&page=${page}&pageSize=${pageSize}`)
+      .then((response) => {
+        if (!response.ok) throw new Error(`统计接口请求失败 (${response.status})`);
+        return response.json() as Promise<StatsModalResponse>;
+      })
+      .then((payload) => {
+        if (!cancelled) setData(payload);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, days, refreshTick, page, pageSize]);
+
+  return (
+    <Modal
+      title={
+        <div>
+          <span className="pa-eyebrow">MODEL STATS</span>
+          <div>模型统计</div>
+        </div>
+      }
+      open={open}
+      width={980}
+      footer={
+        <Button type="primary" onClick={onClose}>
+          关闭
+        </Button>
+      }
+      onCancel={onClose}
+      className="pa-stats-modal"
+    >
+      <Alert
+        type="info"
+        showIcon
+        message="统计来自本地 SQLite 数据库 ~/.personal-agent/stats/model-requests.db；是否保存请求入参/出参由设置中的「统计模型请求入参/出参」开关控制。"
+      />
+      <Space className="pa-stats-toolbar">
+        <Select
+          value={days}
+          onChange={(value) => {
+            setPage(1);
+            setDays(value);
+          }}
+          style={{ width: 140 }}
+          options={[
+            { value: 7, label: '最近 7 天' },
+            { value: 30, label: '最近 30 天' },
+            { value: 90, label: '最近 90 天' },
+          ]}
+        />
+        <Button
+          icon={<ReloadOutlined />}
+          onClick={() => setRefreshTick((value) => value + 1)}
+          disabled={loading}
+        >
+          刷新
+        </Button>
+      </Space>
+      {error ? (
+        <Alert type="error" showIcon message={error} />
+      ) : data && data.available === false ? (
+        <Alert
+          type="warning"
+          showIcon
+          message="模型统计当前不可用"
+          description="当前运行环境缺少 node:sqlite（需要 Node.js >= 22.13），或统计数据库初始化失败。"
+        />
+      ) : data && data.summary ? (
+        <div className="pa-stats-body">
+          <Tabs
+            activeKey={statsTab}
+            onChange={(key) => setStatsTab(key as 'overview' | 'records')}
+            items={[
+              {
+                key: 'overview',
+                label: '统计概览',
+                children: (
+                  <>
+
+          <div className="pa-stats-summary">
+            <Statistic title="调用次数" value={data.summary.count} />
+            <Statistic
+              title="失败"
+              value={data.summary.errorCount}
+              valueStyle={{ color: '#cf1322' }}
+            />
+            <Statistic title="中断" value={data.summary.interruptedCount} />
+            <Statistic title="输入 tokens" value={data.summary.inputTokens} />
+            <Statistic title="输出 tokens" value={data.summary.outputTokens} />
+            <Statistic
+              title="平均耗时"
+              value={
+                data.summary.avgDurationMs >= 1000
+                  ? `${(data.summary.avgDurationMs / 1000).toFixed(1)} s`
+                  : `${Math.round(data.summary.avgDurationMs)} ms`
+              }
+            />
+          </div>
+          <Table<StatsByModelRow>
+            size="small"
+            rowKey={(row) => `${row.provider}:${row.model}`}
+            title={() => '按模型'}
+            loading={loading}
+            dataSource={data.byModel ?? []}
+            pagination={false}
+            columns={[
+              { title: 'Provider', dataIndex: 'provider' },
+              { title: '模型', dataIndex: 'model' },
+              { title: '次数', dataIndex: 'count', align: 'right' },
+              { title: '错误', dataIndex: 'errorCount', align: 'right' },
+              { title: '输入 tokens', dataIndex: 'inputTokens', align: 'right' },
+              { title: '输出 tokens', dataIndex: 'outputTokens', align: 'right' },
+            ]}
+          />
+
+          <Table<StatsByDayRow>
+            size="small"
+            rowKey={(row) => row.day}
+            title={() => '按天'}
+            loading={loading}
+            dataSource={data.byDay ?? []}
+            pagination={false}
+            columns={[
+              { title: '日期', dataIndex: 'day' },
+              { title: '次数', dataIndex: 'count', align: 'right' },
+              { title: '输入 tokens', dataIndex: 'inputTokens', align: 'right' },
+              { title: '输出 tokens', dataIndex: 'outputTokens', align: 'right' },
+            ]}
+          />                  </>
+                ),
+              },
+              {
+                key: 'records',
+                label: '详细记录',
+                children: (
+          <Table<StatsRecordRow>
+            size="small"
+            rowKey={(row) => row.id}
+            title={() => '详细记录'}
+            loading={loading}
+            dataSource={data.records ?? []}
+            pagination={{
+              current: page,
+              pageSize,
+              total: data.total ?? 0,
+              showSizeChanger: true,
+              pageSizeOptions: [10, 20, 50],
+              showTotal: (total) => `共 ${total} 条`,
+              onChange: (nextPage, nextPageSize) => {
+                setPage(nextPage);
+                setPageSize(nextPageSize);
+              },
+            }}
+            columns={[
+              {
+                title: '创建时间',
+                dataIndex: 'createdAt',
+                render: (value: number | undefined) =>
+                  value === undefined ? '-' : formatStatsTime(value),
+              },
+              { title: '供应商', dataIndex: 'provider' },
+              { title: '模型', dataIndex: 'model' },
+              { title: '输入 tokens', dataIndex: 'inputTokens', align: 'right' },
+              { title: '输出 tokens', dataIndex: 'outputTokens', align: 'right' },
+              {
+                title: '请求入参',
+                render: (value: unknown) =>
+                  value === undefined ? (
+                    <Text type="secondary">未记录</Text>
+                  ) : (
+                    <StatsPayloadCell
+                      text={excerptText(renderStatsPayload(value), 80)}
+                      copyValue={renderStatsPayload(value)}
+                    />
+                  ),
+              },
+              {
+                title: '出参',
+                render: (_value: unknown, row) =>
+                  row.response === undefined ? (
+                    row.error ? (
+                      <Text type="danger">{excerptText(row.error, 60)}</Text>
+                    ) : (
+                      '-'
+                    )
+                  ) : (
+                    <StatsPayloadCell
+                      text={excerptText(renderStatsPayload(row.response), 80)}
+                      copyValue={renderStatsPayload(row.response)}
+                    />
+                  ),
+              },
+            ]}
+          />
+                ),
+              },
+            ]}
+          />
+
+        </div>
+      ) : loading ? (
+        <div className="pa-stats-loading">
+          <Spin />
+        </div>
+      ) : null}
+    </Modal>
+  );
+}
+
+function StatsPayloadCell({ text, copyValue }: { text: string; copyValue: string }) {
+  const { message: messageApi } = AntApp.useApp();
+
+  async function copyPayload() {
+    try {
+      if (!navigator.clipboard) throw new Error('当前浏览器不支持自动复制，请手动选择文本');
+      await navigator.clipboard.writeText(copyValue);
+      messageApi.success('已复制');
+    } catch (err) {
+      messageApi.error(`复制失败: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  return (
+    <div className="pa-stats-payload-cell">
+      <span className="pa-stats-payload-text">{text}</span>
+      <Button
+        type="text"
+        size="small"
+        className="pa-stats-copy-btn"
+        icon={<CopyOutlined />}
+        aria-label="复制"
+        onClick={copyPayload}
+      />
+    </div>
+  );
+}
+
+function formatStatsTime(value: number): string {
+  return new Date(value).toLocaleString('zh-CN', {
+    hour12: false,
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+}
+
+function renderStatsPayload(value: unknown): string {
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function excerptText(text: string, max = 60): string {
+  const oneLine = text.replace(/\s+/g, ' ').trim();
+  return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine;
+}
+
+function GeneralSettingsPanel() {
+  const { message: messageApi } = AntApp.useApp();
+  const [recordPayloads, setRecordPayloads] = useState<boolean | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    apiFetch('/api/stats-config')
+      .then((response) => {
+        if (!response.ok) throw new Error(`读取统计配置失败 (${response.status})`);
+        return response.json() as Promise<{ recordPayloads: boolean }>;
+      })
+      .then((payload) => {
+        if (!cancelled) setRecordPayloads(payload.recordPayloads);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) messageApi.error(err instanceof Error ? err.message : String(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [messageApi]);
+
+  async function toggleRecordPayloads(value: boolean) {
+    setRecordPayloads(value);
+    setSaving(true);
+    try {
+      const response = await apiFetch('/api/stats-config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ recordPayloads: value }),
+      });
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(payload.error ?? `保存失败 (${response.status})`);
+      }
+      messageApi.success(
+        value ? '已开启：新请求将保存完整入参/出参' : '已关闭：仅保存统计元数据',
+      );
+    } catch (err) {
+      messageApi.error(`保存失败: ${err instanceof Error ? err.message : String(err)}`);
+      setRecordPayloads((current) => (current === null ? null : !current));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="pa-settings-general">
+      <div className="pa-settings-heading">
+        <div>
+          <Title level={4}>通用</Title>
+          <Text type="secondary">模型请求统计的通用设置。</Text>
+        </div>
+      </div>
+      <Card size="small">
+        <Space size={12}>
+          <Switch
+            checked={recordPayloads ?? false}
+            disabled={recordPayloads === null}
+            loading={saving}
+            onChange={toggleRecordPayloads}
+          />
+          <div>
+            <div>
+              <strong>统计模型请求入参/出参</strong>
+            </div>
+            <Text type="secondary">
+              开启后，新产生的模型请求会保存完整入参（messages/tools/options）；关闭时仅保存统计元数据（token、
+              模型、状态、耗时等）。数据存储在本地 SQLite（~/.personal-agent/stats/model-requests.db），
+              配置在下次启动时生效。
+            </Text>
+          </div>
+        </Space>
+      </Card>
+    </div>
   );
 }
 
