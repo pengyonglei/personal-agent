@@ -234,13 +234,13 @@ test('session messages and metadata survive a reload', async () => {
   }
 });
 
-test('token compaction summarizes older messages and preserves recent context', () => {
+test('token compaction summarizes older messages and preserves recent context', async () => {
   const budget = new TokenBudget(100);
   const messages = Array.from({ length: 10 }, (_, index) => ({
     role: index % 2 === 0 ? ('user' as const) : ('assistant' as const),
     content: `message-${index}`,
   }));
-  const compacted = budget.compact(messages, 4);
+  const compacted = await budget.compact(messages, 4);
   assert.equal(compacted.length, 5);
   assert.match(String(compacted[0].content), /Earlier conversation summary/);
   assert.deepEqual(

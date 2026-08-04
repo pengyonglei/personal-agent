@@ -126,7 +126,7 @@ export class AgentLoop {
         const history = this.config.contextAssembler.getHistory();
         if (this.config.tokenBudget.shouldCompact(history)) {
           log.info('Compacting conversation history');
-          const compacted = this.config.tokenBudget.compact(history);
+          const compacted = await this.config.tokenBudget.compact(history);
           // Replace history (ugly but works for MVP)
           this.config.contextAssembler.clearHistory();
           for (const msg of compacted.filter((m) => m.role !== 'system')) {

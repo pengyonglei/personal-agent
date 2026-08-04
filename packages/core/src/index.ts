@@ -7,7 +7,9 @@ export {
 export {
   ContextAssembler,
   TokenBudget,
+  createLlmContextSummarizer,
   type AssemblerContext,
+  type ContextSummarizer,
   type SystemPromptSection,
 } from './context';
 export { SessionManager } from './session';

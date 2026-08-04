@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
 import { loadConfig, mergeCliFlags } from '@personal-agent/config';
-import { ProviderRegistry } from '@personal-agent/provider';
+import { ProviderRegistry, type LLMProvider } from '@personal-agent/provider';
 import {
   AgentLoop,
   ContextAssembler,
   TokenBudget,
+  createLlmContextSummarizer,
   SessionManager,
   SubAgentManager,
   PlanModeEngine,
@@ -306,7 +307,11 @@ program
       sessionId: session.getSessionId(),
       workingDirectory: process.cwd(),
     });
-    const tokenBudget = new TokenBudget(200000);
+    const tokenBudget = new TokenBudget(
+      resolveCliContextWindow(provider),
+      8192,
+      createLlmContextSummarizer(provider),
+    );
     const planEngine = new PlanModeEngine();
     const planModeState: PlanModeState = { active: false };
 
@@ -1272,6 +1277,13 @@ function formatPlan(plan: Plan): string {
     lines.push(`Risks: ${plan.metadata.risks.join('; ')}`);
   }
   return lines.join('\n');
+}
+
+function resolveCliContextWindow(provider: LLMProvider): number {
+  return (
+    provider.getModelList().find((model) => model.id === provider.getModel())?.contextWindow ??
+    200_000
+  );
 }
 
 function timeAgo(date: Date): string {

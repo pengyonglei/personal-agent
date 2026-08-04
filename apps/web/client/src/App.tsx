@@ -15,6 +15,7 @@ import {
   Form,
   Grid,
   Input,
+  InputNumber,
   Layout,
   Menu,
   Modal,
@@ -38,7 +39,9 @@ import {
   CheckCircleFilled,
   CloseOutlined,
   CodeOutlined,
+  CompressOutlined,
   CopyOutlined,
+  DashboardOutlined,
   DeleteOutlined,
   EditOutlined,
   FolderAddOutlined,
@@ -71,6 +74,7 @@ import remarkGfm from 'remark-gfm';
 import type { ReasoningEffort, UnifiedMessage } from '@personal-agent/shared';
 import type {
   ClientMessage,
+  ContextUsage,
   PermissionMode,
   ProjectSummary,
   RuntimeInfo,
@@ -107,6 +111,7 @@ interface WorkspaceState {
   plan: PlanMessage['plan'];
   planProgress: PlanMessage['progress'];
   pendingPermission?: PermissionRequest;
+  contextUsage?: ContextUsage;
   creatingProject: boolean;
   creatingTask: boolean;
   switchingRuntime: boolean;
@@ -154,12 +159,18 @@ interface ModelCallTrace {
   error?: string;
 }
 
+interface ProviderModelRow {
+  id: string;
+  contextWindow?: number;
+  maxOutputTokens?: number;
+}
+
 interface ProviderFormValues {
   provider: ProviderId;
   apiKey?: string;
   baseURL: string;
   defaultModel: string;
-  models: string;
+  models: ProviderModelRow[];
   thinkingEffort: ReasoningEffort;
 }
 
@@ -179,7 +190,7 @@ interface ProviderSettingsInfo {
       requiresApiKey: boolean;
       baseURL: string;
       defaultModel: string;
-      models: string[];
+      models: Array<string | ProviderModelRow>;
       thinkingEffort: ReasoningEffort;
       reasoningSupported: boolean;
     }
@@ -234,6 +245,7 @@ const initialState: WorkspaceState = {
     current: 0,
     percentage: 0,
   },
+  contextUsage: undefined,
   creatingProject: false,
   creatingTask: false,
   switchingRuntime: false,
@@ -365,8 +377,11 @@ function AgentWorkspace({
   const [timeline, setTimeline] = useState<TimelineItem[]>([]);
   const timelineRef = useRef(timeline);
   const transcriptRef = useRef<HTMLDivElement | null>(null);
+  const userMessageEls = useRef(new Map<string, HTMLElement>());
   const followOutputRef = useRef(true);
   const [showScrollButton, setShowScrollButton] = useState(false);
+  const [activeTurnId, setActiveTurnId] = useState<string>();
+  const [turnNavLeft, setTurnNavLeft] = useState(30);
   const [prompt, setPrompt] = useState('');
   const [draftTaskProjectId, setDraftTaskProjectId] = useState<string>();
   const pendingTaskDraftRef = useRef<{ projectId: string; prompt?: string }>();
@@ -380,6 +395,7 @@ function AgentWorkspace({
   const [providerLoading, setProviderLoading] = useState(false);
   const [providerSaving, setProviderSaving] = useState(false);
   const [providerDeleting, setProviderDeleting] = useState<ProviderId>();
+  const [compressing, setCompressing] = useState(false);
   const [providerSettings, setProviderSettings] = useState<ProviderSettingsInfo | null>(null);
   const [appVersion, setAppVersion] = useState('0.1.0');
   const [debugModalOpen, setDebugModalOpen] = useState(false);
@@ -401,7 +417,7 @@ function AgentWorkspace({
   const [projectForm] = Form.useForm<ProjectFormValues>();
   const [providerForm] = Form.useForm<ProviderFormValues>();
   const selectedProvider = Form.useWatch('provider', providerForm);
-  const providerModelsText = Form.useWatch('models', providerForm) ?? '';
+  const providerModels = Form.useWatch('models', providerForm) ?? ([] as ProviderModelRow[]);
   const executionLabel = useExecutionTimer(state.busy);
 
   const patchState = useCallback(
@@ -423,6 +439,41 @@ function AgentWorkspace({
     const next = updater(timelineRef.current);
     timelineRef.current = next;
     setTimeline(next);
+  }, []);
+
+  const userTurns = useMemo(
+    () =>
+      timeline.filter(
+        (item): item is MessageTimelineItem & { role: 'user' } =>
+          item.kind === 'message' && item.role === 'user',
+      ),
+    [timeline],
+  );
+
+  const registerMessageElement = useCallback((id: string, element: HTMLElement | null) => {
+    if (element) userMessageEls.current.set(id, element);
+    else userMessageEls.current.delete(id);
+  }, []);
+
+  const updateActiveTurnId = useCallback(() => {
+    const transcript = transcriptRef.current;
+    if (!transcript) return;
+    const threshold = transcript.getBoundingClientRect().top + transcript.clientHeight * 0.4;
+    let found: string | undefined;
+    for (const item of timelineRef.current) {
+      if (item.kind !== 'message' || item.role !== 'user') continue;
+      const element = userMessageEls.current.get(item.id);
+      if (!element) continue;
+      if (element.getBoundingClientRect().top <= threshold) found = item.id;
+      else break;
+    }
+    setActiveTurnId(found);
+  }, []);
+
+  const scrollToTurn = useCallback((turnId: string) => {
+    const element = userMessageEls.current.get(turnId);
+    if (!element) return;
+    element.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }, []);
 
   const nextId = useCallback((prefix: string) => {
@@ -489,6 +540,7 @@ function AgentWorkspace({
         }
         case 'history': {
           if (pendingTaskDraftRef.current) break;
+          setCompressing(false);
           setModelCalls([]);
           setSelectedModelCallId(undefined);
           const restored: TimelineItem[] = [];
@@ -807,10 +859,14 @@ function AgentWorkspace({
             planProgress: incoming.progress,
           });
           break;
+        case 'context_usage':
+          patchState({ contextUsage: incoming.usage });
+          break;
         case 'notice':
           messageApi.info(incoming.message);
           break;
         case 'error':
+          setCompressing(false);
           messageApi.error(incoming.message);
           if (incoming.code === 'AGENT_ERROR') {
             appendMessage('system', incoming.message, { error: true });
@@ -904,6 +960,20 @@ function AgentWorkspace({
     element.scrollTo({ top: element.scrollHeight, behavior: 'smooth' });
     setShowScrollButton(false);
   }, [timeline]);
+
+  useEffect(() => {
+    updateActiveTurnId();
+  }, [timeline, updateActiveTurnId]);
+
+  // 导航悬浮位置：left 是相对 .pa-content 的偏移，而 content 左缘紧贴侧边栏右缘，
+  // 因此动态测量「content 左缘 − 侧边栏右缘」的间距，再叠加约 30px 贴近菜单栏。
+  useLayoutEffect(() => {
+    const sidebar = document.querySelector<HTMLElement>('.pa-sidebar');
+    const content = document.querySelector<HTMLElement>('.pa-content');
+    if (!sidebar || !content) return;
+    const gap = content.getBoundingClientRect().left - sidebar.getBoundingClientRect().right;
+    setTurnNavLeft(Math.round(gap) + 30);
+  }, [desktop]);
 
   useEffect(() => {
     const shortcut = (event: KeyboardEvent) => {
@@ -1109,7 +1179,7 @@ function AgentWorkspace({
       apiKey: '',
       baseURL: values.baseURL,
       defaultModel: values.defaultModel,
-      models: values.models.join('\n'),
+      models: modelConfigListToRows(values.models),
       thinkingEffort: values.thinkingEffort,
     });
   }
@@ -1125,7 +1195,7 @@ function AgentWorkspace({
           ...values,
           activate: false,
           apiKey: values.apiKey ?? '',
-          models: parseModelList(values.models),
+          models: parseModelRows(values.models),
         }),
       });
       const data = (await response.json()) as {
@@ -1194,6 +1264,20 @@ function AgentWorkspace({
         } finally {
           setProviderDeleting(undefined);
         }
+      },
+    });
+  }
+
+  function confirmCompressContext() {
+    modal.confirm({
+      title: '压缩上下文',
+      content:
+        '将把早期对话替换为 LLM 生成的语义摘要，保留最近 6 轮消息。压缩不可撤销，确定继续吗？',
+      okText: '压缩',
+      cancelText: '取消',
+      onOk: () => {
+        setCompressing(true);
+        send({ type: 'compress_context' });
       },
     });
   }
@@ -1330,7 +1414,6 @@ function AgentWorkspace({
       }}
       onCreateProject={() => {
         discardTaskDraft();
-        projectForm.resetFields();
         setSelectedDirectory(undefined);
         setProjectModalOpen(true);
       }}
@@ -1361,9 +1444,10 @@ function AgentWorkspace({
 
   const selectedProviderSettings =
     selectedProvider && providerSettings ? providerSettings.providers[selectedProvider] : undefined;
-  const providerModelOptions = parseModelList(providerModelsText).map((model) => ({
-    value: model,
-  }));
+  const providerModelOptions = providerModels
+    .map((row) => row?.id?.trim())
+    .filter(Boolean)
+    .map((model) => ({ value: model as string }));
   const configuredProviders = getConfiguredProviders(providerSettings);
   const availableProviders = (Object.keys(providerLabels) as ProviderId[]).filter(
     (provider) => !providerSettings?.providers[provider].configured,
@@ -1467,6 +1551,15 @@ function AgentWorkspace({
             />
           )}
 
+          {desktop && userTurns.length > 0 && (
+            <TurnNavigation
+              turns={userTurns}
+              activeId={activeTurnId}
+              onSelect={scrollToTurn}
+              left={turnNavLeft}
+            />
+          )}
+
           <div
             className="pa-transcript"
             ref={transcriptRef}
@@ -1477,13 +1570,20 @@ function AgentWorkspace({
                 element.scrollHeight - element.scrollTop - element.clientHeight < 72;
               followOutputRef.current = nearBottom;
               setShowScrollButton(!nearBottom);
+              updateActiveTurnId();
             }}
           >
             <div className="pa-transcript-inner">
               {timeline.length === 0 ? (
                 <Welcome onSelectPrompt={submitPrompt} />
               ) : (
-                timeline.map((item) => <TimelineEntry key={item.id} item={item} />)
+                timeline.map((item) => (
+                  <TimelineEntry
+                    key={item.id}
+                    item={item}
+                    onMessageElement={registerMessageElement}
+                  />
+                ))
               )}
             </div>
           </div>
@@ -1501,6 +1601,8 @@ function AgentWorkspace({
             busy={state.busy}
             creatingTask={state.creatingTask}
             planActive={state.planActive}
+            contextUsage={state.contextUsage}
+            compressing={compressing}
             permissionMode={state.permissionMode}
             pendingPermission={state.pendingPermission}
             rememberPermission={rememberPermission}
@@ -1516,6 +1618,7 @@ function AgentWorkspace({
             onAnswerPermission={answerPermission}
             onRememberPermissionChange={setRememberPermission}
             onPlanModeChange={(enabled) => send({ type: 'set_plan_mode', enabled })}
+            onCompressContext={confirmCompressContext}
             onPermissionModeChange={(mode) => {
               patchState({ permissionMode: mode });
               send({ type: 'set_permission_mode', mode });
@@ -1581,6 +1684,9 @@ function AgentWorkspace({
         }}
         footer={null}
         destroyOnHidden
+        afterOpenChange={(open) => {
+          if (open) projectForm.resetFields();
+        }}
       >
         <Text type="secondary">
           每个项目对应一个本地根目录，Agent 的文件和命令操作会限制在该工作区中。
@@ -1603,26 +1709,23 @@ function AgentWorkspace({
             label="本地根目录"
             rules={[{ required: true, whitespace: true, message: '请输入本地根目录' }]}
           >
-            <Input
-              placeholder="请选择本地根目录"
-              onClick={() => {
-                void openDirectoryPicker();
-              }}
-              addonAfter={
-                <Button
-                  type="text"
-                  size="small"
-                  icon={<FolderOpenOutlined />}
-                  onClick={(event) => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    void openDirectoryPicker();
-                  }}
-                >
-                  选择
-                </Button>
-              }
-            />
+            <Space.Compact style={{ width: '100%' }}>
+              <Input
+                placeholder="请选择本地根目录"
+                onClick={() => {
+                  void openDirectoryPicker();
+                }}
+              />
+              <Button
+                type="primary"
+                icon={<FolderOpenOutlined />}
+                onClick={() => {
+                  void openDirectoryPicker();
+                }}
+              >
+                选择
+              </Button>
+            </Space.Compact>
           </Form.Item>
           <div className="pa-modal-actions">
             <Button onClick={() => setProjectModalOpen(false)}>取消</Button>
@@ -1829,11 +1932,72 @@ function AgentWorkspace({
                     <AutoComplete options={providerModelOptions} placeholder="模型 ID" />
                   </Form.Item>
                   <Form.Item
-                    name="models"
                     label="可选模型"
-                    extra="每行或逗号分隔；保存后可在输入框右下角切换。"
+                    extra="为每个模型配置总上下文长度与输出长度（单位 token）；留空使用内置默认值。"
                   >
-                    <TextArea rows={4} placeholder="每行填写一个模型 ID" />
+                    <Form.List name="models">
+                      {(fields, { add, remove }) => (
+                        <div className="pa-model-list">
+                          <div className="pa-model-list-head">
+                            <span>模型 ID</span>
+                            <span>上下文长度</span>
+                            <span>输出长度</span>
+                            <span />
+                          </div>
+                          {fields.map((field) => (
+                            <div key={field.key} className="pa-model-row">
+                              <Form.Item
+                                name={[field.name, 'id']}
+                                rules={[
+                                  { required: true, whitespace: true, message: '请输入模型 ID' },
+                                ]}
+                              >
+                                <Input placeholder="模型 ID" />
+                              </Form.Item>
+                              <Form.Item name={[field.name, 'contextWindow']}>
+                                <InputNumber
+                                  min={1024}
+                                  max={10_000_000}
+                                  step={1000}
+                                  placeholder="自动"
+                                  style={{ width: '100%' }}
+                                />
+                              </Form.Item>
+                              <Form.Item name={[field.name, 'maxOutputTokens']}>
+                                <InputNumber
+                                  min={1}
+                                  max={10_000_000}
+                                  step={500}
+                                  placeholder="自动"
+                                  style={{ width: '100%' }}
+                                />
+                              </Form.Item>
+                              <Button
+                                type="text"
+                                danger
+                                icon={<DeleteOutlined />}
+                                aria-label="删除模型"
+                                onClick={() => remove(field.name)}
+                              />
+                            </div>
+                          ))}
+                          <Button
+                            type="dashed"
+                            block
+                            icon={<PlusOutlined />}
+                            onClick={() =>
+                              add({
+                                id: '',
+                                contextWindow: undefined,
+                                maxOutputTokens: undefined,
+                              })
+                            }
+                          >
+                            添加模型
+                          </Button>
+                        </div>
+                      )}
+                    </Form.List>
                   </Form.Item>
                   {selectedProvider === 'deepseek' && (
                     <Form.Item
@@ -2295,7 +2459,47 @@ function Welcome({ onSelectPrompt }: { onSelectPrompt: (prompt: string) => void 
   );
 }
 
-function TimelineEntry({ item }: { item: TimelineItem }) {
+function TurnNavigation({
+  turns,
+  activeId,
+  onSelect,
+  left = 30,
+}: {
+  turns: Array<MessageTimelineItem & { role: 'user' }>;
+  activeId?: string;
+  onSelect: (turnId: string) => void;
+  left?: number;
+}) {
+  return (
+    <nav className="pa-turn-nav" style={{ left }} aria-label="对话轮次导航">
+      {turns.map((turn, index) => {
+        const preview = turn.text.replace(/\s+/g, ' ').trim() || '（空消息）';
+        return (
+          <button
+            key={turn.id}
+            type="button"
+            className={`pa-turn-nav-item${turn.id === activeId ? ' active' : ''}`}
+            aria-label={`跳到第 ${index + 1} 轮：${turn.text}`}
+            onClick={() => onSelect(turn.id)}
+          >
+            <span className="pa-turn-nav-tip" role="tooltip">
+              <span className="pa-turn-nav-tip-index">第 {index + 1} 轮</span>
+              <span className="pa-turn-nav-tip-text">{preview}</span>
+            </span>
+          </button>
+        );
+      })}
+    </nav>
+  );
+}
+
+function TimelineEntry({
+  item,
+  onMessageElement,
+}: {
+  item: TimelineItem;
+  onMessageElement?: (id: string, element: HTMLElement | null) => void;
+}) {
   const { message: messageApi } = AntApp.useApp();
 
   if (item.kind === 'tool') {
@@ -2388,7 +2592,10 @@ function TimelineEntry({ item }: { item: TimelineItem }) {
   );
 
   return (
-    <article className={`pa-message-row ${item.role}`}>
+    <article
+      ref={(element) => onMessageElement?.(item.id, element)}
+      className={`pa-message-row ${item.role}`}
+    >
       {user ? (
         <>
           {body}
@@ -2523,6 +2730,8 @@ function Composer({
   busy,
   creatingTask,
   planActive,
+  contextUsage,
+  compressing,
   permissionMode,
   pendingPermission,
   rememberPermission,
@@ -2538,6 +2747,7 @@ function Composer({
   onAnswerPermission,
   onRememberPermissionChange,
   onPlanModeChange,
+  onCompressContext,
   onPermissionModeChange,
   onModelChange,
   onReasoningChange,
@@ -2548,6 +2758,8 @@ function Composer({
   busy: boolean;
   creatingTask: boolean;
   planActive: boolean;
+  contextUsage?: ContextUsage;
+  compressing: boolean;
   permissionMode: PermissionMode;
   pendingPermission?: PermissionRequest;
   rememberPermission: boolean;
@@ -2563,6 +2775,7 @@ function Composer({
   onAnswerPermission: (approved: boolean) => void;
   onRememberPermissionChange: (remember: boolean) => void;
   onPlanModeChange: (enabled: boolean) => void;
+  onCompressContext: () => void;
   onPermissionModeChange: (mode: PermissionMode) => void;
   onModelChange: (value: string) => void;
   onReasoningChange: (effort: ReasoningEffort) => void;
@@ -2661,6 +2874,35 @@ function Composer({
               ]}
               onChange={(value) => onPlanModeChange(value === 'plan')}
             />
+            <Tooltip
+              title={
+                <ContextUsagePanel
+                  usage={contextUsage}
+                  footer={
+                    <Button
+                      size="small"
+                      block
+                      icon={<CompressOutlined />}
+                      disabled={busy || creatingTask || !contextUsage}
+                      loading={compressing}
+                      onClick={onCompressContext}
+                    >
+                      压缩上下文
+                    </Button>
+                  }
+                />
+              }
+              placement="top"
+              color="#ffffff"
+              classNames={{ root: 'pa-context-tip-overlay' }}
+            >
+              <Button
+                type="text"
+                size="small"
+                icon={<DashboardOutlined />}
+                aria-label="查看上下文使用情况"
+              />
+            </Tooltip>
           </div>
           <div className="pa-composer-right">
             <Select
@@ -3191,15 +3433,82 @@ async function fetchDirectoryChildren(path?: string): Promise<DirectoryListRespo
   return data;
 }
 
-function parseModelList(value: string): string[] {
-  return [
-    ...new Set(
-      value
-        .split(/[,\n]/)
-        .map((model) => model.trim())
-        .filter(Boolean),
-    ),
-  ];
+function parseModelRows(rows: ProviderModelRow[]): Array<string | ProviderModelRow> {
+  const models: Array<string | ProviderModelRow> = [];
+  const seen = new Set<string>();
+  for (const row of rows) {
+    const id = (row?.id ?? '').trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    if (row.contextWindow || row.maxOutputTokens) {
+      models.push({
+        id,
+        contextWindow: row.contextWindow,
+        maxOutputTokens: row.maxOutputTokens,
+      });
+    } else {
+      models.push(id);
+    }
+  }
+  return models;
+}
+
+function modelConfigListToRows(models: Array<string | ProviderModelRow>): ProviderModelRow[] {
+  return models.map((model) =>
+    typeof model === 'string'
+      ? { id: model }
+      : {
+          id: model.id,
+          contextWindow: model.contextWindow,
+          maxOutputTokens: model.maxOutputTokens,
+        },
+  );
+}
+
+function formatTokens(value: number): string {
+  return value.toLocaleString('en-US');
+}
+
+function ContextUsagePanel({
+  usage,
+  footer,
+}: {
+  usage?: ContextUsage;
+  footer?: ReactNode;
+}) {
+  if (!usage || usage.totalTokens <= 0) {
+    return <div className="pa-context-tip">暂无上下文数据</div>;
+  }
+  const warn = usage.percentage >= 75;
+  const danger = usage.percentage >= 90;
+  return (
+    <div className="pa-context-tip">
+      <div className="pa-context-tip-title">上下文使用情况</div>
+      <Progress
+        percent={usage.percentage}
+        size="small"
+        status={danger ? 'exception' : warn ? 'active' : 'normal'}
+      />
+      <div className="pa-context-tip-row">
+        <span>已使用</span>
+        <b>{formatTokens(usage.usedTokens)} tokens</b>
+      </div>
+      <div className="pa-context-tip-row">
+        <span>总上下文</span>
+        <b>{formatTokens(usage.totalTokens)} tokens</b>
+      </div>
+      <div className="pa-context-tip-row">
+        <span>占用</span>
+        <b>{usage.percentage}%</b>
+      </div>
+      <div className="pa-context-tip-hint">
+        已使用为 API 实际用量（输入 + 输出累计）；
+        {formatTokens(usage.reservedOutputTokens)} tokens 预留给模型输出，
+        历史占用超过可用上下文 75% 时自动压缩。
+      </div>
+      {footer && <div className="pa-context-tip-footer">{footer}</div>}
+    </div>
+  );
 }
 
 function findRuntimeModel(runtime?: RuntimeInfo, provider?: string, model?: string) {

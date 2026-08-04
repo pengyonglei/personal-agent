@@ -1,5 +1,11 @@
-import type { UnifiedMessage, UnifiedToolDefinition, StreamOptions } from '@personal-agent/shared';
+import type {
+  UnifiedContentBlock,
+  UnifiedMessage,
+  UnifiedToolDefinition,
+  StreamOptions,
+} from '@personal-agent/shared';
 import { countTotalTokens, createLogger } from '@personal-agent/shared';
+import type { LLMProvider } from '@personal-agent/provider';
 
 const log = createLogger('context');
 
@@ -177,16 +183,71 @@ You are operating in a terminal environment with access to the user's filesystem
 }
 
 // ---------------------------------------------------------------------------
+// Context summarizer
+// ---------------------------------------------------------------------------
+
+export type ContextSummarizer = (messages: UnifiedMessage[]) => Promise<string>;
+
+const CONTEXT_SUMMARIZE_PROMPT = `You are summarizing a conversation for an AI coding assistant so it can continue helping the user without losing important context.
+
+Produce a concise but information-dense summary that preserves:
+- The user's goals and the current task
+- Key decisions and their rationale
+- Facts, constraints, and user preferences
+- What has been completed and what remains to be done
+- Important tool outputs or results
+- Open questions or unresolved issues
+
+Write the summary in the same language as the conversation. Output only the summary text, without any preamble.`;
+
+/**
+ * Create a context summarizer backed by an LLM provider.
+ * The summary call uses low max tokens, zero temperature and reasoning off so
+ * it stays cheap and deterministic. On any provider error the caller falls
+ * back to the statistical summary.
+ */
+export function createLlmContextSummarizer(provider: LLMProvider): ContextSummarizer {
+  return async (messages) => {
+    const transcript = messages
+      .map((message) => `${message.role}: ${extractText(message)}`)
+      .join('\n\n');
+    const response = await provider.chat(
+      [
+        {
+          role: 'user',
+          content: `${CONTEXT_SUMMARIZE_PROMPT}\n\n<conversation>\n${transcript}\n</conversation>`,
+        },
+      ],
+      undefined,
+      { maxTokens: 600, temperature: 0, reasoningEffort: 'off' },
+    );
+    const summary = extractResponseText(response.content);
+    if (!summary) throw new Error('LLM summarizer returned an empty summary');
+    return summary;
+  };
+}
+
+function extractResponseText(blocks: UnifiedContentBlock[]): string {
+  return blocks
+    .filter((block) => block.type === 'text')
+    .map((block) => block.text)
+    .join('\n')
+    .trim();
+}
+
+// ---------------------------------------------------------------------------
 // Token budget manager
 // ---------------------------------------------------------------------------
 
 export class TokenBudget {
   private maxTokens: number;
   private reservedForOutput: number;
+  private summarizer?: ContextSummarizer;
 
-  constructor(maxTokens: number, reservedForOutput = 8192) {
+  constructor(maxTokens: number, reservedForOutput = 8192, summarizer?: ContextSummarizer) {
     this.maxTokens = maxTokens;
     this.reservedForOutput = reservedForOutput;
+    this.summarizer = summarizer;
   }
 
   getMaxContextTokens(): number {
@@ -212,10 +273,10 @@ export class TokenBudget {
    * Preserves the last `keepRecent` turns intact.
    * In a real implementation, this would call a smaller/faster model to summarize.
    */
-  compact(messages: UnifiedMessage[], keepRecent = 6): UnifiedMessage[] {
+  async compact(messages: UnifiedMessage[], keepRecent = 6): Promise<UnifiedMessage[]> {
     // Skip system messages
     const systemMsgs = messages.filter((m) => m.role === 'system');
-    let nonSystem = messages.filter((m) => m.role !== 'system');
+    const nonSystem = messages.filter((m) => m.role !== 'system');
 
     if (nonSystem.length <= keepRecent) {
       return messages; // Nothing to compact
@@ -225,8 +286,8 @@ export class TokenBudget {
     const toSummarize = nonSystem.slice(0, nonSystem.length - keepRecent);
     const recentMessages = nonSystem.slice(nonSystem.length - keepRecent);
 
-    // Generate a lightweight summary of early messages
-    const summary = this.generateSummary(toSummarize);
+    // Summarize the early messages (LLM-backed when available)
+    const summary = await this.generateSummary(toSummarize);
 
     const compactedMessage: UnifiedMessage = {
       role: 'user',
@@ -237,10 +298,23 @@ export class TokenBudget {
   }
 
   /**
-   * Simple summary generator.
-   * In production, this would call a fast/small model for summarization.
+   * Generate a summary of the messages that are about to be dropped.
+   * Uses the injected LLM summarizer when available; falls back to a simple
+   * statistical summary so compaction never blocks the conversation.
    */
-  private generateSummary(messages: UnifiedMessage[]): string {
+  private async generateSummary(messages: UnifiedMessage[]): Promise<string> {
+    if (this.summarizer) {
+      try {
+        return await this.summarizer(messages);
+      } catch (error) {
+        log.warn(
+          `LLM context summarization failed, falling back to statistical summary: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
+
     const userMessages = messages.filter((m) => m.role === 'user').map(extractText);
     const assistantResponses = messages.filter((m) => m.role === 'assistant').map(extractText);
     const toolCalls = messages.filter(

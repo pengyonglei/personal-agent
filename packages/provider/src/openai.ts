@@ -1,4 +1,5 @@
 import OpenAI from 'openai';
+import type { ModelConfig } from '@personal-agent/config';
 import type {
   UnifiedMessage,
   UnifiedToolDefinition,
@@ -121,7 +122,7 @@ export class OpenAIProvider extends BaseLLMProvider {
     baseURL?: string,
     /** For Ollama via OpenAI-compat: set this to 'ollama' */
     providerIdOverride?: string,
-    configuredModels: string[] = [],
+    configuredModels: Array<string | ModelConfig> = [],
   ) {
     super(defaultModel);
     this.apiKey = apiKey;
@@ -138,11 +139,11 @@ export class OpenAIProvider extends BaseLLMProvider {
         : providerIdOverride === 'deepseek'
           ? [...DEEPSEEK_MODELS]
           : [...OPENAI_MODELS];
-    this.addConfiguredModels(configuredModels, (modelId) =>
-      createCompatibleModelInfo(modelId, this.providerId),
+    this.addConfiguredModels(configuredModels, (modelId, config) =>
+      createCompatibleModelInfo(modelId, this.providerId, config),
     );
-    this.addConfiguredModels([defaultModel], (modelId) =>
-      createCompatibleModelInfo(modelId, this.providerId),
+    this.addConfiguredModels([defaultModel], (modelId, config) =>
+      createCompatibleModelInfo(modelId, this.providerId, config),
     );
   }
 
@@ -542,14 +543,18 @@ interface DeepSeekThinkingOptions {
   reasoning_effort?: 'high' | 'max';
 }
 
-function createCompatibleModelInfo(modelId: string, provider: string): ModelInfo {
+function createCompatibleModelInfo(
+  modelId: string,
+  provider: string,
+  config?: ModelConfig,
+): ModelInfo {
   const isDeepSeek = provider === 'deepseek';
   return {
     id: modelId,
     displayName: modelId,
     provider,
-    contextWindow: isDeepSeek ? 1_000_000 : 128_000,
-    maxOutputTokens: isDeepSeek ? 384_000 : 32_768,
+    contextWindow: config?.contextWindow ?? (isDeepSeek ? 1_000_000 : 128_000),
+    maxOutputTokens: config?.maxOutputTokens ?? (isDeepSeek ? 384_000 : 32_768),
     features: [
       ProviderFeature.Streaming,
       ProviderFeature.ToolCalling,

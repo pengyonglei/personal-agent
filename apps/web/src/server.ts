@@ -535,6 +535,10 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
           conversation.setPlanMode(false);
           send({ type: 'notice', message: '计划已批准，执行工具现已解锁。' });
           break;
+        case 'compress_context':
+          await conversation.compressContext();
+          send({ type: 'notice', message: '上下文已压缩，早期对话已生成语义摘要。' });
+          break;
       }
     }
 
@@ -728,14 +732,39 @@ function parseProviderSettings(value: unknown): ProviderSettingsInput {
     result[field] = fieldValue;
   }
   if (input.models !== undefined) {
-    if (
-      !Array.isArray(input.models) ||
-      input.models.length > 100 ||
-      input.models.some((model) => typeof model !== 'string' || model.length > 256)
-    ) {
+    if (!Array.isArray(input.models) || input.models.length > 100) {
       throw new Error('models 格式无效。');
     }
-    result.models = input.models as string[];
+    for (const entry of input.models) {
+      if (typeof entry === 'string') {
+        if (!entry.trim() || entry.length > 256) throw new Error('models 格式无效。');
+        continue;
+      }
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+        throw new Error('models 格式无效。');
+      }
+      const model = entry as Record<string, unknown>;
+      const contextWindow = model.contextWindow;
+      const maxOutputTokens = model.maxOutputTokens;
+      if (
+        typeof model.id !== 'string' ||
+        !model.id.trim() ||
+        model.id.length > 256 ||
+        (contextWindow !== undefined &&
+          (typeof contextWindow !== 'number' ||
+            !Number.isInteger(contextWindow) ||
+            contextWindow < 1024 ||
+            contextWindow > 10_000_000)) ||
+        (maxOutputTokens !== undefined &&
+          (typeof maxOutputTokens !== 'number' ||
+            !Number.isInteger(maxOutputTokens) ||
+            maxOutputTokens < 1 ||
+            maxOutputTokens > 10_000_000))
+      ) {
+        throw new Error('models 格式无效。');
+      }
+    }
+    result.models = input.models as ProviderSettingsInput['models'];
   }
   if (input.thinkingEffort !== undefined) {
     result.thinkingEffort = parseReasoningEffort(input.thinkingEffort);

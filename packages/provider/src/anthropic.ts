@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { Message, MessageStreamEvent, Tool } from '@anthropic-ai/sdk/resources/messages';
+import type { ModelConfig } from '@personal-agent/config';
 import type {
   UnifiedMessage,
   UnifiedContentBlock,
@@ -99,30 +100,30 @@ export class AnthropicProvider extends BaseLLMProvider {
     apiKey: string,
     defaultModel = 'claude-sonnet-5-20251001',
     baseURL?: string,
-    configuredModels: string[] = [],
+    configuredModels: Array<string | ModelConfig> = [],
   ) {
     super(defaultModel);
     this.apiKey = apiKey;
     this.baseURL = baseURL;
     this.models = [...ANTHROPIC_MODELS];
-    this.addConfiguredModels(configuredModels, (modelId) => ({
+    this.addConfiguredModels(configuredModels, (modelId, config) => ({
       id: modelId,
       displayName: modelId,
       provider: this.providerId,
-      contextWindow: 200_000,
-      maxOutputTokens: 32_768,
+      contextWindow: config?.contextWindow ?? 200_000,
+      maxOutputTokens: config?.maxOutputTokens ?? 32_768,
       features: [
         ProviderFeature.Streaming,
         ProviderFeature.ToolCalling,
         ProviderFeature.ParallelToolCalls,
       ],
     }));
-    this.addConfiguredModels([defaultModel], (modelId) => ({
+    this.addConfiguredModels([defaultModel], (modelId, config) => ({
       id: modelId,
       displayName: modelId,
       provider: this.providerId,
-      contextWindow: 200_000,
-      maxOutputTokens: 32_768,
+      contextWindow: config?.contextWindow ?? 200_000,
+      maxOutputTokens: config?.maxOutputTokens ?? 32_768,
       features: [
         ProviderFeature.Streaming,
         ProviderFeature.ToolCalling,

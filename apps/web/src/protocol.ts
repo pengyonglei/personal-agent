@@ -13,6 +13,21 @@ import type {
 
 export type PermissionMode = 'allow' | 'ask' | 'approval';
 
+/**
+ * Token usage of the current conversation relative to the active model's
+ * total context window.
+ */
+export interface ContextUsage {
+  /** Cumulative tokens consumed by this session (API input + output). */
+  usedTokens: number;
+  /** Total context window length of the active model. */
+  totalTokens: number;
+  /** Tokens reserved for model output (not available for context). */
+  reservedOutputTokens: number;
+  /** Used percentage of the total context window (0-100). */
+  percentage: number;
+}
+
 export type ClientMessage =
   | { type: 'prompt'; text: string }
   | { type: 'interrupt' }
@@ -39,6 +54,7 @@ export type ClientMessage =
   | { type: 'set_permission_mode'; mode: PermissionMode }
   | { type: 'set_plan_mode'; enabled: boolean }
   | { type: 'approve_plan' }
+  | { type: 'compress_context' }
   | { type: 'ping' };
 
 export interface RuntimeInfo {
@@ -149,6 +165,7 @@ export type ServerMessage =
   | { type: 'interrupted' }
   | { type: 'permission_mode'; mode: PermissionMode }
   | { type: 'plan'; active: boolean; plan: Plan | null; progress: PlanProgress }
+  | { type: 'context_usage'; usage: ContextUsage }
   | { type: 'notice'; message: string }
   | { type: 'error'; message: string; code?: string }
   | { type: 'pong' };
@@ -276,6 +293,7 @@ export function parseClientMessage(raw: string): ClientMessage {
     case 'list_projects':
     case 'new_session':
     case 'approve_plan':
+    case 'compress_context':
     case 'ping':
       return { type: message.type };
     default:

@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import type { ReasoningEffort } from '@personal-agent/shared';
+import type { ModelConfig } from './schema';
 
 export const PROVIDER_IDS = ['anthropic', 'openai', 'ollama', 'deepseek'] as const;
 
@@ -15,7 +16,7 @@ export interface ProviderSettingsUpdate {
   apiKey?: string;
   baseURL?: string | null;
   defaultModel?: string | null;
-  models?: string[] | null;
+  models?: Array<string | ModelConfig> | null;
   thinkingEffort?: ReasoningEffort | null;
 }
 

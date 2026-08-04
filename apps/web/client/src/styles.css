@@ -560,6 +560,110 @@ select {
   padding: 28px 20px 32px;
 }
 
+/* 对话轮次导航：贴近侧边菜单栏的横向线条，悬停变长并弹出浅色 tooltip 显示用户输入预览 */
+.pa-turn-nav {
+  position: absolute;
+  z-index: 5;
+  top: 50%;
+  left: 30px; /* 兜底：距侧边菜单栏右缘约 30px；实际由 JS 按 content 与侧边栏间距动态覆盖 */
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+
+.pa-turn-nav-item {
+  position: relative;
+  display: block;
+  width: 28px; /* 横向线条：默认较短 */
+  height: 5px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: var(--pa-accent);
+  box-shadow: 0 2px 8px var(--pa-shadow);
+  cursor: pointer;
+  opacity: 0.65;
+  pointer-events: auto;
+  transition:
+    width 180ms ease,
+    height 180ms ease,
+    opacity 180ms ease;
+}
+
+.pa-turn-nav-item:hover,
+.pa-turn-nav-item:focus-visible {
+  width: 38px; /* 悬停时横向变长（仅 +10px） */
+  height: 12px; /* 悬停时放大高度区域，便于定位与点击 */
+  opacity: 1;
+}
+
+.pa-turn-nav-item.active {
+  opacity: 1;
+  box-shadow: 0 2px 10px color-mix(in srgb, var(--pa-accent), transparent 30%);
+}
+
+/* 内容提示：浅色背景、类似 tooltip 的悬浮气泡 */
+.pa-turn-nav-tip {
+  position: absolute;
+  top: 50%;
+  left: calc(100% + 10px);
+  display: flex;
+  min-width: 0;
+  max-width: 280px;
+  padding: 6px 11px;
+  border: 1px solid #d9e0d4;
+  border-radius: 8px;
+  flex-direction: column;
+  color: #172017;
+  background: #ffffff;
+  box-shadow: 0 8px 22px rgba(23, 32, 23, 0.16);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-50%) translateX(-4px);
+  transition:
+    opacity 140ms ease,
+    transform 140ms ease;
+}
+
+.pa-turn-nav-tip::before {
+  position: absolute;
+  top: 50%;
+  left: -4px;
+  width: 8px;
+  height: 8px;
+  border-left: 1px solid #d9e0d4;
+  border-bottom: 1px solid #d9e0d4;
+  background: #ffffff;
+  content: '';
+  transform: translateY(-50%) rotate(45deg);
+}
+
+.pa-turn-nav-item:hover .pa-turn-nav-tip,
+.pa-turn-nav-item:focus-visible .pa-turn-nav-tip {
+  opacity: 1;
+  transform: translateY(-50%) translateX(0);
+}
+
+.pa-turn-nav-tip-index {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: #718071;
+}
+
+.pa-turn-nav-tip-text {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .pa-welcome {
   display: flex;
   min-height: 100%;
@@ -654,6 +758,7 @@ select {
   margin: 0 0 24px;
   align-items: flex-start;
   gap: 11px;
+  scroll-margin-top: 14px;
 }
 
 .pa-message-row.user {
@@ -1570,6 +1675,90 @@ select {
   font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.pa-model-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pa-model-list-head,
+.pa-model-row {
+  display: grid;
+  grid-template-columns: minmax(140px, 1.4fr) minmax(110px, 0.8fr) minmax(110px, 0.8fr) 32px;
+  gap: 8px;
+  align-items: center;
+}
+
+.pa-model-list-head {
+  padding: 0 2px;
+  color: var(--pa-muted);
+  font-size: 10px;
+}
+
+.pa-model-row .ant-form-item {
+  margin-bottom: 0;
+}
+
+.pa-model-row .ant-form-item-explain-error {
+  font-size: 10px;
+}
+
+.pa-context-tip-overlay .ant-tooltip .ant-tooltip-container {
+  background: #ffffff;
+  color: rgba(0, 0, 0, 0.88);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.14);
+}
+
+.pa-context-tip-overlay .ant-tooltip .ant-tooltip-inner {
+  background: #ffffff;
+  color: rgba(0, 0, 0, 0.88);
+}
+
+.pa-context-tip-overlay .ant-tooltip .ant-tooltip-arrow::before {
+  background: #ffffff;
+}
+
+.pa-context-tip {
+  min-width: 230px;
+}
+
+.pa-context-tip-title {
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+
+.pa-context-tip-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 6px;
+  font-size: 12px;
+}
+
+.pa-context-tip-row span {
+  color: rgba(0, 0, 0, 0.55);
+}
+
+.pa-context-tip-row b {
+  font-variant-numeric: tabular-nums;
+}
+
+.pa-context-tip-hint {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(0, 0, 0, 0.1);
+  color: rgba(0, 0, 0, 0.45);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.pa-context-tip-footer {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(0, 0, 0, 0.1);
 }
 
 @keyframes pa-cursor {

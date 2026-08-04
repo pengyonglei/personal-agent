@@ -1,3 +1,4 @@
+import type { ModelConfig } from '@personal-agent/config';
 import type {
   ModelInfo,
   UnifiedMessage,
@@ -108,14 +109,15 @@ export abstract class BaseLLMProvider implements LLMProvider {
   }
 
   protected addConfiguredModels(
-    modelIds: string[],
-    createModel: (modelId: string) => ModelInfo,
+    modelIds: Array<string | ModelConfig>,
+    createModel: (modelId: string, config?: ModelConfig) => ModelInfo,
   ): void {
     const known = new Set(this.models.map((model) => model.id));
-    for (const id of modelIds) {
-      const modelId = id.trim();
+    for (const entry of modelIds) {
+      const config = typeof entry === 'string' ? undefined : entry;
+      const modelId = (typeof entry === 'string' ? entry : entry.id).trim();
       if (!modelId || known.has(modelId)) continue;
-      this.models.push(createModel(modelId));
+      this.models.push(createModel(modelId, config));
       known.add(modelId);
     }
   }

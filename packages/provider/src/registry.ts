@@ -69,7 +69,9 @@ export class ProviderRegistry {
         normalizeDeepSeekModel(providers.deepseek.defaultModel),
         providers.deepseek.baseURL,
         'deepseek',
-        providers.deepseek.models?.map(normalizeDeepSeekModel),
+        providers.deepseek.models?.map((model) =>
+          typeof model === 'string' ? normalizeDeepSeekModel(model) : model,
+        ),
       );
       await provider.initialize();
       registry.register(provider);

@@ -1,3 +1,4 @@
+import type { ModelConfig } from '@personal-agent/config';
 import {
   ProviderFeature,
   generateId,
@@ -45,7 +46,7 @@ export class OllamaProvider extends BaseLLMProvider {
     defaultModel = 'llama3.1',
     baseURL = 'http://localhost:11434',
     fetchFn: typeof fetch = fetch,
-    configuredModels: string[] = [],
+    configuredModels: Array<string | ModelConfig> = [],
   ) {
     super(defaultModel);
     this.baseURL = baseURL.replace(/\/+$/, '');
@@ -66,11 +67,11 @@ export class OllamaProvider extends BaseLLMProvider {
       const discovered = (payload.models ?? [])
         .map((model) => model.name ?? model.model)
         .filter((name): name is string => Boolean(name))
-        .map(createModelInfo);
+        .map((name) => createModelInfo(name));
       if (discovered.length > 0) {
         this.addConfiguredModels(
           discovered.map((model) => model.id),
-          createModelInfo,
+          (modelId) => createModelInfo(modelId),
         );
       }
     } catch {
@@ -282,13 +283,13 @@ function parseToolArguments(value: unknown): Record<string, unknown> {
   }
 }
 
-function createModelInfo(name: string): ModelInfo {
+function createModelInfo(name: string, config?: ModelConfig): ModelInfo {
   return {
     id: name,
     displayName: name,
     provider: 'ollama',
-    contextWindow: 128_000,
-    maxOutputTokens: 32_768,
+    contextWindow: config?.contextWindow ?? 128_000,
+    maxOutputTokens: config?.maxOutputTokens ?? 32_768,
     features: [
       ProviderFeature.Streaming,
       ProviderFeature.ToolCalling,

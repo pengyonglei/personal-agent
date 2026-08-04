@@ -1,5 +1,5 @@
 import { AgentLoop } from './agent-loop';
-import { ContextAssembler, TokenBudget } from './context';
+import { ContextAssembler, TokenBudget, createLlmContextSummarizer } from './context';
 import type { AssemblerContext } from './context';
 import type { LLMProvider } from '@personal-agent/provider';
 import type {
@@ -186,7 +186,11 @@ Your task: ${config.description}
 Do not spawn further sub-agents. Focus on using the allowed tools to complete your task.`,
       });
 
-      const tokenBudget = new TokenBudget(config.contextTokens ?? 100000);
+      const tokenBudget = new TokenBudget(
+        config.contextTokens ?? 100000,
+        8192,
+        createLlmContextSummarizer(config.provider),
+      );
       const maxTurns = config.maxTurns ?? 50;
 
       // Create agent loop with filtered tools

@@ -4,11 +4,27 @@ import { z } from 'zod';
 // Zod schemas for validating the configuration
 // ---------------------------------------------------------------------------
 
+/**
+ * A model entry in the provider config. Either a plain model id (uses the
+ * provider's built-in defaults for context/max output limits) or an object
+ * with explicit context window and max output token counts.
+ */
+export const modelConfigSchema = z.object({
+  id: z.string().min(1).max(256),
+  /** Total context window length in tokens. */
+  contextWindow: z.number().int().min(1024).max(10_000_000).optional(),
+  /** Maximum output (completion) length in tokens. */
+  maxOutputTokens: z.number().int().min(1).max(10_000_000).optional(),
+});
+
 const providerConfigSchema = z.object({
   apiKey: z.string().optional(),
   baseURL: z.string().optional(),
   defaultModel: z.string().optional(),
-  models: z.array(z.string().min(1)).max(100).optional(),
+  models: z
+    .array(z.union([z.string().min(1).max(256), modelConfigSchema]))
+    .max(100)
+    .optional(),
   thinkingEffort: z.enum(['off', 'low', 'medium', 'high', 'max']).optional(),
 });
 
@@ -103,6 +119,7 @@ export const appConfigSchema = z.object({
 });
 
 export type AppConfig = z.infer<typeof appConfigSchema>;
+export type ModelConfig = z.infer<typeof modelConfigSchema>;
 export type ToolSandboxConfig = z.infer<typeof sandboxSchema>;
 export type PermissionRuleConfig = z.infer<typeof permissionRuleSchema>;
 export type MCPServerConfig = z.infer<typeof mcpServerConfigSchema>;

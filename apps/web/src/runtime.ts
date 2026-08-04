@@ -5,6 +5,7 @@ import {
   resolveWritableConfigPath,
   saveProviderSettings,
   type AppConfig,
+  type ModelConfig,
   type ProviderId,
 } from '@personal-agent/config';
 import {
@@ -14,6 +15,7 @@ import {
   ProjectManager,
   SessionManager,
   TokenBudget,
+  createLlmContextSummarizer,
   type Plan,
 } from '@personal-agent/core';
 import { MCPClientManager } from '@personal-agent/mcp';
@@ -32,9 +34,17 @@ import {
   type ToolExecutor,
   type ToolRegistry,
 } from '@personal-agent/tool';
-import type { PermissionMode, RuntimeInfo, ServerMessage, SessionSummary } from './protocol';
+import type {
+  ContextUsage,
+  PermissionMode,
+  RuntimeInfo,
+  ServerMessage,
+  SessionSummary,
+} from './protocol';
 
 const log = createLogger('web-runtime');
+/** Reserved output tokens used by TokenBudget (must stay in sync with its default). */
+const TOKEN_BUDGET_RESERVED_OUTPUT = 8192;
 const SAFE_TOOLS = ['read_file', 'list_directory', 'glob', 'grep', 'todo_write', 'ask_user'];
 const PLAN_MODE_TOOLS = new Set([
   'read_file',
@@ -59,7 +69,7 @@ export interface ProviderSettingsInput {
   apiKey?: string;
   baseURL?: string;
   defaultModel?: string;
-  models?: string[];
+  models?: Array<string | ModelConfig>;
   thinkingEffort?: ReasoningEffort;
 }
 
@@ -80,7 +90,7 @@ export interface ProviderSettingsInfo {
       requiresApiKey: boolean;
       baseURL: string;
       defaultModel: string;
-      models: string[];
+      models: Array<string | ModelConfig>;
       thinkingEffort: ReasoningEffort;
       reasoningSupported: boolean;
     }
@@ -381,7 +391,9 @@ export class WebAgentRuntime {
     );
     const models = normalizeModelList(
       (input.models ?? defaults.models).map((model) =>
-        normalizeProviderModel(input.provider, model),
+        typeof model === 'string'
+          ? normalizeProviderModel(input.provider, model)
+          : { ...model, id: normalizeProviderModel(input.provider, model.id) },
       ),
       defaultModel,
     );
@@ -900,6 +912,7 @@ export class WebConversation {
 
   private session!: SessionManager;
   private agentLoop!: AgentLoop;
+  private tokenBudget!: TokenBudget;
   private busy = false;
   private closed = false;
   private rememberedPermissions = new Map<string, boolean>();
@@ -946,6 +959,7 @@ export class WebConversation {
       const usage = this.agentLoop.getTotalUsage();
       this.session.addTokensUsed(usage.inputTokens, usage.outputTokens);
       this.session.incrementTurnCount();
+      this.publishContextUsage();
     } finally {
       try {
         await this.checkpoint();
@@ -971,6 +985,29 @@ export class WebConversation {
   async checkpoint(): Promise<void> {
     this.session.replaceMessages(this.context.getHistory());
     await this.session.save();
+  }
+
+  /**
+   * Manually compact the conversation context: older messages are replaced by
+   * an LLM-generated semantic summary while the recent turns are preserved.
+   * The compacted history is persisted and pushed to the client (timeline +
+   * context usage refresh).
+   */
+  async compressContext(): Promise<void> {
+    this.assertIdle();
+    const history = this.context.getHistory();
+    const compacted = await this.tokenBudget.compact(history);
+    this.context.clearHistory();
+    for (const msg of compacted.filter((m) => m.role !== 'system')) {
+      this.context.addMessage(msg);
+    }
+    await this.checkpoint();
+    this.emit({
+      type: 'history',
+      sessionId: this.sessionId,
+      messages: this.context.getHistory(),
+    });
+    this.publishContextUsage();
   }
 
   async newSession(): Promise<void> {
@@ -1009,6 +1046,7 @@ export class WebConversation {
       messages: this.session.getMessages(),
     });
     this.publishPlan();
+    this.publishContextUsage();
     return true;
   }
 
@@ -1163,10 +1201,15 @@ Execute in dependency order and use update_plan_step to report progress.`,
     this.planEngine = new PlanModeEngine();
     this.planModeActive = false;
     this.rememberedPermissions.clear();
+    this.tokenBudget = new TokenBudget(
+      resolveContextWindow(this.provider),
+      TOKEN_BUDGET_RESERVED_OUTPUT,
+      createLlmContextSummarizer(this.provider),
+    );
     this.agentLoop = new AgentLoop({
       provider: this.provider,
       contextAssembler: this.context,
-      tokenBudget: new TokenBudget(resolveContextWindow(this.provider)),
+      tokenBudget: this.tokenBudget,
       toolDefinitions: this.runtime.getToolDefinitions(),
       getExposedToolDefinitions: () => {
         const definitions = this.runtime.getToolDefinitions();
@@ -1188,6 +1231,31 @@ Execute in dependency order and use update_plan_step to report progress.`,
       onModelCallEnd: (call) => this.emit({ type: 'llm_call_end', call }),
     });
     if (history.length > 0) this.context.replaceHistory(history);
+    this.publishContextUsage();
+  }
+
+  /**
+   * Push the current conversation's context usage to the client.
+   * Used to display used/total context tokens next to the execute/plan toggle.
+   */
+  private publishContextUsage(): void {
+    try {
+      // Use the API-reported cumulative usage (input + output tokens) tracked
+      // by the session, instead of a local character-based estimate.
+      const usedTokens = this.session.getSession().metadata.totalTokensUsed;
+      const totalTokens = resolveContextWindow(this.provider);
+      const percentage =
+        totalTokens > 0 ? Math.min(100, Math.round((usedTokens / totalTokens) * 100)) : 0;
+      const usage: ContextUsage = {
+        usedTokens,
+        totalTokens,
+        reservedOutputTokens: TOKEN_BUDGET_RESERVED_OUTPUT,
+        percentage,
+      };
+      this.emit({ type: 'context_usage', usage });
+    } catch (error) {
+      log.warn(`Failed to compute context usage: ${formatError(error)}`);
+    }
   }
 
   private forwardAgentEvent(event: AgentEvent): void {
@@ -1237,6 +1305,7 @@ Execute in dependency order and use update_plan_step to report progress.`,
       case 'done':
       case 'interrupted':
         this.emit(event);
+        this.publishContextUsage();
         break;
       case 'permission_request':
         break;
@@ -1314,10 +1383,24 @@ function normalizeRuntimeReasoningEffort(
   return 'high';
 }
 
-function normalizeModelList(models: string[], defaultModel: string): string[] {
-  return [defaultModel, ...models.map((model) => model.trim()).filter(Boolean)].filter(
-    (model, index, values) => values.indexOf(model) === index,
-  );
+function normalizeModelList(
+  models: Array<string | ModelConfig>,
+  defaultModel: string,
+): Array<string | ModelConfig> {
+  const normalized: Array<string | ModelConfig> = [];
+  const seen = new Set<string>();
+  const push = (id: string, config?: ModelConfig): void => {
+    const trimmed = id.trim();
+    if (!trimmed || seen.has(trimmed)) return;
+    seen.add(trimmed);
+    normalized.push(config ? { ...config, id: trimmed } : trimmed);
+  };
+  push(defaultModel);
+  for (const model of models) {
+    if (typeof model === 'string') push(model);
+    else push(model.id, model);
+  }
+  return normalized;
 }
 
 function normalizeProviderModel(provider: ProviderId, model: string): string {
@@ -1336,7 +1419,9 @@ function normalizeRuntimeConfig(config: AppConfig): AppConfig {
   deepseek.defaultModel = normalizeProviderModel('deepseek', legacyModel ?? 'deepseek-v4-flash');
   deepseek.models = normalizeModelList(
     (deepseek.models ?? ['deepseek-v4-flash', 'deepseek-v4-pro']).map((model) =>
-      normalizeProviderModel('deepseek', model),
+      typeof model === 'string'
+        ? normalizeProviderModel('deepseek', model)
+        : { ...model, id: normalizeProviderModel('deepseek', model.id) },
     ),
     deepseek.defaultModel,
   );
