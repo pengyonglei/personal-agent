@@ -705,7 +705,8 @@ function parseProviderSettings(value: unknown): ProviderSettingsInput {
     input.provider !== 'anthropic' &&
     input.provider !== 'openai' &&
     input.provider !== 'ollama' &&
-    input.provider !== 'deepseek'
+    input.provider !== 'deepseek' &&
+    input.provider !== 'volcano'
   ) {
     throw new Error('provider 格式无效。');
   }
@@ -713,7 +714,8 @@ function parseProviderSettings(value: unknown): ProviderSettingsInput {
     input.provider !== 'anthropic' &&
     input.provider !== 'openai' &&
     input.provider !== 'ollama' &&
-    input.provider !== 'deepseek'
+    input.provider !== 'deepseek' &&
+    input.provider !== 'volcano'
   ) {
     throw new Error('不支持的 Provider。');
   }
@@ -773,7 +775,13 @@ function parseProviderSettings(value: unknown): ProviderSettingsInput {
 }
 
 function parseProviderId(value: string): ProviderSettingsInput['provider'] {
-  if (value !== 'anthropic' && value !== 'openai' && value !== 'ollama' && value !== 'deepseek') {
+  if (
+    value !== 'anthropic' &&
+    value !== 'openai' &&
+    value !== 'ollama' &&
+    value !== 'deepseek' &&
+    value !== 'volcano'
+  ) {
     throw new Error('不支持的 Provider。');
   }
   return value;
@@ -789,7 +797,8 @@ function parseRuntimeModelSettings(value: unknown): RuntimeModelSettingsInput {
     input.provider !== 'anthropic' &&
     input.provider !== 'openai' &&
     input.provider !== 'ollama' &&
-    input.provider !== 'deepseek'
+    input.provider !== 'deepseek' &&
+    input.provider !== 'volcano'
   ) {
     throw new Error('provider 格式无效。');
   }

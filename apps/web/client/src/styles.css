@@ -246,7 +246,7 @@ select {
 .pa-project-row {
   display: grid;
   min-height: 24px;
-  grid-template-columns: 18px minmax(0, 1fr) 26px;
+  grid-template-columns: 18px minmax(0, 1fr) 26px 26px;
   align-items: center;
   border: 1px solid transparent;
   border-radius: 6px;
@@ -259,13 +259,19 @@ select {
   background: var(--pa-panel-soft);
 }
 
-.pa-project-row.active {
-  border-color: color-mix(in srgb, var(--pa-accent), transparent 70%);
-  background: var(--pa-accent-soft);
-}
-
 .pa-project-row.archived {
   opacity: 0.66;
+}
+
+/* 项目行的「新建任务」入口：常驻但弱化，hover 行时清晰显示 */
+.pa-project-add-task {
+  opacity: 0.55;
+  transition: opacity 140ms;
+}
+
+.pa-project-row:hover .pa-project-add-task,
+.pa-project-add-task:focus-visible {
+  opacity: 1;
 }
 
 .pa-project-main {
@@ -1577,6 +1583,36 @@ select {
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 供应商选择下拉中的品牌图标（public/icons/*.svg） */
+.pa-provider-option.pa-provider-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  line-height: 1;
+  vertical-align: middle; /* 选中值显示时，让图标+文字组合在 Select 框内垂直居中 */
+}
+
+/* 下拉弹层：选项内容整体垂直居中（图标+文字组合） */
+.pa-provider-select-popup .ant-select-item-option-content {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.pa-provider-option .ant-space-item {
+  display: flex;
+  align-items: center;
+}
+
+.pa-provider-option-icon {
+  display: block; /* 消除 inline 元素基线间隙，与文字保持垂直居中 */
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  border-radius: 4px;
+  object-fit: contain;
 }
 
 .pa-provider-form {

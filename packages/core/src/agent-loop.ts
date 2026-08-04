@@ -91,6 +91,7 @@ export class AgentLoop {
   private config: AgentLoopConfig;
   private turnCount = 0;
   private totalUsage: UsageInfo = { inputTokens: 0, outputTokens: 0 };
+  private lastUsage: UsageInfo | null = null;
   private aborted = false;
   private controller = new AbortController();
 
@@ -109,6 +110,7 @@ export class AgentLoop {
   async *run(userInput: string): AsyncIterable<AgentEvent> {
     this.turnCount = 0;
     this.totalUsage = { inputTokens: 0, outputTokens: 0 };
+    this.lastUsage = null;
     this.aborted = false;
     this.controller = new AbortController();
 
@@ -246,6 +248,7 @@ export class AgentLoop {
               case 'message_end':
                 stopReason = event.stopReason;
                 responseUsage = event.usage;
+                this.lastUsage = event.usage ? { ...event.usage } : null;
                 if (event.usage) {
                   this.totalUsage.inputTokens += event.usage.inputTokens;
                   this.totalUsage.outputTokens += event.usage.outputTokens;
@@ -492,6 +495,15 @@ export class AgentLoop {
 
   getTotalUsage(): UsageInfo {
     return { ...this.totalUsage };
+  }
+
+  /**
+   * Usage of the most recent model request (null if none completed yet).
+   * The input token count reflects the exact context size the last request
+   * was sent with.
+   */
+  getLastUsage(): UsageInfo | null {
+    return this.lastUsage ? { ...this.lastUsage } : null;
   }
 
   private safeNotifyModelCallStart(call: ModelCallDebugStart): void {

@@ -89,7 +89,7 @@ const { TextArea } = Input;
 
 type ColorMode = 'light' | 'dark';
 type ConnectionState = 'connecting' | 'online' | 'offline';
-type ProviderId = 'openai' | 'anthropic' | 'deepseek' | 'ollama';
+type ProviderId = 'openai' | 'anthropic' | 'deepseek' | 'ollama' | 'volcano';
 type PlanMessage = Extract<ServerMessage, { type: 'plan' }>;
 type PermissionRequest = Extract<ServerMessage, { type: 'permission_request' }>;
 type ModelCallStart = Extract<ServerMessage, { type: 'llm_call_start' }>['call'];
@@ -302,6 +302,16 @@ const providerLabels: Record<ProviderId, string> = {
   anthropic: 'Anthropic',
   deepseek: 'DeepSeek',
   ollama: 'Ollama（本地）',
+  volcano: '火山方舟',
+};
+
+/** Brand icons for providers, keyed by provider id (see public/icons). */
+const providerIcons: Partial<Record<ProviderId, string>> = {
+  anthropic: '/icons/anthropic.svg',
+  openai: '/icons/openai.svg',
+  deepseek: '/icons/deepseek-color.svg',
+  ollama: '/icons/ollama.svg',
+  volcano: '/icons/volcengine-color.svg',
 };
 
 function getInitialColorMode(): ColorMode {
@@ -1012,22 +1022,22 @@ function AgentWorkspace({
     activeRuntimeModel?.reasoningOptions ??
     (state.runtime?.reasoningSupported ? ['off', 'high', 'max'] : ['off']);
 
-  function createNewTask() {
+  function createNewTask(projectId?: string) {
     if (stateRef.current.busy || stateRef.current.creatingTask) return;
-    const projectId = stateRef.current.activeProjectId;
-    if (!projectId) {
+    const targetProjectId = projectId ?? stateRef.current.activeProjectId;
+    if (!targetProjectId) {
       messageApi.error('请先创建一个项目');
       return;
     }
-    pendingTaskDraftRef.current = { projectId };
-    setDraftTaskProjectId(projectId);
+    pendingTaskDraftRef.current = { projectId: targetProjectId };
+    setDraftTaskProjectId(targetProjectId);
     setPrompt('');
     replaceTimeline([]);
     setModelCalls([]);
     setSelectedModelCallId(undefined);
     setShowScrollButton(false);
     patchState({
-      activeProjectId: projectId,
+      activeProjectId: targetProjectId,
       activeTaskId: undefined,
       creatingTask: false,
       sidebarOpen: false,
@@ -1829,7 +1839,11 @@ function AgentWorkspace({
                       return (
                         <Card key={provider} size="small" className="pa-provider-card">
                           <div className="pa-provider-card-main">
-                            <Avatar shape="square" icon={<RobotOutlined />} />
+                            <Avatar
+                              shape="square"
+                              src={providerIcons[provider]}
+                              icon={<RobotOutlined />}
+                            />
                             <div>
                               <Space size={8}>
                                 <strong>{providerLabels[provider]}</strong>
@@ -1883,9 +1897,21 @@ function AgentWorkspace({
                   <Form.Item name="provider" label="供应商">
                     <Select
                       disabled={Boolean(selectedProviderSettings?.configured)}
+                      popupClassName="pa-provider-select-popup"
                       options={Object.entries(providerLabels).map(([value, label]) => ({
                         value,
-                        label,
+                        label: (
+                          <Space size={8} className="pa-provider-option">
+                            {providerIcons[value as ProviderId] && (
+                              <img
+                                src={providerIcons[value as ProviderId]}
+                                alt={label}
+                                className="pa-provider-option-icon"
+                              />
+                            )}
+                            <span>{label}</span>
+                          </Space>
+                        ),
                         disabled:
                           providerSettings?.providers[value as ProviderId].configured &&
                           value !== selectedProvider,
@@ -1999,13 +2025,23 @@ function AgentWorkspace({
                       )}
                     </Form.List>
                   </Form.Item>
-                  {selectedProvider === 'deepseek' && (
+                  {(selectedProvider === 'deepseek' || selectedProvider === 'volcano') && (
                     <Form.Item
                       name="thinkingEffort"
                       label="默认思考强度"
-                      extra="DeepSeek 的 low/medium 等价于 high，因此仅展示有效档位。"
+                      extra={
+                        selectedProvider === 'deepseek'
+                          ? 'DeepSeek 的 low/medium 等价于 high，因此仅展示有效档位。'
+                          : '火山方舟仅深度思考模型（如 doubao-seed-thinking）支持思考，普通模型请选择「关闭」。'
+                      }
                     >
-                      <Select options={getReasoningOptions(['off', 'high', 'max'])} />
+                      <Select
+                        options={getReasoningOptions(
+                          selectedProvider === 'deepseek'
+                            ? ['off', 'high', 'max']
+                            : ['off', 'low', 'medium', 'high'],
+                        )}
+                      />
                     </Form.Item>
                   )}
                   <div className="pa-config-path">
@@ -2081,7 +2117,7 @@ function SidebarContent({
   onToggleProjectCollapse: (projectId: string) => void;
   onProjectChange: (projectId: string) => void;
   onCreateProject: () => void;
-  onCreateTask: () => void;
+  onCreateTask: (projectId?: string) => void;
   onRefresh: () => void;
   onOpenTask: (taskId: string) => void;
   onStartRename: (task: TaskSummary) => void;
@@ -2190,9 +2226,7 @@ function SidebarContent({
                 ) : (
                   <>
                     <div
-                      className={`pa-project-row${project.archived ? ' archived' : ''}${
-                        project.id === activeProjectId ? ' active' : ''
-                      }`}
+                      className={`pa-project-row${project.archived ? ' archived' : ''}`}
                     >
                       <button
                         type="button"
@@ -2269,6 +2303,20 @@ function SidebarContent({
                           aria-label={`项目 ${project.name} 的更多操作`}
                         />
                       </Dropdown>
+                      <Tooltip title="新建任务">
+                        <Button
+                          type="text"
+                          size="small"
+                          className="pa-project-add-task"
+                          icon={<PlusOutlined />}
+                          disabled={busy || project.archived}
+                          aria-label={`为项目 ${project.name} 新建任务`}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onCreateTask(project.id);
+                          }}
+                        />
+                      </Tooltip>
                     </div>
                     {!project.archived && !collapsedProjects.has(project.id) && (
                       <div className="pa-project-tasks">
@@ -3502,9 +3550,9 @@ function ContextUsagePanel({
         <b>{usage.percentage}%</b>
       </div>
       <div className="pa-context-tip-hint">
-        已使用为 API 实际用量（输入 + 输出累计）；
-        {formatTokens(usage.reservedOutputTokens)} tokens 预留给模型输出，
-        历史占用超过可用上下文 75% 时自动压缩。
+        <div>已使用：最后一次模型调用的输入Token</div>
+        <div>预留输出：{formatTokens(usage.reservedOutputTokens)} tokens</div>
+        <div>自动压缩阈值：0.75</div>
       </div>
       {footer && <div className="pa-context-tip-footer">{footer}</div>}
     </div>
@@ -3594,7 +3642,13 @@ function getModelSelectWidth(label: string): number {
 }
 
 function isProviderId(value: string): value is ProviderId {
-  return value === 'openai' || value === 'anthropic' || value === 'deepseek' || value === 'ollama';
+  return (
+    value === 'openai' ||
+    value === 'anthropic' ||
+    value === 'deepseek' ||
+    value === 'ollama' ||
+    value === 'volcano'
+  );
 }
 
 function getConfiguredProviders(settings: ProviderSettingsInfo | null): ProviderId[] {

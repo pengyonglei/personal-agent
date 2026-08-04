@@ -2,6 +2,8 @@ import type { AppConfig } from '@personal-agent/config';
 import { type LLMProvider, type BaseLLMProvider } from './interface';
 import { AnthropicProvider } from './anthropic';
 import { OpenAIProvider } from './openai';
+import { DeepSeekProvider, normalizeDeepSeekModel } from './deepseek';
+import { VolcanoArkProvider } from './volcano';
 import { OllamaProvider } from './ollama';
 import { createLogger } from '@personal-agent/shared';
 
@@ -42,7 +44,6 @@ export class ProviderRegistry {
         providers.openai.apiKey,
         providers.openai.defaultModel,
         providers.openai.baseURL,
-        undefined,
         providers.openai.models,
       );
       await provider.initialize();
@@ -64,14 +65,26 @@ export class ProviderRegistry {
 
     if (providers.deepseek) {
       log.info('Registering DeepSeek provider');
-      const provider = new OpenAIProvider(
+      const provider = new DeepSeekProvider(
         providers.deepseek.apiKey ?? 'deepseek',
         normalizeDeepSeekModel(providers.deepseek.defaultModel),
         providers.deepseek.baseURL,
-        'deepseek',
         providers.deepseek.models?.map((model) =>
           typeof model === 'string' ? normalizeDeepSeekModel(model) : model,
         ),
+      );
+      await provider.initialize();
+      registry.register(provider);
+    }
+
+    // Volcano Ark (火山方舟)
+    if (providers.volcano) {
+      log.info('Registering Volcano Ark provider');
+      const provider = new VolcanoArkProvider(
+        providers.volcano.apiKey ?? 'volcano',
+        providers.volcano.defaultModel,
+        providers.volcano.baseURL,
+        providers.volcano.models,
       );
       await provider.initialize();
       registry.register(provider);
@@ -130,11 +143,4 @@ export class ProviderRegistry {
     }
     this.providers.clear();
   }
-}
-
-function normalizeDeepSeekModel(model?: string): string {
-  if (!model || model === 'deepseek-chat' || model === 'deepseek-reasoner') {
-    return 'deepseek-v4-flash';
-  }
-  return model;
 }

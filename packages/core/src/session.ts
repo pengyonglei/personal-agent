@@ -48,6 +48,8 @@ export class SessionManager {
         totalTokensUsed: 0,
         totalCost: 0,
         turnCount: 0,
+        tokensUsedByModel: {},
+        lastInputTokens: 0,
       },
     };
   }
@@ -111,6 +113,10 @@ export class SessionManager {
     this.currentSession.updatedAt = new Date();
   }
 
+  private modelKey(): string {
+    return `${this.currentSession.metadata.provider}:${this.currentSession.metadata.model}`;
+  }
+
   incrementTurnCount(by = 1): void {
     this.currentSession.metadata.turnCount += by;
     this.currentSession.updatedAt = new Date();
@@ -118,7 +124,41 @@ export class SessionManager {
 
   addTokensUsed(input: number, output: number): void {
     this.currentSession.metadata.totalTokensUsed += input + output;
+    const key = this.modelKey();
+    const entries = this.currentSession.metadata.tokensUsedByModel ?? {};
+    const current = entries[key];
+    this.currentSession.metadata.tokensUsedByModel = {
+      ...entries,
+      [key]: {
+        inputTokens: (current?.inputTokens ?? 0) + input,
+        outputTokens: (current?.outputTokens ?? 0) + output,
+      },
+    };
     this.currentSession.updatedAt = new Date();
+  }
+
+  /**
+   * Total tokens used by a specific model (input + output) within this
+   * session. Falls back to the legacy session-wide total when no per-model
+   * records exist yet (sessions created before per-model tracking).
+   */
+  getTokensUsed(provider: string, model: string): number {
+    const entry = this.currentSession.metadata.tokensUsedByModel?.[`${provider}:${model}`];
+    if (entry) return entry.inputTokens + entry.outputTokens;
+    const hasPerModelRecords = Object.keys(this.currentSession.metadata.tokensUsedByModel ?? {})
+      .length > 0;
+    return hasPerModelRecords ? 0 : this.currentSession.metadata.totalTokensUsed;
+  }
+
+  /** Record the input token count of the most recent model request. */
+  setLastInputTokens(input: number): void {
+    this.currentSession.metadata.lastInputTokens = input;
+    this.currentSession.updatedAt = new Date();
+  }
+
+  /** Input tokens of the most recent model request (0 if none yet). */
+  getLastInputTokens(): number {
+    return this.currentSession.metadata.lastInputTokens ?? 0;
   }
 
   // -------------------------------------------------------------------
@@ -150,6 +190,8 @@ export class SessionManager {
         ...snapshot.metadata,
         totalTokensUsed: snapshot.metadata.totalTokensUsed,
         totalCost: snapshot.metadata.totalCost,
+        tokensUsedByModel: snapshot.metadata.tokensUsedByModel ?? {},
+        lastInputTokens: snapshot.metadata.lastInputTokens ?? 0,
       },
     };
 
@@ -189,6 +231,8 @@ export class SessionManager {
           totalTokensUsed: raw.metadata.totalTokensUsed ?? 0,
           totalCost: raw.metadata.totalCost ?? 0,
           turnCount: raw.metadata.turnCount ?? 0,
+          tokensUsedByModel: raw.metadata.tokensUsedByModel ?? {},
+          lastInputTokens: raw.metadata.lastInputTokens ?? 0,
         },
       };
 

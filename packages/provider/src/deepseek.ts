@@ -4,6 +4,7 @@ import {
   ProviderFeature,
   type ChatOptions,
   type ModelInfo,
+  type ReasoningEffort,
   type StreamOptions,
   type UnifiedContentBlock,
   type UnifiedMessage,
@@ -21,102 +22,81 @@ import {
 } from './openai-compat';
 
 // ---------------------------------------------------------------------------
-// OpenAI model definitions
+// DeepSeek model definitions
 // ---------------------------------------------------------------------------
 
-const OPENAI_MODELS: ModelInfo[] = [
+const DEEPSEEK_MODELS: ModelInfo[] = [
   {
-    id: 'gpt-4o',
-    displayName: 'GPT-4o',
-    provider: 'openai',
-    contextWindow: 128000,
-    maxOutputTokens: 16384,
+    id: 'deepseek-v4-flash',
+    displayName: 'DeepSeek V4 Flash',
+    provider: 'deepseek',
+    contextWindow: 1_000_000,
+    maxOutputTokens: 384_000,
     features: [
       ProviderFeature.Streaming,
       ProviderFeature.ToolCalling,
       ProviderFeature.ParallelToolCalls,
-      ProviderFeature.ImageInput,
+      ProviderFeature.Thinking,
     ],
-    pricing: { inputPer1k: 0.0025, outputPer1k: 0.01 },
   },
   {
-    id: 'gpt-4o-mini',
-    displayName: 'GPT-4o Mini',
-    provider: 'openai',
-    contextWindow: 128000,
-    maxOutputTokens: 16384,
+    id: 'deepseek-v4-pro',
+    displayName: 'DeepSeek V4 Pro',
+    provider: 'deepseek',
+    contextWindow: 1_000_000,
+    maxOutputTokens: 384_000,
     features: [
       ProviderFeature.Streaming,
       ProviderFeature.ToolCalling,
       ProviderFeature.ParallelToolCalls,
+      ProviderFeature.Thinking,
     ],
-    pricing: { inputPer1k: 0.00015, outputPer1k: 0.0006 },
-  },
-  {
-    id: 'gpt-5',
-    displayName: 'GPT-5',
-    provider: 'openai',
-    contextWindow: 256000,
-    maxOutputTokens: 32768,
-    features: [
-      ProviderFeature.Streaming,
-      ProviderFeature.ToolCalling,
-      ProviderFeature.ParallelToolCalls,
-      ProviderFeature.ImageInput,
-    ],
-    pricing: { inputPer1k: 0.00375, outputPer1k: 0.015 },
-  },
-  {
-    id: 'o4-mini',
-    displayName: 'o4 Mini',
-    provider: 'openai',
-    contextWindow: 200000,
-    maxOutputTokens: 100000,
-    features: [
-      ProviderFeature.Streaming,
-      ProviderFeature.ToolCalling,
-      ProviderFeature.ParallelToolCalls,
-    ],
-    pricing: { inputPer1k: 0.0011, outputPer1k: 0.0044 },
   },
 ];
 
 const MODEL_DEFAULTS = {
-  contextWindow: 128_000,
-  maxOutputTokens: 32_768,
+  contextWindow: 1_000_000,
+  maxOutputTokens: 384_000,
   features: [
     ProviderFeature.Streaming,
     ProviderFeature.ToolCalling,
     ProviderFeature.ParallelToolCalls,
+    ProviderFeature.Thinking,
   ],
 } satisfies Omit<ModelInfo, 'id' | 'displayName' | 'provider'>;
+
+/** DeepSeek extra request fields (OpenAI-compatible API). */
+interface DeepSeekThinkingOptions {
+  thinking: { type: 'enabled' | 'disabled' };
+  reasoning_effort?: 'high' | 'max';
+}
 
 // ---------------------------------------------------------------------------
 // Adapter
 // ---------------------------------------------------------------------------
 
-export class OpenAIProvider extends BaseLLMProvider {
-  readonly providerId = 'openai';
-  readonly displayName = 'OpenAI (GPT)';
+export class DeepSeekProvider extends BaseLLMProvider {
+  readonly providerId = 'deepseek';
+  readonly displayName = 'DeepSeek';
 
   private client: OpenAI | null = null;
   private readonly apiKey: string;
-  private readonly baseURL: string | undefined;
+  private readonly baseURL: string;
 
   constructor(
     apiKey: string,
-    defaultModel = 'gpt-4o',
-    baseURL?: string,
+    defaultModel = 'deepseek-v4-flash',
+    baseURL = 'https://api.deepseek.com',
     configuredModels: Array<string | ModelConfig> = [],
   ) {
-    super(defaultModel);
+    super(normalizeDeepSeekModel(defaultModel));
     this.apiKey = apiKey;
-    this.baseURL = baseURL;
-    this.models = [...OPENAI_MODELS];
+    this.baseURL = baseURL.replace(/\/+$/, '');
+    this.models = [...DEEPSEEK_MODELS];
     this.addConfiguredModels(configuredModels, (modelId, config) =>
       createModelInfo(modelId, this.providerId, MODEL_DEFAULTS, config),
     );
-    this.addConfiguredModels([defaultModel], (modelId, config) =>
+    this.addConfiguredModels([this.currentModel], (modelId, config) =>
       createModelInfo(modelId, this.providerId, MODEL_DEFAULTS, config),
     );
   }
@@ -149,19 +129,22 @@ export class OpenAIProvider extends BaseLLMProvider {
     if (!this.client) throw new Error('Provider not initialized. Call initialize() first.');
 
     const model = options.model ?? this.currentModel;
-    const openaiMessages = buildOpenAIMessages(messages, options.systemPrompt);
+    const thinking = getDeepSeekThinkingOptions(options.reasoningEffort);
+
+    const openaiMessages = buildOpenAIMessages(messages, options.systemPrompt, true);
     const openaiTools = buildOpenAITools(tools);
 
     try {
       const stream = await this.client.chat.completions.create({
         model,
         max_tokens: options.maxTokens,
-        temperature: options.temperature,
+        temperature: thinking?.thinking.type === 'enabled' ? undefined : options.temperature,
         messages: openaiMessages,
         tools: openaiTools.length > 0 ? openaiTools : undefined,
         stream: true,
         stream_options: { include_usage: true },
-      });
+        ...thinking,
+      } as OpenAI.Chat.ChatCompletionCreateParamsStreaming & DeepSeekThinkingOptions);
 
       let accumulatedToolCalls: Map<number, { id: string; name: string; arguments: string }> =
         new Map();
@@ -173,6 +156,13 @@ export class OpenAIProvider extends BaseLLMProvider {
         }
 
         const delta = chunk.choices[0]?.delta;
+        const reasoningContent = (
+          delta as (typeof delta & { reasoning_content?: string }) | undefined
+        )?.reasoning_content;
+
+        if (reasoningContent) {
+          yield { type: 'thinking_delta', thinkingDelta: reasoningContent };
+        }
 
         if (delta?.content) {
           yield { type: 'text_delta', textDelta: delta.content };
@@ -249,20 +239,30 @@ export class OpenAIProvider extends BaseLLMProvider {
     if (!this.client) throw new Error('Provider not initialized. Call initialize() first.');
 
     const model = options?.model ?? this.currentModel;
-    const openaiMessages = buildOpenAIMessages(messages, options?.systemPrompt);
+    const thinking = getDeepSeekThinkingOptions(options?.reasoningEffort);
+
+    const openaiMessages = buildOpenAIMessages(messages, options?.systemPrompt, true);
     const openaiTools = tools && tools.length > 0 ? buildOpenAITools(tools) : undefined;
 
     const response = await this.client.chat.completions.create({
       model,
       max_tokens: options?.maxTokens,
-      temperature: options?.temperature,
+      temperature: thinking?.thinking.type === 'enabled' ? undefined : options?.temperature,
       messages: openaiMessages,
       tools: openaiTools,
-    });
+      ...thinking,
+    } as OpenAI.Chat.ChatCompletionCreateParamsNonStreaming & DeepSeekThinkingOptions);
 
     const choice = response.choices[0];
     const content: UnifiedContentBlock[] = [];
     const toolCalls: UnifiedMessage['toolCalls'] = [];
+    const reasoningContent = (
+      choice?.message as (typeof choice.message & { reasoning_content?: string }) | undefined
+    )?.reasoning_content;
+
+    if (reasoningContent) {
+      content.push({ type: 'thinking', thinking: reasoningContent });
+    }
 
     if (choice?.message.content) {
       content.push({ type: 'text', text: choice.message.content });
@@ -298,4 +298,34 @@ export class OpenAIProvider extends BaseLLMProvider {
         : { inputTokens: 0, outputTokens: 0 },
     };
   }
+}
+
+// -----------------------------------------------------------------------
+// Utilities
+// -----------------------------------------------------------------------
+
+/**
+ * Map legacy DeepSeek model ids to the current lineup. Unknown ids pass
+ * through unchanged so custom models keep working.
+ */
+export function normalizeDeepSeekModel(model?: string): string {
+  if (!model || model === 'deepseek-chat' || model === 'deepseek-reasoner') {
+    return 'deepseek-v4-flash';
+  }
+  return model;
+}
+
+/**
+ * DeepSeek thinking is a boolean toggle plus an effort hint; low/medium are
+ * not exposed by the API and map to 'high'. When thinking is enabled the
+ * temperature parameter must be omitted (the API rejects the combination).
+ */
+function getDeepSeekThinkingOptions(
+  effort: ReasoningEffort | undefined,
+): DeepSeekThinkingOptions | undefined {
+  if (effort === 'off') return { thinking: { type: 'disabled' } };
+  return {
+    thinking: { type: 'enabled' },
+    reasoning_effort: effort === 'max' ? 'max' : 'high',
+  };
 }

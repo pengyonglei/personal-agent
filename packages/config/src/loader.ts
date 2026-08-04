@@ -144,6 +144,17 @@ function mergeEnvVars(config: AppConfig): AppConfig {
       ];
       result.providers.deepseek.thinkingEffort =
         result.providers.deepseek.thinkingEffort || 'high';
+    } else if (path === 'volcano_api_key') {
+      result.providers.volcano = result.providers.volcano || {};
+      result.providers.volcano.apiKey = value;
+      result.providers.volcano.baseURL =
+        result.providers.volcano.baseURL || 'https://ark.cn-beijing.volces.com/api/v3';
+      result.providers.volcano.defaultModel =
+        result.providers.volcano.defaultModel || 'doubao-seed-1-6-250615';
+      result.providers.volcano.models = result.providers.volcano.models || [
+        'doubao-seed-1-6-250615',
+        'doubao-seed-thinking-250615',
+      ];
     } else if (path === 'model') {
       // Set as default on the active provider if not already set
       // The CLI layer picks which provider this applies to

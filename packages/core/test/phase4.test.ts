@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { AgentEvent } from '@personal-agent/shared';
@@ -229,6 +229,77 @@ test('session messages and metadata survive a reload', async () => {
     assert.equal(restored.getMessages().length, 3);
     assert.equal(restored.getSession().metadata.turnCount, 1);
     assert.equal(restored.getSession().metadata.totalTokensUsed, 10);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('session token usage is tracked per model and persists across reloads', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'personal-agent-session-model-usage-'));
+  try {
+    const first = new SessionManager('/workspace', 'model-a', 'mock', directory);
+    first.addTokensUsed(4, 6);
+    first.addTokensUsed(2, 1);
+    assert.equal(first.getTokensUsed('mock', 'model-a'), 13);
+    assert.equal(first.getTokensUsed('mock', 'model-b'), 0);
+
+    first.updateProvider('model-b', 'mock');
+    first.addTokensUsed(10, 5);
+    assert.equal(first.getTokensUsed('mock', 'model-a'), 13);
+    assert.equal(first.getTokensUsed('mock', 'model-b'), 15);
+    assert.equal(first.getSession().metadata.totalTokensUsed, 28);
+
+    const id = await first.save();
+
+    const restored = new SessionManager('/other', 'other', 'other', directory);
+    assert.equal(await restored.restore(id), true);
+    assert.equal(restored.getTokensUsed('mock', 'model-a'), 13);
+    assert.equal(restored.getTokensUsed('mock', 'model-b'), 15);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('session records the last request input tokens and persists them', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'personal-agent-session-last-input-'));
+  try {
+    const first = new SessionManager('/workspace', 'model-a', 'mock', directory);
+    assert.equal(first.getLastInputTokens(), 0);
+    first.setLastInputTokens(1234);
+    assert.equal(first.getLastInputTokens(), 1234);
+    const id = await first.save();
+
+    const restored = new SessionManager('/other', 'other', 'other', directory);
+    assert.equal(await restored.restore(id), true);
+    assert.equal(restored.getLastInputTokens(), 1234);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('session token usage falls back to legacy total without per-model records', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'personal-agent-session-legacy-'));
+  try {
+    const id = 'legacy-session';
+    const legacy = {
+      id,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      messages: [],
+      metadata: {
+        workingDirectory: '/workspace',
+        model: 'old-model',
+        provider: 'openai',
+        totalTokensUsed: 42,
+        totalCost: 0,
+        turnCount: 1,
+      },
+    };
+    await writeFile(join(directory, `${id}.json`), JSON.stringify(legacy), 'utf-8');
+
+    const session = new SessionManager('/workspace', 'old-model', 'openai', directory);
+    assert.equal(await session.restore(id), true);
+    assert.equal(session.getTokensUsed('openai', 'old-model'), 42);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

@@ -6,7 +6,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import type { ReasoningEffort } from '@personal-agent/shared';
 import type { ModelConfig } from './schema';
 
-export const PROVIDER_IDS = ['anthropic', 'openai', 'ollama', 'deepseek'] as const;
+export const PROVIDER_IDS = ['anthropic', 'openai', 'ollama', 'deepseek', 'volcano'] as const;
 
 export type ProviderId = (typeof PROVIDER_IDS)[number];
 

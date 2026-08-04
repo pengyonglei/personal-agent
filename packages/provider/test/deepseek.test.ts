@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { test } from 'node:test';
-import { OpenAIProvider } from '../src/openai';
+import { DeepSeekProvider } from '../src/deepseek';
 
 test('DeepSeek sends thinking settings and preserves reasoning content across tool turns', async () => {
   const requestBodies: Array<Record<string, unknown>> = [];
@@ -35,11 +35,10 @@ test('DeepSeek sends thinking settings and preserves reasoning content across to
   const address = server.address();
   assert.ok(address && typeof address === 'object');
 
-  const provider = new OpenAIProvider(
+  const provider = new DeepSeekProvider(
     'test-key',
     'deepseek-v4-pro',
     `http://127.0.0.1:${address.port}`,
-    'deepseek',
     ['deepseek-v4-flash', 'deepseek-v4-pro'],
   );
   await provider.initialize();
@@ -88,11 +87,10 @@ test('DeepSeek sends thinking settings and preserves reasoning content across to
     const assistant = enabledMessages.find((message) => message.role === 'assistant');
     assert.equal(assistant?.reasoning_content, '需要先读取文件');
 
-    for await (const _event of provider.streamChat(
-      [{ role: 'user', content: '直接回答' }],
-      [],
-      { reasoningEffort: 'off', temperature: 0.3 },
-    )) {
+    for await (const _event of provider.streamChat([{ role: 'user', content: '直接回答' }], [], {
+      reasoningEffort: 'off',
+      temperature: 0.3,
+    })) {
       // Consume the stream so the request body can be asserted.
     }
     const disabledRequest = requestBodies[1];
@@ -105,4 +103,11 @@ test('DeepSeek sends thinking settings and preserves reasoning content across to
       server.close((error) => (error ? reject(error) : resolve())),
     );
   }
+});
+
+test('DeepSeek normalizes legacy model ids', () => {
+  const provider = new DeepSeekProvider('test-key', 'deepseek-reasoner');
+  assert.equal(provider.getModel(), 'deepseek-v4-flash');
+  assert.ok(provider.getModelList().some((model) => model.id === 'deepseek-v4-flash'));
+  assert.ok(provider.getModelList().some((model) => model.id === 'deepseek-v4-pro'));
 });

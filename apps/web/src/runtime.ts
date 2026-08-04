@@ -342,7 +342,7 @@ export class WebAgentRuntime {
   }
 
   getProviderSettings(): ProviderSettingsInfo {
-    const providerIds: ProviderId[] = ['anthropic', 'openai', 'ollama', 'deepseek'];
+    const providerIds: ProviderId[] = ['anthropic', 'openai', 'ollama', 'deepseek', 'volcano'];
     const providers = Object.fromEntries(
       providerIds.map((id) => {
         const defaults = getProviderDefaults(id);
@@ -363,8 +363,9 @@ export class WebAgentRuntime {
               configured?.defaultModel ?? defaults.defaultModel,
             ),
             thinkingEffort:
-              configured?.thinkingEffort ?? (id === 'deepseek' ? defaults.thinkingEffort : 'off'),
-            reasoningSupported: id === 'deepseek',
+              configured?.thinkingEffort ??
+              (id === 'deepseek' || id === 'volcano' ? defaults.thinkingEffort : 'off'),
+            reasoningSupported: id === 'deepseek' || id === 'volcano',
           },
         ];
       }),
@@ -399,7 +400,9 @@ export class WebAgentRuntime {
     );
     const thinkingEffort = normalizeRuntimeReasoningEffort(
       input.provider,
-      input.provider === 'deepseek' ? (input.thinkingEffort ?? defaults.thinkingEffort) : 'off',
+      input.provider === 'deepseek' || input.provider === 'volcano'
+        ? (input.thinkingEffort ?? defaults.thinkingEffort)
+        : 'off',
     );
     const nextConfigValue = structuredClone(this.config) as unknown as Record<string, unknown>;
     const providers = nextConfigValue.providers as Record<string, unknown>;
@@ -958,6 +961,8 @@ export class WebConversation {
       this.session.replaceMessages(this.context.getHistory());
       const usage = this.agentLoop.getTotalUsage();
       this.session.addTokensUsed(usage.inputTokens, usage.outputTokens);
+      const lastUsage = this.agentLoop.getLastUsage();
+      if (lastUsage) this.session.setLastInputTokens(lastUsage.inputTokens);
       this.session.incrementTurnCount();
       this.publishContextUsage();
     } finally {
@@ -1228,7 +1233,15 @@ Execute in dependency order and use update_plan_step to report progress.`,
         reasoningEffort: this.runtime.getReasoningEffort(),
       },
       onModelCallStart: (call) => this.emit({ type: 'llm_call_start', call }),
-      onModelCallEnd: (call) => this.emit({ type: 'llm_call_end', call }),
+      onModelCallEnd: (call) => {
+        this.emit({ type: 'llm_call_end', call });
+        // 每次模型请求结束立即刷新“已使用上下文”：即使一次任务执行中
+        // 会循环调用多次模型，UI 上的 token 数也能实时更新。
+        if (call.status === 'completed' && call.response.usage) {
+          this.session.setLastInputTokens(call.response.usage.inputTokens);
+          this.publishContextUsage();
+        }
+      },
     });
     if (history.length > 0) this.context.replaceHistory(history);
     this.publishContextUsage();
@@ -1236,13 +1249,15 @@ Execute in dependency order and use update_plan_step to report progress.`,
 
   /**
    * Push the current conversation's context usage to the client.
-   * Used to display used/total context tokens next to the execute/plan toggle.
+   * "Used" tokens reflect the input tokens of the most recent model request,
+   * i.e. the exact context size the last request was sent with.
    */
   private publishContextUsage(): void {
     try {
-      // Use the API-reported cumulative usage (input + output tokens) tracked
-      // by the session, instead of a local character-based estimate.
-      const usedTokens = this.session.getSession().metadata.totalTokensUsed;
+      // Use the API-reported input token count of the most recent model
+      // request, instead of a cumulative total or a local character-based
+      // estimate.
+      const usedTokens = this.session.getLastInputTokens();
       const totalTokens = resolveContextWindow(this.provider);
       const percentage =
         totalTokens > 0 ? Math.min(100, Math.round((usedTokens / totalTokens) * 100)) : 0;
@@ -1355,32 +1370,58 @@ function getProviderDefaults(provider: ProviderId): {
         models: ['deepseek-v4-flash', 'deepseek-v4-pro'],
         thinkingEffort: 'high',
       };
+    case 'volcano':
+      return {
+        baseURL: 'https://ark.cn-beijing.volces.com/api/v3',
+        defaultModel: 'doubao-seed-1-6-250615',
+        models: [
+          'doubao-seed-1-6-250615',
+          'doubao-1-5-pro-32k-250115',
+          'doubao-seed-thinking-250615',
+          'deepseek-v3-250324',
+          'deepseek-r1-250528',
+        ],
+        thinkingEffort: 'off',
+      };
   }
 }
 
 function supportsRuntimeReasoning(providerId: ProviderId, model?: ModelInfo): boolean {
-  return providerId === 'deepseek' && Boolean(model?.features.includes(ProviderFeature.Thinking));
+  return (
+    (providerId === 'deepseek' || providerId === 'volcano') &&
+    Boolean(model?.features.includes(ProviderFeature.Thinking))
+  );
 }
 
 function reasoningOptionsForProvider(providerId: ProviderId): ReasoningEffort[] {
-  return providerId === 'deepseek' ? ['off', 'high', 'max'] : ['off'];
+  if (providerId === 'deepseek') return ['off', 'high', 'max'];
+  if (providerId === 'volcano') return ['off', 'low', 'medium', 'high'];
+  return ['off'];
 }
 
 function resolveProviderReasoningEffort(
   providerId: ProviderId,
   providerConfig: AppConfig['providers'][ProviderId],
 ): ReasoningEffort {
-  if (providerId !== 'deepseek') return 'off';
-  return normalizeRuntimeReasoningEffort(providerId, providerConfig?.thinkingEffort ?? 'high');
+  if (providerId !== 'deepseek' && providerId !== 'volcano') return 'off';
+  const fallback = providerId === 'deepseek' ? 'high' : 'off';
+  return normalizeRuntimeReasoningEffort(providerId, providerConfig?.thinkingEffort ?? fallback);
 }
 
 function normalizeRuntimeReasoningEffort(
   providerId: ProviderId,
   effort: ReasoningEffort,
 ): ReasoningEffort {
-  if (providerId !== 'deepseek') return 'off';
-  if (effort === 'off' || effort === 'max') return effort;
-  return 'high';
+  if (providerId === 'deepseek') {
+    if (effort === 'off' || effort === 'max') return effort;
+    return 'high';
+  }
+  if (providerId === 'volcano') {
+    // Volcano Ark exposes low/medium/high; 'max' is not supported.
+    if (effort === 'max') return 'high';
+    return effort;
+  }
+  return 'off';
 }
 
 function normalizeModelList(
@@ -1451,6 +1492,7 @@ function providerLabel(provider: ProviderId): string {
     openai: 'OpenAI',
     ollama: 'Ollama',
     deepseek: 'DeepSeek',
+    volcano: '火山方舟',
   }[provider];
 }
 

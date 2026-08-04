@@ -68,7 +68,7 @@ const tuiConfigSchema = z.object({
 export const appConfigSchema = z.object({
   providers: z
     .object({
-      active: z.enum(['anthropic', 'openai', 'ollama', 'deepseek']).optional(),
+      active: z.enum(['anthropic', 'openai', 'ollama', 'deepseek', 'volcano']).optional(),
       anthropic: providerConfigSchema.optional(),
       openai: providerConfigSchema.optional(),
       ollama: providerConfigSchema
@@ -77,6 +77,7 @@ export const appConfigSchema = z.object({
         })
         .optional(),
       deepseek: providerConfigSchema.optional(),
+      volcano: providerConfigSchema.optional(),
     })
     .default({}),
   agent: z

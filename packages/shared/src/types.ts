@@ -260,6 +260,11 @@ export interface SessionState {
   metadata: SessionMetadata;
 }
 
+export interface ModelTokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+}
+
 export interface SessionMetadata {
   workingDirectory: string;
   model: string;
@@ -267,4 +272,15 @@ export interface SessionMetadata {
   totalTokensUsed: number;
   totalCost: number;
   turnCount: number;
+  /**
+   * Token usage tracked per model, keyed by `${provider}:${model}`.
+   * Lets each model used within a session be counted independently and
+   * persisted across restarts.
+   */
+  tokensUsedByModel?: Record<string, ModelTokenUsage>;
+  /**
+   * Input tokens of the most recent model request within this session.
+   * Used as the "used context" indicator (persisted so it survives restarts).
+   */
+  lastInputTokens?: number;
 }
