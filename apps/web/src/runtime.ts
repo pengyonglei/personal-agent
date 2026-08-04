@@ -1040,6 +1040,7 @@ export class WebConversation {
     this.emit({ type: 'session_changed', sessionId: this.sessionId, isNew: true });
     this.emit({ type: 'history', sessionId: this.sessionId, messages: [] });
     this.publishPlan();
+    this.publishContextUsage();
   }
 
   async restoreSession(sessionId: string): Promise<boolean> {
@@ -1089,6 +1090,7 @@ export class WebConversation {
       messages: this.context.getHistory(),
     });
     this.publishPlan();
+    this.publishContextUsage();
     return restored;
   }
 
