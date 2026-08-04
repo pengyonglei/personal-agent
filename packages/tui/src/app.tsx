@@ -5,6 +5,7 @@ import { AgentChatView } from './components/AgentChatView';
 import { TuiContext } from './hooks/use-tui-context';
 import { useAppState } from './hooks/use-app-state';
 import { useInput } from 'ink';
+import { VERSION_LABEL } from '@personal-agent/shared';
 
 export interface AppProps {
   model?: string;
@@ -32,7 +33,7 @@ export function App({
   );
   const [state, dispatch] = useAppState();
   const [isProcessing, setIsProcessing] = useState(false);
-  const [version] = useState('v0.1.0');
+  const [version] = useState(VERSION_LABEL);
 
   // Set model info on first render
   React.useEffect(() => {

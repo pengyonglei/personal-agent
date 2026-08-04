@@ -281,6 +281,11 @@ providers:
     models:
       - gpt-4o
       - gpt-4o-mini
+    # models 也支持对象形式，显式指定上下文窗口与最大输出 Token：
+    # models:
+    #   - id: gpt-4o
+    #     contextWindow: 128000
+    #     maxOutputTokens: 16384
 
   ollama:
     baseURL: http://localhost:11434
@@ -289,24 +294,37 @@ providers:
   deepseek:
     baseURL: https://api.deepseek.com
     defaultModel: deepseek-v4-flash
+    # 思考强度：off | low | medium | high | max
     thinkingEffort: high
 
+  volcano:
+    baseURL: https://ark.cn-beijing.volces.com/api/v3
+    defaultModel: doubao-seed-1-6-250615
+    models:
+      - doubao-seed-1-6-250615
+      - doubao-seed-thinking-250615
+
 agent:
-  maxTurns: 100
-  maxTokens: 16384
-  temperature: 0
+  maxTurns: 100           # 最大循环轮数（1-500），也可在 Web UI「设置 -> 通用」中修改
+  maxTokens: 16384        # 单次模型输出的最大 Token 数
+  temperature: 0          # 采样温度（0-2）
+  systemPromptAppend: ""  # 附加到系统提示词末尾的额外指令
+  planMode:
+    enabled: true         # 是否启用只读 Plan 模式
+    autoApprove: false    # 计划是否自动批准
 
 tools:
-  shellTimeout: 120000
-  webFetchTimeout: 30000
+  shellTimeout: 120000    # Shell 命令超时（毫秒）
+  webFetchTimeout: 30000  # Web 抓取超时（毫秒）
   sandbox:
-    restrictPaths: true
+    restrictPaths: true   # 限制文件工具只能访问工作区及 allowedPaths
     allowedPaths: []
     deniedCommands:
       - shutdown
       - reboot
   permissions:
     - tool: bash
+      # pattern: "rm -rf *"   # 可选：按参数正则匹配该规则
       action: approval
       scope: project
 
@@ -317,16 +335,31 @@ mcp:
       command: node
       args:
         - /absolute/path/to/mcp-server.js
+      # cwd: /absolute/path/to/server-dir   # 可选：MCP 进程工作目录
+      # env:                                 # 可选：附加环境变量
+      #   FOO: bar
       autoApprove:
         - safe_read_tool
+    # - name: remote-tools
+    #   transport: sse                # 或 streamable-http
+    #   url: http://127.0.0.1:8000/sse
+    #   headers:
+    #     Authorization: Bearer <token>
 
 memory:
   enabled: true
-  store: filesystem
+  store: filesystem        # filesystem | sqlite
   maxEntries: 1000
+
+tui:
+  theme: dark              # dark | light | system
+  showTokenCounter: true
+  showCostEstimates: true
+  enableMouse: false
 
 stats:
   enabled: true
+  # dbPath: /custom/path/model-requests.db   # 默认 ~/.personal-agent/stats/model-requests.db
   # recordPayloads: true   # 开启后新请求才存储完整入参出参（messages/tools/options）
   retentionDays: 90        # 0 = 不自动清理
 
@@ -337,12 +370,51 @@ plugins:
   disabled: []
 ```
 
+### 配置项一览
+
+| 配置项（YAML 路径） | 类型 / 可选值 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `providers.active` | `anthropic` / `openai` / `ollama` / `deepseek` / `volcano` | 无 | 当前激活的 Provider |
+| `providers.<id>.apiKey` | string | 无 | Provider API Key（推荐用环境变量注入） |
+| `providers.<id>.baseURL` | string | Provider 内置默认地址 | API 服务地址 |
+| `providers.<id>.defaultModel` | string | Provider 内置默认模型 | 默认模型 |
+| `providers.<id>.models` | `string[]` 或 `{id, contextWindow, maxOutputTokens}[]` | Provider 内置模型列表 | 可用模型列表 |
+| `providers.<id>.thinkingEffort` | `off` / `low` / `medium` / `high` / `max` | 无 | 思考类模型的推理强度 |
+| `agent.maxTurns` | number（1-500） | `100` | 单次任务最大循环轮数（Web 通用设置最低 50） |
+| `agent.maxTokens` | number | 无 | 单次模型输出最大 Token 数 |
+| `agent.temperature` | number（0-2） | `0` | 模型采样温度 |
+| `agent.systemPromptAppend` | string | 无 | 附加到系统提示词末尾的额外指令 |
+| `agent.planMode.enabled` | boolean | `true` | 是否启用只读 Plan 模式 |
+| `agent.planMode.autoApprove` | boolean | `false` | 计划是否自动批准 |
+| `tools.shellTimeout` | number（毫秒） | `120000` | Shell 命令超时 |
+| `tools.webFetchTimeout` | number（毫秒） | `30000` | Web 抓取超时 |
+| `tools.sandbox.restrictPaths` | boolean | `true` | 限制文件工具只能访问工作区及 allowedPaths |
+| `tools.sandbox.allowedPaths` | string[] | `[]` | 额外允许访问的路径 |
+| `tools.sandbox.deniedCommands` | string[] | `[]` | 额外拦截的危险命令片段 |
+| `tools.permissions` | `{tool, pattern?, action, scope}[]` | `[]` | 权限规则（action: allow/ask/approval；scope: session/project/global） |
+| `mcp.servers` | 对象数组 | `[]` | MCP 服务器（transport: stdio/sse/streamable-http；支持 command/args/cwd/url/env/headers/autoApprove） |
+| `memory.enabled` | boolean | `true` | 是否启用长期记忆 |
+| `memory.store` | `filesystem` / `sqlite` | `filesystem` | 记忆存储后端 |
+| `memory.maxEntries` | number | `1000` | 记忆最大条目数 |
+| `tui.theme` | `dark` / `light` / `system` | `dark` | TUI 主题 |
+| `tui.showTokenCounter` | boolean | `true` | TUI 是否显示 Token 计数 |
+| `tui.showCostEstimates` | boolean | `true` | TUI 是否显示费用估算 |
+| `tui.enableMouse` | boolean | `false` | TUI 是否启用鼠标 |
+| `stats.enabled` | boolean | `true` | 是否启用模型请求统计 |
+| `stats.dbPath` | string | `~/.personal-agent/stats/model-requests.db` | 统计数据库路径 |
+| `stats.recordPayloads` | boolean | `false` | 是否保存完整入参/出参（仅影响新请求） |
+| `stats.retentionDays` | number | `90` | 统计保留天数（0 = 不清理） |
+| `plugins.enabled` | boolean | `true` | 是否加载插件 |
+| `plugins.paths` | string[] | `[]` | 插件目录列表 |
+| `plugins.disabled` | string[] | `[]` | 禁用的插件名列表 |
+
 注意：
 
 - YAML 中的数组采用整体替换，不会与上一层配置合并。
 - `tools.permissions` 当前由 Web Runtime 加载；CLI 中可使用 `/allow`、`/approval` 或启动参数 `-y` 管理当前会话权限。
 - `agent.temperature`、`agent.maxTokens` 及对应 CLI 参数当前接入 Web Runtime；CLI 已完成参数解析，但尚未传入模型流式调用。
-- 当前运行时使用文件系统 Memory Store。
+- `agent.maxTurns` 可在 Web UI「设置 -> 通用」中修改（允许范围 50-500，低于 50 会被拒绝），保存后写入配置文件，对新建任务立即生效；CLI 与配置文件仍使用 schema 允许的 1-500 完整范围。
+- 当前运行时默认使用文件系统 Memory Store（`memory.store: filesystem`），也可切换为 `sqlite`。
 - `-y, --yes` 会自动批准全部工具，只应在可信工作区和受控环境中使用。
 
 ### 配置优先级
@@ -367,9 +439,12 @@ plugins:
 
 | 环境变量                           | 用途                                   |
 | ---------------------------------- | -------------------------------------- |
+| `PERSONAL_AGENT_PROVIDER`          | 默认激活的 Provider（anthropic/openai/ollama/deepseek/volcano） |
+| `PERSONAL_AGENT_MODEL`             | 默认模型名（作用于当前激活的 Provider） |
 | `PERSONAL_AGENT_ANTHROPIC_API_KEY` | Anthropic API Key                      |
 | `PERSONAL_AGENT_OPENAI_API_KEY`    | OpenAI API Key                         |
 | `PERSONAL_AGENT_DEEPSEEK_API_KEY`  | DeepSeek API Key，并补充默认地址和模型 |
+| `PERSONAL_AGENT_VOLCANO_API_KEY`   | 火山方舟 API Key，并补充默认地址和模型 |
 | `PERSONAL_AGENT_OLLAMA_BASE_URL`   | Ollama 服务地址                        |
 | `PERSONAL_AGENT_MAX_TURNS`         | 单次 Agent 运行的最大轮次              |
 | `PERSONAL_AGENT_MAX_TOKENS`        | 最大输出 Token 数                      |
@@ -452,6 +527,7 @@ Web UI 支持：
 - `allow`、`ask`、`approval` 三种权限模式
 - Plan 模式、计划审批和步骤进度
 - Provider、模型和 DeepSeek 思考强度设置
+- 通用设置：最大循环轮数（设置 -> 通用，允许范围 50-500）
 
 ### Windows 桌面版
 

@@ -10,3 +10,4 @@ export {
   type ProviderSettingsUpdate,
 } from './provider-settings';
 export { saveStatsSettings, type StatsSettingsUpdate } from './stats-settings';
+export { saveAgentSettings, type AgentSettingsUpdate } from './agent-settings';

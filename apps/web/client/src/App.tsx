@@ -56,6 +56,7 @@ import {
   MoonOutlined,
   MoreOutlined,
   PlusOutlined,
+  QuestionCircleOutlined,
   ReloadOutlined,
   RobotOutlined,
   SendOutlined,
@@ -77,6 +78,7 @@ import {
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { ReasoningEffort, UnifiedMessage } from '@personal-agent/shared';
+import { VERSION } from '@personal-agent/shared';
 import type {
   ClientMessage,
   ContextUsage,
@@ -413,7 +415,7 @@ function AgentWorkspace({
   const [providerDeleting, setProviderDeleting] = useState<ProviderId>();
   const [compressing, setCompressing] = useState(false);
   const [providerSettings, setProviderSettings] = useState<ProviderSettingsInfo | null>(null);
-  const [appVersion, setAppVersion] = useState('0.1.0');
+  const [appVersion, setAppVersion] = useState(VERSION);
   const [debugModalOpen, setDebugModalOpen] = useState(false);
   const [statsModalOpen, setStatsModalOpen] = useState(false);
   const [modelCalls, setModelCalls] = useState<ModelCallTrace[]>([]);
@@ -3489,6 +3491,8 @@ function GeneralSettingsPanel() {
   const { message: messageApi } = AntApp.useApp();
   const [recordPayloads, setRecordPayloads] = useState<boolean | null>(null);
   const [saving, setSaving] = useState(false);
+  const [maxTurns, setMaxTurns] = useState<number | null>(null);
+  const [savingMaxTurns, setSavingMaxTurns] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -3499,6 +3503,24 @@ function GeneralSettingsPanel() {
       })
       .then((payload) => {
         if (!cancelled) setRecordPayloads(payload.recordPayloads);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) messageApi.error(err instanceof Error ? err.message : String(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [messageApi]);
+
+  useEffect(() => {
+    let cancelled = false;
+    apiFetch('/api/agent-config')
+      .then((response) => {
+        if (!response.ok) throw new Error(`读取 Agent 配置失败 (${response.status})`);
+        return response.json() as Promise<{ maxTurns: number }>;
+      })
+      .then((payload) => {
+        if (!cancelled) setMaxTurns(payload.maxTurns);
       })
       .catch((err: unknown) => {
         if (!cancelled) messageApi.error(err instanceof Error ? err.message : String(err));
@@ -3532,33 +3554,93 @@ function GeneralSettingsPanel() {
     }
   }
 
+  async function persistMaxTurns(value: number | null) {
+    if (value === null || value === undefined) return;
+    if (!Number.isInteger(value) || value < 50 || value > 500) {
+      messageApi.warning('最大循环轮数必须是 50–500 之间的整数。');
+      // 输入非法时回滚为服务端当前值
+      apiFetch('/api/agent-config')
+        .then((response) => response.json() as Promise<{ maxTurns: number }>)
+        .then((payload) => setMaxTurns(payload.maxTurns))
+        .catch(() => undefined);
+      return;
+    }
+    setSavingMaxTurns(true);
+    try {
+      const response = await apiFetch('/api/agent-config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ maxTurns: value }),
+      });
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(payload.error ?? `保存失败 (${response.status})`);
+      }
+      const payload = (await response.json()) as { maxTurns: number };
+      setMaxTurns(payload.maxTurns);
+      messageApi.success(`已保存：最大循环轮数 ${payload.maxTurns}`);
+    } catch (err) {
+      messageApi.error(`保存失败: ${err instanceof Error ? err.message : String(err)}`);
+      // 保存失败时回滚为服务端当前值
+      apiFetch('/api/agent-config')
+        .then((response) => response.json() as Promise<{ maxTurns: number }>)
+        .then((payload) => setMaxTurns(payload.maxTurns))
+        .catch(() => undefined);
+    } finally {
+      setSavingMaxTurns(false);
+    }
+  }
+
   return (
     <div className="pa-settings-general">
       <div className="pa-settings-heading">
         <div>
           <Title level={4}>通用</Title>
-          <Text type="secondary">模型请求统计的通用设置。</Text>
+          <Text type="secondary">Agent 运行与模型请求统计的通用设置。</Text>
         </div>
       </div>
       <Card size="small">
-        <Space size={12}>
-          <Switch
-            checked={recordPayloads ?? false}
-            disabled={recordPayloads === null}
-            loading={saving}
-            onChange={toggleRecordPayloads}
-          />
-          <div>
-            <div>
-              <strong>统计模型请求入参/出参</strong>
-            </div>
-            <Text type="secondary">
-              开启后，新产生的模型请求会保存完整入参（messages/tools/options）；关闭时仅保存统计元数据（token、
-              模型、状态、耗时等）。数据存储在本地 SQLite（~/.personal-agent/stats/model-requests.db），
-              配置在下次启动时生效。
-            </Text>
-          </div>
-        </Space>
+        <Form layout="horizontal" colon labelAlign="left" labelCol={{ flex: '220px' }} style={{ maxWidth: 640 }}>
+          <Form.Item
+            label={
+              <Space size={4}>
+                统计模型请求入参/出参
+                <Tooltip title="开启后，新产生的模型请求会保存完整入参（messages/tools/options）；关闭时仅保存统计元数据（token、模型、状态、耗时等）。数据存储在本地 SQLite（~/.personal-agent/stats/model-requests.db），配置在下次启动时生效。">
+                  <QuestionCircleOutlined className="pa-settings-help" />
+                </Tooltip>
+              </Space>
+            }
+          >
+            <Switch
+              checked={recordPayloads ?? false}
+              disabled={recordPayloads === null}
+              loading={saving}
+              onChange={toggleRecordPayloads}
+            />
+          </Form.Item>
+          <Form.Item
+            label={
+              <Space size={4}>
+                最大循环轮数
+                <Tooltip title="单次任务中 Agent 最多执行的循环轮数（50-500），达到上限后任务自动结束；修改后对新建任务立即生效。">
+                  <QuestionCircleOutlined className="pa-settings-help" />
+                </Tooltip>
+              </Space>
+            }
+          >
+            <InputNumber
+              min={50}
+              max={500}
+              precision={0}
+              value={maxTurns ?? undefined}
+              disabled={maxTurns === null || savingMaxTurns}
+              onChange={(value) => setMaxTurns(value as number | null)}
+              onBlur={() => void persistMaxTurns(maxTurns)}
+              onPressEnter={() => void persistMaxTurns(maxTurns)}
+              style={{ width: 140 }}
+            />
+          </Form.Item>
+        </Form>
       </Card>
     </div>
   );

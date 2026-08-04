@@ -5,7 +5,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type { ToolRegistry } from '@personal-agent/tool';
 import { BaseTool } from '@personal-agent/tool';
-import { createLogger } from '@personal-agent/shared';
+import { createLogger, VERSION } from '@personal-agent/shared';
 import type { JSONSchema, ToolResult, ToolContext } from '@personal-agent/shared';
 
 const log = createLogger('mcp');
@@ -113,7 +113,7 @@ export class MCPClientManager {
 
     const transport = this.transportFactory(config);
     const client = new Client(
-      { name: 'personal-agent', version: '0.1.0' },
+      { name: 'personal-agent', version: VERSION },
       {
         capabilities: {},
         listChanged: {

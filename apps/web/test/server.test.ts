@@ -622,3 +622,78 @@ test('refresh restores the last opened task and its persisted conversation histo
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test('agent-config API reads and persists maxTurns (minimum 50)', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'personal-agent-web-'));
+  const configPath = join(directory, 'config.yaml');
+  await writeFile(
+    configPath,
+    ['memory:', '  enabled: false', 'plugins:', '  enabled: false', 'mcp:', '  servers: []'].join(
+      '\n',
+    ),
+    'utf-8',
+  );
+  const browsableRoot = join(directory, 'browse-root');
+  const clientBuildDirectory = join(directory, 'client');
+  await mkdir(browsableRoot);
+  await mkdir(clientBuildDirectory);
+  await writeFile(join(clientBuildDirectory, 'index.html'), '<h1>test client</h1>', 'utf8');
+
+  const instance = await createWebServer({
+    host: '127.0.0.1',
+    port: 0,
+    workingDirectory: directory,
+    configPath,
+    projectStoragePath: join(directory, 'projects.json'),
+    clientBuildDirectory,
+  });
+
+  const baseUrl = `http://127.0.0.1:${instance.port}`;
+
+  try {
+    // 未配置时读取默认值 100
+    const initial = await fetch(`${baseUrl}/api/agent-config`);
+    assert.equal(initial.status, 200);
+    assert.equal(((await initial.json()) as { maxTurns: number }).maxTurns, 100);
+
+    // 更新为允许的最低值 50
+    const updated = await fetch(`${baseUrl}/api/agent-config`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ maxTurns: 50 }),
+    });
+    assert.equal(updated.status, 200);
+    assert.equal(((await updated.json()) as { maxTurns: number }).maxTurns, 50);
+
+    // 低于 50 被拒绝
+    const tooLow = await fetch(`${baseUrl}/api/agent-config`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ maxTurns: 49 }),
+    });
+    assert.equal(tooLow.status, 400);
+
+    // 超过 500 被拒绝
+    const tooHigh = await fetch(`${baseUrl}/api/agent-config`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ maxTurns: 501 }),
+    });
+    assert.equal(tooHigh.status, 400);
+
+    // 非整数被拒绝
+    const notInteger = await fetch(`${baseUrl}/api/agent-config`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ maxTurns: 50.5 }),
+    });
+    assert.equal(notInteger.status, 400);
+
+    // 配置已持久化到 YAML 文件
+    const savedYaml = await readFile(configPath, 'utf8');
+    assert.match(savedYaml, /maxTurns:\s*50/);
+  } finally {
+    await instance.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

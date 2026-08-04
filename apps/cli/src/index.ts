@@ -19,7 +19,7 @@ import {
   type ToolContext,
   type ToolResult,
 } from '@personal-agent/tool';
-import { createLogger, setLogLevel, LogLevel, type ModelInfo } from '@personal-agent/shared';
+import { createLogger, setLogLevel, LogLevel, VERSION, VERSION_LABEL, type ModelInfo } from '@personal-agent/shared';
 import { FileSystemMemoryStore } from '@personal-agent/memory';
 import {
   ModelRequestRecorder,
@@ -97,7 +97,7 @@ const program = new Command();
 program
   .name('personal-agent')
   .description('A powerful AI agent CLI tool')
-  .version('0.1.0')
+  .version(VERSION)
   .argument('[prompt]', 'Single prompt to execute (non-interactive mode)')
   .option('-m, --model <model>', 'Model to use')
   .option('-p, --provider <provider>', 'Provider to use (anthropic, openai, ollama, deepseek)')
@@ -704,7 +704,7 @@ When the user is satisfied, they will use /exit-plan to leave plan mode. Then yo
     }
 
     // Fallback: readline mode
-    console.log(`\n\x1b[1;36m⚡ personal-agent v0.1.0\x1b[0m`);
+    console.log(`\n\x1b[1;36m⚡ personal-agent ${VERSION_LABEL}\x1b[0m`);
     console.log(`\x1b[2mModel: ${provider.displayName} (${provider.getModel()})\x1b[0m`);
     console.log(`\x1b[2mType /help for commands, /exit to quit.\x1b[0m\n`);
 

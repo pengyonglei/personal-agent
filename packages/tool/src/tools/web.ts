@@ -1,6 +1,7 @@
 import type { ToolResult, ToolContext } from '../types';
 import { BaseTool } from '../types';
 import type { JSONSchema } from '@personal-agent/shared';
+import { USER_AGENT } from '@personal-agent/shared';
 
 // ---------------------------------------------------------------------------
 // web_fetch — fetch and parse a URL
@@ -37,7 +38,7 @@ export class WebFetchTool extends BaseTool {
       const response = await fetch(fetchUrl, {
         signal: controller.signal,
         headers: {
-          'User-Agent': 'personal-agent/0.1.0',
+          'User-Agent': USER_AGENT,
           'Accept': 'text/html,text/plain,application/json',
         },
       });
@@ -97,7 +98,7 @@ export class WebSearchTool extends BaseTool {
 
       const response = await fetch(url, {
         headers: {
-          'User-Agent': 'personal-agent/0.1.0',
+          'User-Agent': USER_AGENT,
           'Accept': 'text/html',
         },
         signal: AbortSignal.timeout(15000),

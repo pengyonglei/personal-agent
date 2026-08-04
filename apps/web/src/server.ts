@@ -6,8 +6,8 @@ import { basename, dirname, join, parse, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ViteDevServer } from 'vite';
 import { WebSocket, WebSocketServer } from 'ws';
-import { generateId } from '@personal-agent/shared';
-import { loadConfig, saveStatsSettings } from '@personal-agent/config';
+import { generateId, VERSION } from '@personal-agent/shared';
+import { loadConfig, saveAgentSettings, saveStatsSettings } from '@personal-agent/config';
 import { UsageStore, getByDay, getByModel, getSummary } from '@personal-agent/stats';
 import {
   WebAgentRuntime,
@@ -23,7 +23,7 @@ import {
   type TaskSummary,
 } from './protocol';
 
-const VERSION = '0.1.0';
+
 const UNTITLED_TASK_TITLE = '新任务';
 const sourceDirectory = dirname(fileURLToPath(import.meta.url));
 const webDirectory = resolve(sourceDirectory, '..');
@@ -84,7 +84,7 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
   });
   // Model request stats (SQLite) — graceful degradation when node:sqlite is
   // unavailable on the runtime (Node < 22.13). Never blocks server startup.
-  const statsConfigPath = options.configPath ?? process.env.PERSONAL_AGENT_CONFIG;
+  const configPath = options.configPath ?? process.env.PERSONAL_AGENT_CONFIG;
   let statsStore: UsageStore | null = null;
   if (UsageStore.isAvailable()) {
     try {
@@ -213,7 +213,7 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
       res.status(401).json({ error: 'Unauthorized' });
       return;
     }
-    const config = loadConfig({ cwd: runtime.workingDirectory, configPath: statsConfigPath });
+    const config = loadConfig({ cwd: runtime.workingDirectory, configPath: configPath });
     res.json({ recordPayloads: config.stats.recordPayloads });
   });
 
@@ -227,11 +227,47 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
       if (typeof body?.recordPayloads !== 'boolean') {
         throw new Error('recordPayloads 格式无效。');
       }
-      await saveStatsSettings({ recordPayloads: body.recordPayloads }, statsConfigPath);
+      await saveStatsSettings({ recordPayloads: body.recordPayloads }, configPath);
       // Take effect immediately for new requests in the running process.
       statsStore?.setRecordPayloads(body.recordPayloads);
       runtime.statsStore?.setRecordPayloads(body.recordPayloads);
       res.json({ recordPayloads: body.recordPayloads });
+    } catch (error) {
+      res.status(400).json({ error: formatError(error) });
+    }
+  });
+
+  // Agent 通用配置（设置 -> 通用）：目前仅包含最大循环轮数 maxTurns
+  app.get('/api/agent-config', (req, res) => {
+    if (!isAuthorized(req.headers.authorization, req.query.token, authToken)) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    const config = loadConfig({ cwd: runtime.workingDirectory, configPath: configPath });
+    res.json({ maxTurns: config.agent.maxTurns });
+  });
+
+  app.put('/api/agent-config', async (req, res) => {
+    if (!isAuthorized(req.headers.authorization, req.query.token, authToken)) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    try {
+      const body = req.body as Record<string, unknown> | undefined;
+      const maxTurns = body?.maxTurns;
+      if (typeof maxTurns !== 'number' || !Number.isInteger(maxTurns)) {
+        throw new Error('maxTurns 必须是整数。');
+      }
+      if (maxTurns < 50) {
+        throw new Error('最大循环轮数不能低于 50。');
+      }
+      if (maxTurns > 500) {
+        throw new Error('最大循环轮数不能超过 500。');
+      }
+      await saveAgentSettings({ maxTurns }, configPath);
+      // Take effect immediately for new tasks in the running process.
+      runtime.config.agent.maxTurns = maxTurns;
+      res.json({ maxTurns });
     } catch (error) {
       res.status(400).json({ error: formatError(error) });
     }
