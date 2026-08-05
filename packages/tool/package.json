@@ -1,6 +1,6 @@
 {
   "name": "@personal-agent/tool",
-  "version": "0.1.5",
+  "version": "0.2.0",
   "private": false,
   "description": "Tool execution system for personal-agent",
   "files": [

@@ -391,7 +391,7 @@ plugins:
 | `tools.sandbox.restrictPaths` | boolean | `true` | 限制文件工具只能访问工作区及 allowedPaths |
 | `tools.sandbox.allowedPaths` | string[] | `[]` | 额外允许访问的路径 |
 | `tools.sandbox.deniedCommands` | string[] | `[]` | 额外拦截的危险命令片段 |
-| `tools.permissions` | `{tool, pattern?, action, scope}[]` | `[]` | 权限规则（action: allow/ask/approval；scope: session/project/global） |
+| `tools.permissions` | `{tool, pattern?, action, scope, target?}[]` | `[]` | 权限规则（action: allow/ask/approval；scope: session/project/global；target: all / `task:<id>` / `project:<id>`，缺省 `all` 对所有任务生效） |
 | `mcp.servers` | 对象数组 | `[]` | MCP 服务器（transport: stdio/sse/streamable-http；支持 command/args/cwd/url/env/headers/autoApprove） |
 | `memory.enabled` | boolean | `true` | 是否启用长期记忆 |
 | `memory.store` | `filesystem` / `sqlite` | `filesystem` | 记忆存储后端 |
@@ -412,6 +412,7 @@ plugins:
 
 - YAML 中的数组采用整体替换，不会与上一层配置合并。
 - `tools.permissions` 当前由 Web Runtime 加载；CLI 中可使用 `/allow`、`/approval` 或启动参数 `-y` 管理当前会话权限。
+- `tools.permissions` 规则是全局共享的基线，对所有任务生效；设置 `target: task:<id>` 或 `target: project:<id>` 可使规则仅作用于目标任务/项目，且任务特定规则优先于全局规则（例如默认放行 `bash`，但 `target: task:task-abc` 下改为 `ask`）。
 - `agent.temperature`、`agent.maxTokens` 及对应 CLI 参数当前接入 Web Runtime；CLI 已完成参数解析，但尚未传入模型流式调用。
 - `agent.maxTurns` 可在 Web UI「设置 -> 通用」中修改（允许范围 50-500，低于 50 会被拒绝），保存后写入配置文件，对新建任务立即生效；CLI 与配置文件仍使用 schema 允许的 1-500 完整范围。
 - 当前运行时默认使用文件系统 Memory Store（`memory.store: filesystem`），也可切换为 `sqlite`。
@@ -522,7 +523,9 @@ Web UI 支持：
 
 - 创建和切换本地项目，每个项目绑定一个经过校验的根目录
 - 在项目下创建、重命名、归档和切换任务
+- **多任务并行**：同一页面内多个任务可同时执行，各自独立上下文、进度与中断互不干扰
 - 每个任务关联独立 Agent 会话并保留权限模式
+- **每任务独立模型**：Composer 的模型下拉按当前任务生效，默认继承全局模型，可单独覆盖（不影响其他任务）
 - 流式 Markdown 响应、工具执行状态和中断
 - `allow`、`ask`、`approval` 三种权限模式
 - Plan 模式、计划审批和步骤进度

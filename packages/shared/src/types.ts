@@ -283,4 +283,10 @@ export interface SessionMetadata {
    * Used as the "used context" indicator (persisted so it survives restarts).
    */
   lastInputTokens?: number;
+  /**
+   * 每个模型最近一次请求的输入 tokens，keyed by `${provider}:${model}`。
+   * 任务在会话中切换模型后，仪表盘按当前模型显示各自的已用上下文；
+   * 刷新/重启后按当前模型恢复，而不是显示别的模型的值或 0。
+   */
+  lastInputTokensByModel?: Record<string, number>;
 }

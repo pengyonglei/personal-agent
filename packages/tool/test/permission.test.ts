@@ -118,3 +118,40 @@ test('restricted sandbox permits the workspace but rejects sibling prefixes', ()
   assert.equal(sandbox.isPathAllowed(inside, workspace), true);
   assert.equal(sandbox.isPathAllowed(sibling, workspace), false);
 });
+
+test('task-targeted rules override the global baseline for their target task', () => {
+  const permissions = new PermissionManager();
+  permissions.addRule({ tool: 'bash', action: 'allow', scope: 'session' });
+  permissions.addRule({
+    tool: 'bash',
+    action: 'ask',
+    scope: 'session',
+    target: 'task:task-b',
+  });
+
+  // Global baseline applies to every task.
+  assert.equal(permissions.check('bash', undefined, { taskId: 'task-a' }), 'allow');
+  // Task-specific rule wins for its target task.
+  assert.equal(permissions.check('bash', undefined, { taskId: 'task-b' }), 'ask');
+  // Without context the global baseline still applies.
+  assert.equal(permissions.check('bash'), 'allow');
+});
+
+test('project-targeted rules apply only within the matching project', () => {
+  const permissions = new PermissionManager();
+  permissions.addRule({
+    tool: 'write_file',
+    action: 'allow',
+    scope: 'session',
+    target: 'project:p1',
+  });
+  assert.equal(
+    permissions.check('write_file', undefined, { taskId: 't1', projectId: 'p1' }),
+    'allow',
+  );
+  assert.equal(
+    permissions.check('write_file', undefined, { taskId: 't2', projectId: 'p2' }),
+    'ask',
+  );
+  assert.equal(permissions.check('write_file'), 'ask');
+});

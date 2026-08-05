@@ -6,7 +6,9 @@ test('OllamaProvider parses native NDJSON streaming responses and tool calls', a
   const fetchMock: typeof fetch = async (input, init) => {
     const url = String(input);
     if (url.endsWith('/api/tags')) {
-      return Response.json({ models: [{ name: 'qwen3:8b' }] });
+      return Response.json({
+        models: [{ name: 'qwen3:8b' }, { name: 'qwen2.5:latest' }],
+      });
     }
     const request = JSON.parse(String(init?.body)) as {
       stream: boolean;
@@ -38,9 +40,16 @@ test('OllamaProvider parses native NDJSON streaming responses and tool calls', a
     );
   };
 
-  const provider = new OllamaProvider('qwen3:8b', 'http://ollama.test', fetchMock);
+  const provider = new OllamaProvider('qwen3:8b', 'http://ollama.test', fetchMock, [
+    'qwen3:8b',
+    'qwen3:32b',
+  ]);
   await provider.initialize();
-  assert.equal(provider.getModelList()[0].id, 'qwen3:8b');
+  // 本机 /api/tags 发现的其他模型不应混入模型列表，只保留配置的模型。
+  assert.deepEqual(
+    provider.getModelList().map((model) => model.id),
+    ['qwen3:8b', 'qwen3:32b'],
+  );
 
   const events = [];
   for await (const event of provider.streamChat(

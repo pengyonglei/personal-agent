@@ -39,11 +39,25 @@ const sandboxSchema = z.object({
   deniedCommands: z.array(z.string()).default([]),
 });
 
+type PermissionRuleTarget = 'all' | `task:${string}` | `project:${string}`;
+
+const permissionTargetSchema = z.custom<PermissionRuleTarget>(
+  (value) =>
+    value === 'all' ||
+    (typeof value === 'string' &&
+      (value.startsWith('task:') || value.startsWith('project:'))),
+  { message: 'target must be all, task:<id> or project:<id>' },
+);
+
 const permissionRuleSchema = z.object({
   tool: z.string(),
   pattern: z.string().optional(),
   action: z.enum(['allow', 'ask', 'approval']),
   scope: z.enum(['session', 'project', 'global']),
+  // Optional rule scope target: 'all' (default) or a specific task/project.
+  // Task/project-targeted rules only apply to the matching task's execution
+  // and take priority over the shared global baseline.
+  target: permissionTargetSchema.optional(),
 });
 
 const mcpServerConfigSchema = z.object({

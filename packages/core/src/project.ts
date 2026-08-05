@@ -23,6 +23,8 @@ export interface ProjectTask {
   projectId: string;
   title: string;
   sessionId?: string;
+  /** 任务级模型覆盖（'provider:model'），刷新/重启后恢复任务模型用。 */
+  model?: string;
   permissionMode: ProjectTaskPermissionMode;
   status: 'active' | 'archived';
   createdAt: Date;
@@ -72,6 +74,7 @@ export class ProjectManager {
           projectId: task.projectId,
           title: task.title,
           sessionId: task.sessionId,
+          model: task.model || undefined,
           permissionMode: normalizePermissionMode(task.permissionMode),
           status: task.status === 'archived' ? 'archived' : 'active',
           createdAt: new Date(task.createdAt),
@@ -121,7 +124,7 @@ export class ProjectManager {
   listProjects(options: { includeArchived?: boolean } = {}): Project[] {
     return [...this.projects.values()]
       .filter((project) => options.includeArchived || !project.archived)
-      .sort((left, right) => right.updatedAt.getTime() - left.updatedAt.getTime())
+      .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime())
       .map(cloneProject);
   }
 
@@ -174,6 +177,7 @@ export class ProjectManager {
     projectId: string;
     title: string;
     sessionId?: string;
+    permissionMode?: ProjectTaskPermissionMode;
   }): Promise<ProjectTask> {
     const project = this.projects.get(input.projectId);
     if (!project) throw new Error(`项目不存在: ${input.projectId}`);
@@ -183,7 +187,7 @@ export class ProjectManager {
       projectId: project.id,
       title: validateText(input.title, '任务标题', 200),
       sessionId: input.sessionId,
-      permissionMode: 'ask',
+      permissionMode: normalizePermissionMode(input.permissionMode ?? 'ask'),
       status: 'active',
       createdAt: now,
       updatedAt: now,
@@ -200,7 +204,7 @@ export class ProjectManager {
         (task) =>
           task.projectId === projectId && (options.includeArchived || task.status === 'active'),
       )
-      .sort((left, right) => right.updatedAt.getTime() - left.updatedAt.getTime())
+      .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime())
       .map(cloneTask);
   }
 
@@ -235,6 +239,16 @@ export class ProjectManager {
   ): Promise<ProjectTask> {
     const task = this.requireTask(taskId);
     task.permissionMode = normalizePermissionMode(permissionMode);
+    await this.persist();
+    return cloneTask(task);
+  }
+
+  async setTaskModel(taskId: string, model: string | undefined): Promise<ProjectTask> {
+    const task = this.requireTask(taskId);
+    task.model = model ? model.trim() || undefined : undefined;
+    task.updatedAt = new Date();
+    const project = this.projects.get(task.projectId);
+    if (project) project.updatedAt = task.updatedAt;
     await this.persist();
     return cloneTask(task);
   }

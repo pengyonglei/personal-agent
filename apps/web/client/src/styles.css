@@ -2277,3 +2277,19 @@ select {
 .pa-stats-modal .pa-stats-payload-cell:hover .pa-stats-copy-btn {
   opacity: 1;
 }
+
+/* Multi-task: per-task running badge and model label in the task list. */
+.pa-task-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.pa-task-main strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pa-task-running {
+  flex-shrink: 0;
+}

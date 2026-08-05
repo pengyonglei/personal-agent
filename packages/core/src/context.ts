@@ -53,7 +53,9 @@ export class ContextAssembler {
       priority: 1,
       content: `You are personal-agent, a powerful AI agent CLI tool. You help users with software engineering tasks by providing direct assistance, executing tools, and reasoning through complex problems.
 
-You are operating in a terminal environment with access to the user's filesystem.`,
+You are operating in a terminal environment with access to the user's filesystem.
+Use as few requests as possible for each task execution.
+`,
     });
 
     // Safety

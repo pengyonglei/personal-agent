@@ -50,6 +50,7 @@ export class SessionManager {
         turnCount: 0,
         tokensUsedByModel: {},
         lastInputTokens: 0,
+        lastInputTokensByModel: {},
       },
     };
   }
@@ -152,13 +153,26 @@ export class SessionManager {
 
   /** Record the input token count of the most recent model request. */
   setLastInputTokens(input: number): void {
+    const key = this.modelKey();
     this.currentSession.metadata.lastInputTokens = input;
+    this.currentSession.metadata.lastInputTokensByModel = {
+      ...(this.currentSession.metadata.lastInputTokensByModel ?? {}),
+      [key]: input,
+    };
     this.currentSession.updatedAt = new Date();
   }
 
-  /** Input tokens of the most recent model request (0 if none yet). */
+  /**
+   * Input tokens of the most recent model request (0 if none yet).
+   * 按当前模型返回：任务在会话中切换模型后，各自模型的已用上下文互不影响。
+   */
   getLastInputTokens(): number {
-    return this.currentSession.metadata.lastInputTokens ?? 0;
+    const key = this.modelKey();
+    return (
+      this.currentSession.metadata.lastInputTokensByModel?.[key] ??
+      this.currentSession.metadata.lastInputTokens ??
+      0
+    );
   }
 
   // -------------------------------------------------------------------
@@ -192,6 +206,7 @@ export class SessionManager {
         totalCost: snapshot.metadata.totalCost,
         tokensUsedByModel: snapshot.metadata.tokensUsedByModel ?? {},
         lastInputTokens: snapshot.metadata.lastInputTokens ?? 0,
+        lastInputTokensByModel: snapshot.metadata.lastInputTokensByModel ?? {},
       },
     };
 
@@ -233,6 +248,7 @@ export class SessionManager {
           turnCount: raw.metadata.turnCount ?? 0,
           tokensUsedByModel: raw.metadata.tokensUsedByModel ?? {},
           lastInputTokens: raw.metadata.lastInputTokens ?? 0,
+          lastInputTokensByModel: raw.metadata.lastInputTokensByModel ?? {},
         },
       };
 

@@ -358,18 +358,21 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
     const send = (message: ServerMessage): void => {
       if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message));
     };
-    let conversation: WebConversation | null = null;
+    /** Per-task conversations — one WebConversation per task id. */
+    const conversations = new Map<string, WebConversation>();
     let activeProjectId: string | undefined;
     let activeTaskId: string | undefined;
     let messageQueue = Promise.resolve();
 
-    const requestPermission = (
-      toolName: string,
-      params: Record<string, unknown>,
-      signal?: AbortSignal,
-    ): Promise<{ approved: boolean; remember?: boolean }> => {
-      const requestId = generateId();
-      send({ type: 'permission_request', requestId, toolName, params });
+    const requestPermissionFor =
+      (taskId: string) =>
+      (
+        toolName: string,
+        params: Record<string, unknown>,
+        signal?: AbortSignal,
+      ): Promise<{ approved: boolean; remember?: boolean }> => {
+        const requestId = generateId();
+        send({ type: 'permission_request', requestId, toolName, params, taskId });
       return new Promise((resolvePermission) => {
         let settled = false;
         const finish = (answer: { approved: boolean; remember?: boolean }): void => {
@@ -431,7 +434,7 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
       send({
         type: 'ready',
         version: VERSION,
-        sessionId: conversation?.sessionId,
+        sessionId: conversations.get(activeTaskId ?? '')?.sessionId,
         activeProjectId,
         activeTaskId,
         runtime: runtime.getRuntimeInfo(),
@@ -554,6 +557,7 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
         const task = await runtime.projects.createTask({
           projectId: message.projectId,
           title: UNTITLED_TASK_TITLE,
+          permissionMode: message.permissionMode,
         });
         await activateTask(task.id);
         sendProjectState();
@@ -561,7 +565,16 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
       }
       if (message.type === 'rename_task') {
         const task = await runtime.projects.renameTask(message.taskId, message.title);
-        send({ type: 'task_renamed', task: serializeTask(task) });
+        const conv = conversations.get(task.id);
+        send({
+          type: 'task_renamed',
+          task: serializeTask(task, {
+            running: conv?.isBusy ?? false,
+            model: conv
+              ? `${conv.providerInstance.providerId}:${conv.providerInstance.getModel()}`
+              : undefined,
+          }),
+        });
         sendProjectState();
         return;
       }
@@ -572,6 +585,11 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
       }
       if (message.type === 'archive_task') {
         const archived = await runtime.projects.archiveTask(message.taskId);
+        const closed = conversations.get(message.taskId);
+        if (closed) {
+          await closed.close();
+          conversations.delete(message.taskId);
+        }
         if (activeTaskId === archived.id) {
           let next = runtime.projects.listTasks(archived.projectId)[0];
           if (!next) {
@@ -585,26 +603,49 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
         sendProjectState();
         return;
       }
+      const routedTaskId = message.taskId ?? activeTaskId;
+      const conversation = routedTaskId ? conversations.get(routedTaskId) : undefined;
       if (!conversation) {
         throw new Error(runtime.getRuntimeInfo().initializationError ?? 'LLM Provider 尚未配置');
       }
 
       switch (message.type) {
         case 'prompt':
-          if (activeTaskId) {
-            const task = runtime.projects.getTask(activeTaskId);
+          if (routedTaskId) {
+            const task = runtime.projects.getTask(routedTaskId);
             if (task?.title === UNTITLED_TASK_TITLE) {
               const renamed = await runtime.projects.renameTask(
-                activeTaskId,
+                routedTaskId,
                 deriveTaskTitle(message.text),
               );
-              send({ type: 'task_renamed', task: serializeTask(renamed) });
+              // 必须带上 running/model：客户端用 task_renamed 覆盖任务条目，
+              // 缺 model 会导致任务模型选择回退为全局默认（deepseek-v4-flash）。
+              send({
+                type: 'task_renamed',
+                task: serializeTask(renamed, {
+                  running: conversation.isBusy,
+                  model: `${conversation.providerInstance.providerId}:${conversation.providerInstance.getModel()}`,
+                }),
+              });
             }
           }
-          await conversation.runPrompt(message.text);
-          if (activeTaskId) await runtime.projects.touchTask(activeTaskId);
-          sendProjectState();
-          await sendSessionList(runtime, send);
+          // Run the agent loop WITHOUT blocking the message queue: while a task
+          // is executing, navigation messages (open_task / create_task / ...)
+          // must stay responsive so other tasks can be opened and run in
+          // parallel. Each conversation guards its own prompt concurrency.
+          void conversation
+            .runPrompt(message.text)
+            .then(async () => {
+              if (routedTaskId) await runtime.projects.touchTask(routedTaskId);
+              // 执行期间若有模型被下线：任务结束后自动摘除下线模型（不打断执行，
+              // 下次执行将使用自动切换后的可用模型）。
+              await runtime.refreshInvalidTaskModels();
+              sendProjectState();
+              await sendSessionList(runtime, send);
+            })
+            .catch((error) => {
+              send({ type: 'error', message: formatError(error), code: 'REQUEST_FAILED' });
+            });
           break;
         case 'interrupt':
           conversation.interrupt();
@@ -624,8 +665,8 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
           if (!(await conversation.restoreSession(message.sessionId))) {
             throw new Error(`找不到会话 ${message.sessionId}`);
           }
-          if (activeTaskId) {
-            await runtime.projects.attachSession(activeTaskId, conversation.sessionId);
+          if (routedTaskId) {
+            await runtime.projects.attachSession(routedTaskId, conversation.sessionId);
           }
           break;
         case 'set_plan_mode':
@@ -639,8 +680,8 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
           break;
         case 'set_permission_mode':
           conversation.setPermissionMode(message.mode);
-          if (activeTaskId) {
-            await runtime.projects.setTaskPermissionMode(activeTaskId, message.mode);
+          if (routedTaskId) {
+            await runtime.projects.setTaskPermissionMode(routedTaskId, message.mode);
             sendProjectState();
           }
           break;
@@ -652,6 +693,31 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
           await conversation.compressContext();
           send({ type: 'notice', message: '上下文已压缩，早期对话已生成语义摘要。' });
           break;
+        case 'set_task_model': {
+          const providerId = parseProviderId(message.providerId);
+          await runtime.setTaskModel(
+            conversation,
+            providerId,
+            message.model,
+            message.reasoningEffort,
+          );
+          // 持久化任务模型：刷新/重启后按它恢复会话模型。
+          await runtime.projects.setTaskModel(routedTaskId!, `${providerId}:${message.model}`);
+          // 提示信息由 conversation.replaceProvider 统一发出（仅一次），
+          // 避免切换模型时出现重复提示。
+          sendProjectState();
+          break;
+        }
+        case 'set_task_rule': {
+          if (!routedTaskId) throw new Error('set_task_rule 需要任务上下文');
+          runtime.addTaskPermissionRule(routedTaskId, message.tool, message.action);
+          send({
+            type: 'notice',
+            message: `已为任务添加规则：${message.tool} → ${message.action}`,
+            taskId: routedTaskId,
+          });
+          break;
+        }
       }
     }
 
@@ -664,54 +730,67 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
       activeProjectId = project.id;
       activeTaskId = task.id;
       if (runtime.getRuntimeInfo().configured) {
-        if (!conversation) {
-          conversation = runtime.createConversation(send, requestPermission, project.rootPath);
-          await conversation.start();
+        let conv = conversations.get(taskId);
+        if (!conv) {
+          // 恢复任务级模型覆盖：刷新/重连/重启后按持久化的任务模型构建会话，
+          // 而不是回退到全局默认（deepseek-v4-flash）。
+          const taskOverride = task.model
+            ? await runtime.resolveTaskModel(task.model)
+            : undefined;
+          // 任务模型已失效（供应商被删除或模型已下线）：清除持久化值，
+          // 回退全局默认模型，避免后续每次激活都解析失败。
+          if (task.model && !taskOverride) {
+            await runtime.projects.setTaskModel(task.id, undefined);
+          }
+          conv = runtime.createConversation(
+            send,
+            requestPermissionFor(task.id),
+            project.rootPath,
+            taskOverride,
+            task.id,
+          );
+          await conv.start();
           if (task.sessionId) {
-            const restored = await conversation.restoreSession(task.sessionId);
+            const restored = await conv.restoreSession(task.sessionId);
             if (!restored) {
               const missingSessionId = task.sessionId;
-              await conversation.checkpoint();
-              await runtime.projects.attachSession(task.id, conversation.sessionId);
+              await conv.checkpoint();
+              await runtime.projects.attachSession(task.id, conv.sessionId);
               send({
                 type: 'notice',
                 message: `原会话 ${missingSessionId.slice(0, 12)} 的文件缺失或损坏，已创建新的会话。`,
               });
             }
           } else {
-            await conversation.checkpoint();
-            await runtime.projects.attachSession(task.id, conversation.sessionId);
+            await conv.checkpoint();
+            await runtime.projects.attachSession(task.id, conv.sessionId);
           }
-        } else {
-          const restored = await conversation.switchWorkspace(project.rootPath, task.sessionId);
-          if (!restored) {
-            const missingSessionId = task.sessionId;
-            await conversation.checkpoint();
-            await runtime.projects.attachSession(task.id, conversation.sessionId);
-            if (missingSessionId) {
-              send({
-                type: 'notice',
-                message: `原会话 ${missingSessionId.slice(0, 12)} 的文件缺失或损坏，已创建新的会话。`,
-              });
-            }
-          }
+          conversations.set(taskId, conv);
         }
       } else {
         send({ type: 'history', sessionId: task.sessionId ?? '', messages: [] });
       }
       const activatedTask = runtime.projects.getTask(task.id) ?? task;
       const permissionMode = activatedTask.permissionMode ?? 'ask';
-      if (conversation) {
-        conversation.setPermissionMode(permissionMode);
+      const conv = conversations.get(taskId);
+      if (conv) {
+        // Must not fail when the task is still executing (no idle check).
+        conv.applyPermissionMode(permissionMode);
       } else {
-        send({ type: 'permission_mode', mode: permissionMode });
+        send({ type: 'permission_mode', mode: permissionMode, taskId });
       }
 
       if (announce) {
         send({ type: 'project_changed', project: serializeProject(project) });
+        const conv = conversations.get(task.id);
         send({
           type: 'task_changed',
-          task: serializeTask(runtime.projects.getTask(task.id) ?? task),
+          task: serializeTask(runtime.projects.getTask(task.id) ?? task, {
+            running: conv?.isBusy ?? false,
+            model: conv
+              ? `${conv.providerInstance.providerId}:${conv.providerInstance.getModel()}`
+              : undefined,
+          }),
         });
       }
     }
@@ -733,9 +812,12 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
       }
       activeProjectId = undefined;
       activeTaskId = undefined;
-      if (conversation) {
-        await conversation.close();
-        conversation = null;
+      for (const [taskId, conv] of [...conversations]) {
+        const task = runtime.projects.getTask(taskId);
+        if (task?.projectId === removedProjectId) {
+          await conv.close();
+          conversations.delete(taskId);
+        }
       }
     }
 
@@ -752,7 +834,15 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
           tasks: runtime.projects
             .listProjects({ includeArchived: true })
             .flatMap((project) => runtime.projects.listTasks(project.id))
-            .map(serializeTask),
+            .map((task) => {
+              const conv = conversations.get(task.id);
+              return serializeTask(task, {
+                running: conv?.isBusy ?? false,
+                model: conv
+                  ? `${conv.providerInstance.providerId}:${conv.providerInstance.getModel()}`
+                  : undefined,
+              });
+            }),
           activeTaskId,
         });
       }
@@ -768,7 +858,10 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
         pending.resolve({ approved: false });
       }
       pendingPermissions.clear();
-      void conversation?.close().catch(() => undefined);
+      for (const conv of conversations.values()) {
+        void conv.close().catch(() => undefined);
+      }
+      conversations.clear();
     });
   });
 
@@ -1048,19 +1141,25 @@ function serializeProject(project: {
   };
 }
 
-function serializeTask(task: {
-  id: string;
-  projectId: string;
-  title: string;
-  sessionId?: string;
-  permissionMode?: TaskSummary['permissionMode'];
-  status: 'active' | 'archived';
-  createdAt: Date;
-  updatedAt: Date;
-}): TaskSummary {
+function serializeTask(
+  task: {
+    id: string;
+    projectId: string;
+    title: string;
+    sessionId?: string;
+    model?: TaskSummary['model'];
+    permissionMode?: TaskSummary['permissionMode'];
+    status: 'active' | 'archived';
+    createdAt: Date;
+    updatedAt: Date;
+  },
+  extra: { running?: boolean; model?: string } = {},
+): TaskSummary {
   return {
     ...task,
     permissionMode: task.permissionMode ?? 'ask',
+    running: extra.running ?? false,
+    model: extra.model ?? task.model,
     createdAt: task.createdAt.toISOString(),
     updatedAt: task.updatedAt.toISOString(),
   };

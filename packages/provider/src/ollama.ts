@@ -56,27 +56,9 @@ export class OllamaProvider extends BaseLLMProvider {
   }
 
   async initialize(): Promise<void> {
-    try {
-      const response = await this.fetchFn(`${this.baseURL}/api/tags`, {
-        signal: AbortSignal.timeout(2500),
-      });
-      if (!response.ok) return;
-      const payload = (await response.json()) as {
-        models?: Array<{ name?: string; model?: string }>;
-      };
-      const discovered = (payload.models ?? [])
-        .map((model) => model.name ?? model.model)
-        .filter((name): name is string => Boolean(name))
-        .map((name) => createModelInfo(name));
-      if (discovered.length > 0) {
-        this.addConfiguredModels(
-          discovered.map((model) => model.id),
-          (modelId) => createModelInfo(modelId),
-        );
-      }
-    } catch {
-      // Ollama may be started after the application. Chat requests surface connection errors.
-    }
+    // 模型列表只包含用户在供应商配置中显式配置的模型（defaultModel + models），
+    // 不再自动合并 Ollama 本机 /api/tags 发现的所有模型 —— 否则输入框/设置页会
+    // 出现大量未配置的模型，用户只能切换自己配置过的模型。
   }
 
   async *streamChat(

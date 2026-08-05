@@ -22,7 +22,16 @@ import { MCPClientManager } from '@personal-agent/mcp';
 import { ModelRequestRecorder, UsageStore } from '@personal-agent/stats';
 import { FileSystemMemoryStore } from '@personal-agent/memory';
 import { PluginLoader } from '@personal-agent/plugin';
-import { ProviderRegistry, type LLMProvider } from '@personal-agent/provider';
+import {
+  AnthropicProvider,
+  DeepSeekProvider,
+  normalizeDeepSeekModel,
+  OllamaProvider,
+  OpenAIProvider,
+  ProviderRegistry,
+  VolcanoArkProvider,
+  type LLMProvider,
+} from '@personal-agent/provider';
 import type { AgentEvent, ModelInfo, ReasoningEffort, ToolResult } from '@personal-agent/shared';
 import { createLogger, ProviderFeature } from '@personal-agent/shared';
 import { existsSync } from 'node:fs';
@@ -107,6 +116,10 @@ export class WebAgentRuntime {
   private readonly configPath?: string;
   private providerRegistry: ProviderRegistry | null = null;
   private provider: LLMProvider | null = null;
+  /** Pool of per-(provider:model) provider instances for task-specific models. */
+  private providerPool = new Map<string, LLMProvider>();
+  /** sessionId -> provider instance when a task overrides the global model. */
+  private taskProviderOverrides = new Map<string, LLMProvider>();
   private toolRegistry: ToolRegistry;
   private toolExecutor: ToolExecutor;
   private permissionManager: PermissionManager;
@@ -276,17 +289,21 @@ export class WebAgentRuntime {
     emit: RuntimeEmitter,
     requestPermission: PermissionRequester,
     workingDirectory = this.workingDirectory,
+    providerOverride?: LLMProvider,
+    taskId?: string,
   ): WebConversation {
-    if (!this.provider) {
+    const provider = providerOverride ?? this.provider;
+    if (!provider) {
       throw new Error(this.initializationError ?? 'No LLM provider configured');
     }
     const conversation = new WebConversation(
       this,
-      this.provider,
+      provider,
       emit,
       requestPermission,
       workingDirectory,
       this.sessionsDirectory,
+      taskId,
     );
     this.attachConversation(conversation);
     return conversation;
@@ -470,9 +487,13 @@ export class WebAgentRuntime {
     this.provider = nextProvider;
     this.initializationError = undefined;
 
-    for (const conversation of this.conversations.values()) {
-      await conversation.replaceProvider(nextProvider);
-    }
+    // 编辑/新建 provider 信息不影响任何会话：只作废旧实例池（之后新建的
+    // 会话会用到新配置），现有会话保持各自的模型实例与选择不变，让用户
+    // 在各个会话中自由切换模型。
+    await this.invalidateProviderPool(input.provider);
+    // 模型列表变更：空闲任务自动摘除已下线模型（正在执行的任务不打断，
+    // 由执行完成后的 refreshInvalidTaskModels 兜底处理）。
+    await this.refreshInvalidTaskModels(input.provider);
     await previousRegistry?.disposeAll();
   }
 
@@ -516,11 +537,7 @@ export class WebAgentRuntime {
       ? undefined
       : '未配置 LLM Provider。请在设置中添加一个模型供应商。';
 
-    if (nextProvider) {
-      for (const conversation of this.conversations.values()) {
-        await conversation.replaceProvider(nextProvider);
-      }
-    }
+    await this.invalidateProviderInstances(providerId, nextProvider);
     await previousRegistry?.disposeAll();
   }
 
@@ -574,9 +591,239 @@ export class WebAgentRuntime {
     provider.setModel(model);
     registry.setActive(providerId);
     this.provider = provider;
+    // Global model switch: apply to tasks that have no per-task override.
     for (const conversation of this.conversations.values()) {
+      if (this.taskProviderOverrides.has(conversation.sessionId)) continue;
       await conversation.replaceProvider(provider);
     }
+  }
+
+  /**
+   * Resolve (or create) the pooled provider instance for a (provider, model)
+   * combination. Concurrent tasks using the same combination share one SDK
+   * client; different combinations get isolated instances so each task's
+   * model selection never affects the others.
+   */
+  private async getProviderForTask(providerId: ProviderId, model: string): Promise<LLMProvider> {
+    const key = `${providerId}:${model}`;
+    const pooled = this.providerPool.get(key);
+    if (pooled) return pooled;
+    const instance = await this.createProviderInstance(providerId, model);
+    this.providerPool.set(key, instance);
+    return instance;
+  }
+
+  /**
+   * Switch the model of a single task (conversation) without affecting any
+   * other task. The instance is pooled and kept until overridden again or the
+   * provider is reconfigured/removed.
+   */
+  async setTaskModel(
+    conversation: WebConversation,
+    providerId: ProviderId,
+    model: string,
+    reasoningEffort?: ReasoningEffort,
+  ): Promise<void> {
+    if (conversation.isBusy) {
+      throw new Error('Agent 正在运行，请等待当前请求完成后再切换模型。');
+    }
+    // 只允许切换到当前供应商已配置的模型，与输入框展示的模型列表保持一致
+    // （未配置的模型不参与切换，防止绕过配置直接使用任意模型）。
+    const configured = this.config.providers[providerId];
+    const defaults = getProviderDefaults(providerId);
+    const allowed = new Set(
+      (configured?.models ?? defaults.models).map((entry) =>
+        normalizeProviderModel(providerId, typeof entry === 'string' ? entry : entry.id),
+      ),
+    );
+    if (!allowed.has(normalizeProviderModel(providerId, model))) {
+      throw new Error(`模型 ${model} 不在当前供应商的已配置模型列表中。`);
+    }
+    const provider = await this.getProviderForTask(providerId, model);
+    this.taskProviderOverrides.set(conversation.sessionId, provider);
+    await conversation.applyTaskModel(provider, reasoningEffort);
+  }
+
+  /**
+   * Add a task-specific permission rule to the shared rules table.
+   * The rule only takes effect for the target task (see PermissionManager.check).
+   */
+  addTaskPermissionRule(taskId: string, tool: string, action: 'allow' | 'ask' | 'approval'): void {
+    this.permissionManager.addRule({ tool, action, scope: 'session', target: `task:${taskId}` });
+  }
+
+  /**
+   * 按持久化的任务模型 'provider:model' 解析出实例（用当前配置构建）。
+   * provider 已不存在或模型已从配置列表下线时返回 undefined（会话回退全局默认）。
+   */
+  async resolveTaskModel(model: string): Promise<LLMProvider | undefined> {
+    const separator = model.indexOf(':');
+    if (separator <= 0) return undefined;
+    const providerId = model.slice(0, separator) as ProviderId;
+    const modelId = model.slice(separator + 1);
+    const configured = this.config.providers[providerId];
+    if (!configured) return undefined;
+    // 模型下线后与手动切换的校验口径保持一致：不在配置列表中的模型视为失效。
+    const defaults = getProviderDefaults(providerId);
+    const allowed = new Set(
+      (configured.models ?? defaults.models).map((entry) =>
+        normalizeProviderModel(providerId, typeof entry === 'string' ? entry : entry.id),
+      ),
+    );
+    if (!allowed.has(normalizeProviderModel(providerId, modelId))) return undefined;
+    return this.getProviderForTask(providerId, modelId);
+  }
+
+  /**
+   * Drop cached pooled instances for a provider after its settings changed.
+   * Existing conversations keep their own instances untouched (they may still
+   * be referencing the pooled object, so it must NOT be disposed here); only
+   * NEW instances (new conversations) are built from the fresh settings. The
+   * old instances are reclaimed when conversations switch models.
+   */
+  private async invalidateProviderPool(providerId: ProviderId): Promise<void> {
+    for (const [key] of [...this.providerPool]) {
+      if (!key.startsWith(`${providerId}:`)) continue;
+      this.providerPool.delete(key);
+    }
+  }
+
+  /**
+   * 供应商模型列表变更后，摘除已下线模型：
+   * - 正在执行的任务：不打断，保持旧实例运行（执行完成后由调用方再次触发）
+   * - 空闲任务：自动切换到该供应商的可用默认模型（defaultModel → 列表第一个
+   *   → 全局默认），并持久化 task.model，返回受影响的 taskId 列表。
+   */
+  async refreshInvalidTaskModels(providerId?: ProviderId): Promise<string[]> {
+    const providers = providerId
+      ? [providerId]
+      : (Object.keys(this.config.providers) as ProviderId[]);
+    const affected: string[] = [];
+    for (const pid of providers) {
+      const providerConfig = this.config.providers[pid];
+      if (!providerConfig) continue;
+      const rawModels = providerConfig.models ?? [];
+      const allowed = new Set(
+        rawModels.map((entry) =>
+          normalizeProviderModel(pid, typeof entry === 'string' ? entry : entry.id),
+        ),
+      );
+      // 回退模型：供应商 defaultModel 若仍有效则优先，否则取列表第一个有效模型
+      const fallbackModel = [providerConfig.defaultModel, ...rawModels]
+        .map((entry) =>
+          entry ? normalizeProviderModel(pid, typeof entry === 'string' ? entry : entry.id) : '',
+        )
+        .find((modelId) => modelId && allowed.has(modelId));
+
+      for (const conversation of this.conversations.values()) {
+        if (conversation.providerInstance.providerId !== pid) continue;
+        const currentModel = normalizeProviderModel(
+          pid,
+          conversation.providerInstance.getModel(),
+        );
+        if (allowed.has(currentModel)) continue;
+        // 正在执行的任务：不打断，完成后由调用方再触发本方法
+        if (conversation.isBusy) continue;
+        if (fallbackModel) {
+          await this.setTaskModel(conversation, pid, fallbackModel);
+          if (conversation.taskId) {
+            await this.projects.setTaskModel(conversation.taskId, `${pid}:${fallbackModel}`);
+          }
+        } else if (this.provider) {
+          // 供应商已无可用模型：回退全局默认
+          await conversation.applyTaskModel(this.provider);
+          if (conversation.taskId) {
+            await this.projects.setTaskModel(conversation.taskId, undefined);
+          }
+        }
+        if (conversation.taskId) affected.push(conversation.taskId);
+      }
+    }
+    return affected;
+  }
+
+  /**
+   * Drop cached per-task instances and overrides for a provider after its
+   * settings changed. Conversations still bound to the old provider fall back
+   * to the new global default.
+   */
+  private async invalidateProviderInstances(
+    providerId: ProviderId,
+    fallback: LLMProvider | null,
+  ): Promise<void> {
+    for (const [key, instance] of [...this.providerPool]) {
+      if (!key.startsWith(`${providerId}:`)) continue;
+      this.providerPool.delete(key);
+      await instance.dispose();
+    }
+    // 先记住哪些会话有任务级模型覆盖，后面重建实例后需要重新登记。
+    const overriddenSessions = new Set<string>();
+    for (const [sessionId, instance] of [...this.taskProviderOverrides]) {
+      if (instance.providerId !== providerId) continue;
+      overriddenSessions.add(sessionId);
+      this.taskProviderOverrides.delete(sessionId);
+    }
+    if (!fallback) return;
+    for (const conversation of this.conversations.values()) {
+      if (conversation.providerInstance.providerId !== providerId) continue;
+      // provider 仍被配置时，用新配置重建同模型实例（保留任务选的具体模型，
+      // 而不是切回默认模型/激活 provider）。provider 已被删除时回退到 fallback。
+      const model = conversation.providerInstance.getModel();
+      const replacement: LLMProvider =
+        model && this.config.providers[providerId]
+          ? await this.getProviderForTask(providerId, model)
+          : fallback;
+      if (replacement !== fallback && overriddenSessions.has(conversation.sessionId)) {
+        this.taskProviderOverrides.set(conversation.sessionId, replacement);
+      }
+      await conversation.replaceProvider(replacement);
+    }
+  }
+
+  private async createProviderInstance(
+    providerId: ProviderId,
+    model: string,
+  ): Promise<LLMProvider> {
+    const configured = this.config.providers[providerId];
+    const defaults = getProviderDefaults(providerId);
+    const models = normalizeModelList(
+      (configured?.models ?? defaults.models).map((entry) =>
+        typeof entry === 'string'
+          ? normalizeProviderModel(providerId, entry)
+          : { ...entry, id: normalizeProviderModel(providerId, entry.id) },
+      ),
+      normalizeProviderModel(providerId, model),
+    );
+    const baseURL = configured?.baseURL ?? defaults.baseURL;
+    const apiKey = configured?.apiKey;
+    let instance: LLMProvider | null = null;
+    switch (providerId) {
+      case 'anthropic':
+        instance = new AnthropicProvider(apiKey ?? '', model, baseURL, models);
+        break;
+      case 'openai':
+        instance = new OpenAIProvider(apiKey ?? '', model, baseURL, models);
+        break;
+      case 'ollama':
+        instance = new OllamaProvider(model, baseURL, undefined, models);
+        break;
+      case 'deepseek':
+        instance = new DeepSeekProvider(
+          apiKey ?? 'deepseek',
+          normalizeDeepSeekModel(model),
+          baseURL,
+          models.map((entry) =>
+            typeof entry === 'string' ? normalizeDeepSeekModel(entry) : entry,
+          ),
+        );
+        break;
+      case 'volcano':
+        instance = new VolcanoArkProvider(apiKey ?? 'volcano', model, baseURL, models);
+        break;
+    }
+    if (!instance) throw new Error(`不支持的 Provider: ${providerId}`);
+    await instance.initialize();
+    return instance;
   }
 
   getReasoningEffort(): ReasoningEffort {
@@ -714,6 +961,11 @@ export class WebAgentRuntime {
     for (const conversation of [...this.conversations.values()]) {
       await conversation.close();
     }
+    for (const instance of this.providerPool.values()) {
+      await instance.dispose();
+    }
+    this.providerPool.clear();
+    this.taskProviderOverrides.clear();
     await this.mcpManager.disconnectAll();
     await this.providerRegistry?.disposeAll();
     this.statsStore?.close();
@@ -924,20 +1176,53 @@ export class WebConversation {
   private session!: SessionManager;
   private agentLoop!: AgentLoop;
   private tokenBudget!: TokenBudget;
+  private emit: RuntimeEmitter;
   private busy = false;
   private closed = false;
   private rememberedPermissions = new Map<string, boolean>();
   private permissionMode: PermissionMode = 'ask';
   private statsRecorder: ModelRequestRecorder | null = null;
+  /** Per-task reasoning effort override (falls back to the runtime default). */
+  private reasoningEffortOverride: ReasoningEffort | undefined;
+
+  get providerInstance(): LLMProvider {
+    return this.provider;
+  }
+
+  getEffectiveReasoningEffort(): ReasoningEffort {
+    return this.reasoningEffortOverride ?? this.runtime.getReasoningEffort();
+  }
+
+  /** Switch this task's provider/effort and rebuild the agent loop. */
+  async applyTaskModel(provider: LLMProvider, reasoningEffort?: ReasoningEffort): Promise<void> {
+    this.assertIdle();
+    if (reasoningEffort !== undefined) this.reasoningEffortOverride = reasoningEffort;
+    await this.replaceProvider(provider);
+  }
 
   constructor(
     private runtime: WebAgentRuntime,
     private provider: LLMProvider,
-    private emit: RuntimeEmitter,
+    emit: RuntimeEmitter,
     private permissionRequester: PermissionRequester,
     public workingDirectory: string,
     private sessionsDirectory?: string,
+    public taskId?: string,
   ) {
+    // Tag every outgoing event with this conversation's task id so the client
+    // can route streaming output, permissions and status to the right task.
+    if (taskId) {
+      const baseEmit = emit;
+      this.emit = (message: ServerMessage) => {
+        if ('taskId' in message && message.taskId !== undefined) {
+          baseEmit(message);
+          return;
+        }
+        baseEmit({ ...message, taskId } as ServerMessage);
+      };
+    } else {
+      this.emit = emit;
+    }
     this.createState();
   }
 
@@ -953,6 +1238,9 @@ export class WebConversation {
     await this.session.ensureDir();
     await this.runtime.dispatchSessionStart(this);
     this.publishPlan();
+    // 会话就绪后推送一次上下文用量：新会话为 0，之后 restoreSession
+    // 会用恢复出的持久化值覆盖，避免在会话尚未恢复前提前推送错误值。
+    this.publishContextUsage();
   }
 
   async runPrompt(input: string): Promise<void> {
@@ -1109,6 +1397,7 @@ export class WebConversation {
       message: `模型已切换为 ${provider.displayName} · ${provider.getModel()}`,
     });
     this.publishPlan();
+    this.publishContextUsage();
   }
 
   setPlanMode(enabled: boolean): Plan | null {
@@ -1171,11 +1460,20 @@ Execute in dependency order and use update_plan_step to report progress.`,
     return this.rememberedPermissions.get(toolName);
   }
 
-  setPermissionMode(mode: PermissionMode): void {
-    this.assertIdle();
+  /**
+   * Apply a permission mode without the idle requirement. Used by the server
+   * when activating a task — the task's conversation may still be executing,
+   * and switching views must not fail because of that.
+   */
+  applyPermissionMode(mode: PermissionMode): void {
     this.permissionMode = mode;
     this.rememberedPermissions.clear();
     this.publishPermissionMode();
+  }
+
+  setPermissionMode(mode: PermissionMode): void {
+    this.assertIdle();
+    this.applyPermissionMode(mode);
   }
 
   getPermissionMode(): PermissionMode {
@@ -1221,7 +1519,7 @@ Execute in dependency order and use update_plan_step to report progress.`,
     this.planModeActive = false;
     this.rememberedPermissions.clear();
     this.tokenBudget = new TokenBudget(
-      resolveContextWindow(this.provider),
+      this.getTotalContextWindow(),
       TOKEN_BUDGET_RESERVED_OUTPUT,
       createLlmContextSummarizer(this.provider),
     );
@@ -1244,7 +1542,7 @@ Execute in dependency order and use update_plan_step to report progress.`,
       streamOptions: {
         temperature: this.runtime.config.agent.temperature,
         maxTokens: this.runtime.config.agent.maxTokens,
-        reasoningEffort: this.runtime.getReasoningEffort(),
+        reasoningEffort: this.getEffectiveReasoningEffort(),
       },
       onModelCallStart: (call) => {
         this.statsRecorder?.onModelCallStart(call);
@@ -1262,7 +1560,25 @@ Execute in dependency order and use update_plan_step to report progress.`,
       },
     });
     if (history.length > 0) this.context.replaceHistory(history);
-    this.publishContextUsage();
+    // 注意：此处不主动推送 context_usage —— createAgentState 可能在会话
+    // 恢复前（如构造函数）被调用，此时 lastInputTokens 尚未从磁盘恢复，
+    // 推送会造成刷新后“已使用上下文”被错误的 0 值覆盖。
+    // 由 start()/restoreSession()/switchWorkspace()/replaceProvider() 显式推送。
+  }
+
+  /**
+   * 当前任务模型的总上下文长度。优先从模型配置（用户最新保存的
+   * contextWindow）获取——会话实例可能创建于配置修改之前，实例里存的是
+   * 旧值；配置未配置该项时回退到实例内置的模型表。
+   */
+  private getTotalContextWindow(): number {
+    const configured = this.runtime.config.providers[this.provider.providerId as ProviderId];
+    const model = this.provider.getModel();
+    const entry = configured?.models?.find((candidate) =>
+      typeof candidate === 'string' ? candidate === model : candidate.id === model,
+    );
+    const fromConfig = entry && typeof entry !== 'string' ? entry.contextWindow : undefined;
+    return fromConfig ?? resolveContextWindow(this.provider);
   }
 
   /**
@@ -1276,7 +1592,7 @@ Execute in dependency order and use update_plan_step to report progress.`,
       // request, instead of a cumulative total or a local character-based
       // estimate.
       const usedTokens = this.session.getLastInputTokens();
-      const totalTokens = resolveContextWindow(this.provider);
+      const totalTokens = this.getTotalContextWindow();
       const percentage =
         totalTokens > 0 ? Math.min(100, Math.round((usedTokens / totalTokens) * 100)) : 0;
       const usage: ContextUsage = {
@@ -1454,7 +1770,12 @@ function normalizeModelList(
     seen.add(trimmed);
     normalized.push(config ? { ...config, id: trimmed } : trimmed);
   };
-  push(defaultModel);
+  // 默认模型也在 models 列表里时，要带上它的配置（contextWindow /
+  // maxOutputTokens），否则该配置会被 seen 去重直接丢弃。
+  const defaultEntry = models.find(
+    (model) => (typeof model === 'string' ? model.trim() : model.id.trim()) === defaultModel.trim(),
+  );
+  push(defaultModel, typeof defaultEntry === 'object' ? defaultEntry : undefined);
   for (const model of models) {
     if (typeof model === 'string') push(model);
     else push(model.id, model);

@@ -1,6 +1,6 @@
 {
   "name": "@personal-agent/stats",
-  "version": "0.1.5",
+  "version": "0.2.0",
   "private": false,
   "description": "Model request statistics tracking with SQLite storage for personal-agent",
   "files": [

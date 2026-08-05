@@ -188,6 +188,13 @@ export interface PermissionRule {
   pattern?: string; // match against params (e.g., file path pattern)
   action: 'allow' | 'ask' | 'approval';
   scope: 'session' | 'project' | 'global';
+  /**
+   * Optional target scope for this rule. Defaults to 'all' (the shared
+   * global baseline that applies to every task). Task/project specific
+   * rules only take effect for the matching task/project context and
+   * take priority over the global baseline.
+   */
+  target?: 'all' | `task:${string}` | `project:${string}`;
 }
 
 export class PermissionManager {
@@ -201,22 +208,38 @@ export class PermissionManager {
     this.rules = this.rules.filter((r) => !(r.tool === tool && r.scope === scope));
   }
 
-  check(toolName: string, params?: Record<string, unknown>): 'allow' | 'ask' | 'approval' {
-    // Check specific rules first, then wildcard
+  check(
+    toolName: string,
+    params?: Record<string, unknown>,
+    ctx?: { taskId?: string; projectId?: string },
+  ): 'allow' | 'ask' | 'approval' {
+    // Task/project-specific rules take priority over the global baseline.
     for (const rule of this.rules) {
-      const toolMatches =
-        rule.tool === toolName ||
-        rule.tool === '*' ||
-        (rule.tool.endsWith('*') && toolName.startsWith(rule.tool.slice(0, -1)));
-      if (toolMatches) {
-        if (rule.pattern && params && !this.matchPattern(rule.pattern, params)) {
-          continue;
-        }
-        return rule.action;
-      }
+      if (!rule.target || rule.target === 'all') continue;
+      if (!matchesTarget(rule, ctx)) continue;
+      if (this.matchesTool(rule, toolName, params)) return rule.action;
+    }
+    // Global baseline rules apply to every task.
+    for (const rule of this.rules) {
+      if (rule.target && rule.target !== 'all') continue;
+      if (this.matchesTool(rule, toolName, params)) return rule.action;
     }
     // Default "ask" mode: only tools marked as risky require approval.
     return 'ask';
+  }
+
+  private matchesTool(
+    rule: PermissionRule,
+    toolName: string,
+    params?: Record<string, unknown>,
+  ): boolean {
+    const toolMatches =
+      rule.tool === toolName ||
+      rule.tool === '*' ||
+      (rule.tool.endsWith('*') && toolName.startsWith(rule.tool.slice(0, -1)));
+    if (!toolMatches) return false;
+    if (rule.pattern && params && !this.matchPattern(rule.pattern, params)) return false;
+    return true;
   }
 
   getRules(): PermissionRule[] {
@@ -233,6 +256,20 @@ export class PermissionManager {
     }
     return true;
   }
+}
+
+function matchesTarget(
+  rule: PermissionRule,
+  ctx?: { taskId?: string; projectId?: string },
+): boolean {
+  if (!rule.target || rule.target === 'all') return true;
+  if (rule.target.startsWith('task:') && ctx?.taskId) {
+    return rule.target === `task:${ctx.taskId}`;
+  }
+  if (rule.target.startsWith('project:') && ctx?.projectId) {
+    return rule.target === `project:${ctx.projectId}`;
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------

@@ -166,6 +166,20 @@ interface ModelCallTrace {
   error?: string;
 }
 
+interface TaskViewSnapshot {
+  timeline: TimelineItem[];
+  modelCalls: ModelCallTrace[];
+  busy: boolean;
+  contextUsage?: ContextUsage;
+  planActive: boolean;
+  plan: PlanMessage['plan'];
+  planProgress: PlanMessage['progress'];
+  permissionMode: PermissionMode;
+  sessionId?: string;
+  pendingPermission?: PermissionRequest;
+  responseSeq: number;
+}
+
 interface ProviderModelRow {
   id: string;
   contextWindow?: number;
@@ -401,7 +415,12 @@ function AgentWorkspace({
   const [turnNavLeft, setTurnNavLeft] = useState(30);
   const [prompt, setPrompt] = useState('');
   const [draftTaskProjectId, setDraftTaskProjectId] = useState<string>();
-  const pendingTaskDraftRef = useRef<{ projectId: string; prompt?: string }>();
+  const pendingTaskDraftRef = useRef<{
+    projectId: string;
+    prompt?: string;
+    permissionMode?: PermissionMode;
+    taskModel?: { provider: string; model: string };
+  }>();
   const [projectModalOpen, setProjectModalOpen] = useState(false);
   const [directoryPickerOpen, setDirectoryPickerOpen] = useState(false);
   const [directoryPickerLoading, setDirectoryPickerLoading] = useState(false);
@@ -419,6 +438,7 @@ function AgentWorkspace({
   const [debugModalOpen, setDebugModalOpen] = useState(false);
   const [statsModalOpen, setStatsModalOpen] = useState(false);
   const [modelCalls, setModelCalls] = useState<ModelCallTrace[]>([]);
+  const modelCallsRef = useRef<ModelCallTrace[]>([]);
   const [selectedModelCallId, setSelectedModelCallId] = useState<string>();
   const [rememberPermission, setRememberPermission] = useState(false);
   const [renamingTaskId, setRenamingTaskId] = useState<string>();
@@ -459,6 +479,105 @@ function AgentWorkspace({
     timelineRef.current = next;
     setTimeline(next);
   }, []);
+
+  const emptyTaskSnapshot = (): TaskViewSnapshot => ({
+    timeline: [],
+    modelCalls: [],
+    busy: false,
+    contextUsage: undefined,
+    planActive: false,
+    plan: null,
+    planProgress: {
+      total: 0,
+      completed: 0,
+      failed: 0,
+      skipped: 0,
+      current: 0,
+      percentage: 0,
+    },
+    permissionMode: 'ask',
+    sessionId: undefined,
+    pendingPermission: undefined,
+    responseSeq: 0,
+  });
+  /** Per-task view snapshots, preserved while switching tasks. */
+  const taskDataRef = useRef<Record<string, TaskViewSnapshot>>({});
+  const snapshotTaskView = useCallback((taskId: string) => {
+    taskDataRef.current[taskId] = {
+      timeline: timelineRef.current,
+      modelCalls: modelCallsRef.current,
+      busy: stateRef.current.busy,
+      contextUsage: stateRef.current.contextUsage,
+      planActive: stateRef.current.planActive,
+      plan: stateRef.current.plan,
+      planProgress: stateRef.current.planProgress,
+      permissionMode: stateRef.current.permissionMode,
+      sessionId: stateRef.current.sessionId,
+      pendingPermission: stateRef.current.pendingPermission,
+      responseSeq: activeResponseSequenceRef.current,
+    };
+  }, []);
+  const applyTaskView = useCallback(
+    (taskId: string | undefined) => {
+      if (!taskId) {
+        // No target task (e.g. new-task draft): show an empty view while
+        // keeping the previous task's snapshot for later switching.
+        const empty = emptyTaskSnapshot();
+        timelineRef.current = [];
+        setTimeline([]);
+        setModelCalls([]);
+        modelCallsRef.current = [];
+        setSelectedModelCallId(undefined);
+        activeResponseSequenceRef.current = 0;
+        patchState({
+          busy: false,
+          contextUsage: undefined,
+          planActive: false,
+          plan: null,
+          planProgress: empty.planProgress,
+          permissionMode: 'ask',
+          sessionId: undefined,
+          pendingPermission: undefined,
+        });
+        return;
+      }
+      const data = taskDataRef.current[taskId] ?? emptyTaskSnapshot();
+      const hasSnapshot = Boolean(taskDataRef.current[taskId]);
+      timelineRef.current = data.timeline;
+      setTimeline(data.timeline);
+      setModelCalls(data.modelCalls);
+      modelCallsRef.current = data.modelCalls;
+      setSelectedModelCallId(undefined);
+      activeResponseSequenceRef.current = data.responseSeq;
+      patchState({
+        busy: data.busy,
+        // 无快照的任务（首次打开/刷新后重开）：保留已收到的实时
+        // context_usage，避免把服务端恢复的值（如刷新前的已用 tokens）
+        // 重置成 undefined/0。
+        contextUsage: hasSnapshot ? data.contextUsage : stateRef.current.contextUsage,
+        planActive: data.planActive,
+        plan: data.plan,
+        planProgress: data.planProgress,
+        permissionMode: data.permissionMode,
+        sessionId: data.sessionId,
+        pendingPermission: data.pendingPermission,
+      });
+    },
+    [patchState],
+  );
+  /**
+   * Preserve a task's view (default: the currently active task), then load
+   * another task's snapshot. Pass saveTaskId explicitly when the active task
+   * id does not match the view currently being rendered.
+   */
+  const switchTaskView = useCallback(
+    (newTaskId: string | undefined, saveTaskId?: string) => {
+      const source = saveTaskId ?? stateRef.current.activeTaskId;
+      if (source) snapshotTaskView(source);
+      applyTaskView(newTaskId);
+    },
+    [snapshotTaskView, applyTaskView],
+  );
 
   const userTurns = useMemo(
     () =>
@@ -552,15 +671,29 @@ function AgentWorkspace({
             runtime: incoming.runtime,
             configured: incoming.runtime.configured,
           });
+          // 供应商配置变更（含模型列表增删）：刷新任务列表，同步任务模型的
+          // 自动切换结果（被移除的模型已从选项列表消失，任务自动选中可用模型）。
+          send({ type: 'list_projects' });
           if (becameConfigured && stateRef.current.activeTaskId) {
             send({ type: 'open_task', taskId: stateRef.current.activeTaskId });
           }
           break;
         }
         case 'history': {
-          if (pendingTaskDraftRef.current) break;
+          const eventTaskId = incoming.taskId ?? stateRef.current.activeTaskId;
+          const viewingTask = stateRef.current.activeTaskId;
+          if (eventTaskId && eventTaskId !== viewingTask) {
+            switchTaskView(eventTaskId, viewingTask);
+          }
+          if (pendingTaskDraftRef.current) {
+            if (eventTaskId && eventTaskId !== viewingTask && viewingTask) {
+              switchTaskView(viewingTask, eventTaskId);
+            }
+            break;
+          }
           setCompressing(false);
           setModelCalls([]);
+          modelCallsRef.current = [];
           setSelectedModelCallId(undefined);
           const restored: TimelineItem[] = [];
           const restoredToolOwners = new Map<string, number>();
@@ -623,6 +756,9 @@ function AgentWorkspace({
           followOutputRef.current = true;
           replaceTimeline(restored);
           patchState({ sessionId: incoming.sessionId });
+          if (eventTaskId && eventTaskId !== viewingTask && viewingTask) {
+            switchTaskView(viewingTask, eventTaskId);
+          }
           break;
         }
         case 'project_list':
@@ -634,7 +770,11 @@ function AgentWorkspace({
               current.activeProjectId,
           }));
           break;
-        case 'task_list':
+        case 'task_list': {
+          const nextActive = pendingTaskDraftRef.current
+            ? undefined
+            : (incoming.activeTaskId ?? stateRef.current.activeTaskId);
+          if (nextActive !== stateRef.current.activeTaskId) switchTaskView(nextActive);
           patchState((current) => ({
             tasks: incoming.tasks,
             activeTaskId: pendingTaskDraftRef.current
@@ -647,11 +787,14 @@ function AgentWorkspace({
                 )?.permissionMode ?? current.permissionMode),
           }));
           break;
+        }
         case 'project_changed':
+          // Keep activeTaskId: server always follows this event with
+          // task_changed, and clearing the id here would make the follow-up
+          // switchTaskView lose the source task's view snapshot.
           patchState((current) => ({
             projects: upsertById(current.projects, incoming.project),
             activeProjectId: incoming.project.id,
-            activeTaskId: undefined,
             creatingProject: false,
           }));
           setProjectModalOpen(false);
@@ -672,6 +815,7 @@ function AgentWorkspace({
           }));
           break;
         case 'task_changed':
+          switchTaskView(incoming.task.id);
           patchState((current) => ({
             activeProjectId: incoming.task.projectId,
             activeTaskId: incoming.task.id,
@@ -686,11 +830,21 @@ function AgentWorkspace({
             pendingTaskDraftRef.current.projectId === incoming.task.projectId
           ) {
             const initialPrompt = pendingTaskDraftRef.current.prompt;
+            const draftTaskModel = pendingTaskDraftRef.current.taskModel;
             pendingTaskDraftRef.current = undefined;
             setDraftTaskProjectId(undefined);
             followOutputRef.current = true;
+            // 草稿中选过任务模型：先应用模型（任务空闲），再发 prompt。
+            if (draftTaskModel) {
+              send({
+                type: 'set_task_model',
+                taskId: incoming.task.id,
+                providerId: draftTaskModel.provider,
+                model: draftTaskModel.model,
+              });
+            }
             appendMessage('user', initialPrompt);
-            if (send({ type: 'prompt', text: initialPrompt })) setPrompt('');
+            if (send({ type: 'prompt', text: initialPrompt, taskId: incoming.task.id })) setPrompt('');
           }
           requestAnimationFrame(() =>
             document.querySelector<HTMLTextAreaElement>('#prompt-input')?.focus(),
@@ -707,7 +861,15 @@ function AgentWorkspace({
         case 'session_changed':
           patchState({ sessionId: incoming.sessionId });
           break;
-        case 'busy':
+        case 'busy': {
+          const eventTaskId = incoming.taskId ?? stateRef.current.activeTaskId;
+          if (eventTaskId && eventTaskId !== stateRef.current.activeTaskId) {
+            const data = taskDataRef.current[eventTaskId] ?? emptyTaskSnapshot();
+            if (incoming.busy) data.responseSeq += 1;
+            data.busy = incoming.busy;
+            taskDataRef.current[eventTaskId] = data;
+            break;
+          }
           if (incoming.busy && !stateRef.current.busy) {
             responseSequenceRef.current += 1;
             activeResponseSequenceRef.current = responseSequenceRef.current;
@@ -721,26 +883,57 @@ function AgentWorkspace({
             );
           }
           break;
+        }
         case 'turn_start':
           break;
-        case 'llm_call_start':
-          setModelCalls((current) => [
-            ...current,
-            {
-              ...incoming.call,
-              status: 'running',
-            },
-          ]);
+        case 'llm_call_start': {
+          const eventTaskId = incoming.taskId ?? stateRef.current.activeTaskId;
+          if (eventTaskId && eventTaskId !== stateRef.current.activeTaskId) {
+            const data = taskDataRef.current[eventTaskId] ?? emptyTaskSnapshot();
+            data.modelCalls = [
+              ...data.modelCalls,
+              { ...incoming.call, status: 'running' },
+            ];
+            taskDataRef.current[eventTaskId] = data;
+            break;
+          }
+          setModelCalls((current) => {
+            const next: ModelCallTrace[] = [
+              ...current,
+              { ...incoming.call, status: 'running' as const },
+            ];
+            modelCallsRef.current = next;
+            return next;
+          });
           setSelectedModelCallId(incoming.call.callId);
           break;
+        }
         case 'llm_call_end':
-          setModelCalls((current) =>
-            current.map((call) =>
+          setModelCalls((current) => {
+            const next: ModelCallTrace[] = current.map((call) =>
               call.callId === incoming.call.callId ? { ...call, ...incoming.call } : call,
-            ),
-          );
+            );
+            modelCallsRef.current = next;
+            return next;
+          });
           break;
-        case 'thinking_delta':
+        case 'thinking_delta': {
+          const eventTaskId = incoming.taskId ?? stateRef.current.activeTaskId;
+          if (eventTaskId && eventTaskId !== stateRef.current.activeTaskId) {
+            const data = taskDataRef.current[eventTaskId] ?? emptyTaskSnapshot();
+            data.timeline = updateAssistantTurn(
+              data.timeline,
+              data.responseSeq,
+              incoming.turnNumber,
+              (item) => ({
+                ...item,
+                thinking: `${item.thinking ?? ''}${incoming.thinking}`,
+                streaming: true,
+              }),
+            );
+            taskDataRef.current[eventTaskId] = data;
+            break;
+          }
           updateTimeline((items) =>
             updateAssistantTurn(
               items,
@@ -754,7 +947,24 @@ function AgentWorkspace({
             ),
           );
           break;
-        case 'assistant_delta':
+        }
+        case 'assistant_delta': {
+          const eventTaskId = incoming.taskId ?? stateRef.current.activeTaskId;
+          if (eventTaskId && eventTaskId !== stateRef.current.activeTaskId) {
+            const data = taskDataRef.current[eventTaskId] ?? emptyTaskSnapshot();
+            data.timeline = updateAssistantTurn(
+              data.timeline,
+              data.responseSeq,
+              incoming.turnNumber,
+              (item) => ({
+                ...item,
+                text: `${item.text}${incoming.text}`,
+                streaming: true,
+              }),
+            );
+            taskDataRef.current[eventTaskId] = data;
+            break;
+          }
           updateTimeline((items) =>
             updateAssistantTurn(
               items,
@@ -768,7 +978,31 @@ function AgentWorkspace({
             ),
           );
           break;
-        case 'tool_start':
+        }
+        case 'tool_start': {
+          const eventTaskId = incoming.taskId ?? stateRef.current.activeTaskId;
+          if (eventTaskId && eventTaskId !== stateRef.current.activeTaskId) {
+            const data = taskDataRef.current[eventTaskId] ?? emptyTaskSnapshot();
+            data.timeline = updateAssistantTurn(
+              data.timeline,
+              data.responseSeq,
+              incoming.turnNumber,
+              (item) => ({
+                ...item,
+                streaming: true,
+                tools: upsertTurnTool(item.tools ?? [], {
+                  id: `tool-${incoming.toolCallId}`,
+                  kind: 'tool',
+                  toolCallId: incoming.toolCallId,
+                  name: incoming.toolName,
+                  status: 'running',
+                  output: '等待工具返回…',
+                }),
+              }),
+            );
+            taskDataRef.current[eventTaskId] = data;
+            break;
+          }
           updateTimeline((items) =>
             updateAssistantTurn(
               items,
@@ -789,7 +1023,26 @@ function AgentWorkspace({
             ),
           );
           break;
-        case 'tool_progress':
+        }
+        case 'tool_progress': {
+          const eventTaskId = incoming.taskId ?? stateRef.current.activeTaskId;
+          if (eventTaskId && eventTaskId !== stateRef.current.activeTaskId) {
+            const data = taskDataRef.current[eventTaskId] ?? emptyTaskSnapshot();
+            data.timeline = updateAssistantTurn(
+              data.timeline,
+              data.responseSeq,
+              incoming.turnNumber,
+              (item) => ({
+                ...item,
+                tools: updateTurnTool(item.tools ?? [], incoming.toolCallId, (tool) => ({
+                  ...tool,
+                  output: incoming.content,
+                })),
+              }),
+            );
+            taskDataRef.current[eventTaskId] = data;
+            break;
+          }
           updateTimeline((items) =>
             updateAssistantTurn(
               items,
@@ -805,7 +1058,34 @@ function AgentWorkspace({
             ),
           );
           break;
-        case 'tool_end':
+        }
+        case 'tool_end': {
+          const eventTaskId = incoming.taskId ?? stateRef.current.activeTaskId;
+          if (eventTaskId && eventTaskId !== stateRef.current.activeTaskId) {
+            const data = taskDataRef.current[eventTaskId] ?? emptyTaskSnapshot();
+            data.timeline = updateAssistantTurn(
+              data.timeline,
+              data.responseSeq,
+              incoming.turnNumber,
+              (item) => ({
+                ...item,
+                tools: updateTurnTool(item.tools ?? [], incoming.toolCallId, (tool) => ({
+                  ...tool,
+                  status: incoming.result.metadata?.interrupted
+                    ? 'interrupted'
+                    : incoming.result.success
+                      ? 'success'
+                      : 'failed',
+                  output:
+                    (incoming.result.success ? incoming.result.content : incoming.result.error) ||
+                    '(无输出)',
+                  duration: incoming.result.metadata?.duration,
+                })),
+              }),
+            );
+            taskDataRef.current[eventTaskId] = data;
+            break;
+          }
           updateTimeline((items) =>
             updateAssistantTurn(
               items,
@@ -829,11 +1109,32 @@ function AgentWorkspace({
             ),
           );
           break;
-        case 'permission_request':
+        }
+        case 'permission_request': {
+          const eventTaskId = incoming.taskId ?? stateRef.current.activeTaskId;
+          if (eventTaskId && eventTaskId !== stateRef.current.activeTaskId) {
+            const data = taskDataRef.current[eventTaskId] ?? emptyTaskSnapshot();
+            data.pendingPermission = incoming;
+            taskDataRef.current[eventTaskId] = data;
+            break;
+          }
           setRememberPermission(false);
           patchState({ pendingPermission: incoming });
           break;
-        case 'turn_end':
+        }
+        case 'turn_end': {
+          const eventTaskId = incoming.taskId ?? stateRef.current.activeTaskId;
+          if (eventTaskId && eventTaskId !== stateRef.current.activeTaskId) {
+            const data = taskDataRef.current[eventTaskId] ?? emptyTaskSnapshot();
+            data.timeline = data.timeline.map((item) =>
+              item.id === assistantTurnId(data.responseSeq, incoming.turnNumber) &&
+              item.kind === 'message'
+                ? { ...item, streaming: false }
+                : item,
+            );
+            taskDataRef.current[eventTaskId] = data;
+            break;
+          }
           updateTimeline((items) =>
             items.map((item) =>
               item.id === assistantTurnId(activeResponseSequenceRef.current, incoming.turnNumber) &&
@@ -843,14 +1144,44 @@ function AgentWorkspace({
             ),
           );
           break;
-        case 'done':
+        }
+        case 'done': {
+          const eventTaskId = incoming.taskId ?? stateRef.current.activeTaskId;
+          if (eventTaskId && eventTaskId !== stateRef.current.activeTaskId) {
+            const data = taskDataRef.current[eventTaskId] ?? emptyTaskSnapshot();
+            data.timeline = data.timeline.map((item) =>
+              item.kind === 'message' && item.streaming ? { ...item, streaming: false } : item,
+            );
+            taskDataRef.current[eventTaskId] = data;
+            break;
+          }
           updateTimeline((items) =>
             items.map((item) =>
               item.kind === 'message' && item.streaming ? { ...item, streaming: false } : item,
             ),
           );
           break;
-        case 'interrupted':
+        }
+        case 'interrupted': {
+          const eventTaskId = incoming.taskId ?? stateRef.current.activeTaskId;
+          if (eventTaskId && eventTaskId !== stateRef.current.activeTaskId) {
+            const data = taskDataRef.current[eventTaskId] ?? emptyTaskSnapshot();
+            data.pendingPermission = undefined;
+            data.timeline = data.timeline.map((item) => {
+              if (item.kind === 'tool') {
+                return item.status === 'running' ? { ...item, status: 'interrupted' } : item;
+              }
+              return {
+                ...item,
+                streaming: false,
+                tools: item.tools?.map((tool) =>
+                  tool.status === 'running' ? { ...tool, status: 'interrupted' } : tool,
+                ),
+              };
+            });
+            taskDataRef.current[eventTaskId] = data;
+            break;
+          }
           messageApi.info('已停止生成');
           patchState({ pendingPermission: undefined });
           updateTimeline((items) =>
@@ -868,26 +1199,63 @@ function AgentWorkspace({
             }),
           );
           break;
-        case 'permission_mode':
+        }
+        case 'permission_mode': {
+          const eventTaskId = incoming.taskId ?? stateRef.current.activeTaskId;
+          if (eventTaskId && eventTaskId !== stateRef.current.activeTaskId) {
+            const data = taskDataRef.current[eventTaskId] ?? emptyTaskSnapshot();
+            data.permissionMode = incoming.mode;
+            taskDataRef.current[eventTaskId] = data;
+            break;
+          }
           patchState({ permissionMode: incoming.mode });
           break;
-        case 'plan':
+        }
+        case 'plan': {
+          const eventTaskId = incoming.taskId ?? stateRef.current.activeTaskId;
+          if (eventTaskId && eventTaskId !== stateRef.current.activeTaskId) {
+            const data = taskDataRef.current[eventTaskId] ?? emptyTaskSnapshot();
+            data.planActive = incoming.active;
+            data.plan = incoming.plan;
+            data.planProgress = incoming.progress;
+            taskDataRef.current[eventTaskId] = data;
+            break;
+          }
           patchState({
             planActive: incoming.active,
             plan: incoming.plan,
             planProgress: incoming.progress,
           });
           break;
-        case 'context_usage':
+        }
+        case 'context_usage': {
+          const eventTaskId = incoming.taskId ?? stateRef.current.activeTaskId;
+          if (eventTaskId && eventTaskId !== stateRef.current.activeTaskId) {
+            const data = taskDataRef.current[eventTaskId] ?? emptyTaskSnapshot();
+            data.contextUsage = incoming.usage;
+            taskDataRef.current[eventTaskId] = data;
+            // 初始化/刷新重连阶段（activeTaskId 尚未就绪）：事件来自服务端
+            // 当前激活的任务，直接同步到全局状态，避免刷新后已使用的上下文
+            // 用量停留在 0/undefined（此后没有其他事件会再纠正它）。
+            if (!stateRef.current.activeTaskId) {
+              patchState({ contextUsage: incoming.usage });
+            }
+            break;
+          }
           patchState({ contextUsage: incoming.usage });
           break;
+        }
         case 'notice':
           messageApi.info(incoming.message);
           break;
-        case 'error':
+        case 'error': {
+          const eventTaskId = incoming.taskId ?? stateRef.current.activeTaskId;
           setCompressing(false);
           messageApi.error(incoming.message);
-          if (incoming.code === 'AGENT_ERROR') {
+          if (
+            incoming.code === 'AGENT_ERROR' &&
+            (!eventTaskId || eventTaskId === stateRef.current.activeTaskId)
+          ) {
             appendMessage('system', incoming.message, { error: true });
           }
           patchState({
@@ -895,12 +1263,18 @@ function AgentWorkspace({
             creatingTask: false,
           });
           break;
+        }
         case 'pong':
           break;
       }
     },
-    [appendMessage, messageApi, nextId, patchState, replaceTimeline, send, updateTimeline],
+    [appendMessage, messageApi, nextId, patchState, replaceTimeline, send, updateTimeline, switchTaskView],
   );
+
+  // Keep the latest handler in a ref so the connect effect never re-runs
+  // when the handler identity changes (would close/reopen the socket).
+  const handleServerMessageRef = useRef(handleServerMessage);
+  handleServerMessageRef.current = handleServerMessage;
 
   useEffect(() => {
     let disposed = false;
@@ -936,7 +1310,7 @@ function AgentWorkspace({
       });
       socket.addEventListener('message', (event) => {
         try {
-          handleServerMessage(JSON.parse(String(event.data)) as ServerMessage);
+          handleServerMessageRef.current(JSON.parse(String(event.data)) as ServerMessage);
         } catch (error) {
           messageApi.error(
             `无法处理服务端消息：${error instanceof Error ? error.message : String(error)}`,
@@ -970,7 +1344,7 @@ function AgentWorkspace({
       socketRef.current?.close();
       socketRef.current = null;
     };
-  }, [handleServerMessage, messageApi, patchState]);
+  }, [messageApi, patchState]);
 
   useLayoutEffect(() => {
     if (!followOutputRef.current) return;
@@ -1026,13 +1400,39 @@ function AgentWorkspace({
     state.runtime?.provider && state.runtime.model
       ? runtimeModelSelectValue(state.runtime.provider, state.runtime.model)
       : undefined;
+  /** Active model of the current task ('provider:model'), undefined = inherit global. */
+  const activeTaskModel = state.tasks.find(
+    (task) => task.id === state.activeTaskId,
+  )?.model;
+  /** Task model as a dropdown option value (JSON '[provider,model]'). Falls back to the global default. */
+  const taskModelOptionValue = (() => {
+    // 新建任务草稿：优先显示草稿中已选的模型（任务创建后再应用）。
+    const draftModel = pendingTaskDraftRef.current?.taskModel;
+    if (draftModel) {
+      return runtimeModelSelectValue(draftModel.provider, draftModel.model);
+    }
+    if (activeTaskModel) {
+      const separator = activeTaskModel.indexOf(':');
+      if (separator > 0) {
+        return runtimeModelSelectValue(
+          activeTaskModel.slice(0, separator),
+          activeTaskModel.slice(separator + 1),
+        );
+      }
+    }
+    // No per-task override: show the global default model.
+    if (state.runtime?.provider && state.runtime.model) {
+      return runtimeModelSelectValue(state.runtime.provider, state.runtime.model);
+    }
+    return '';
+  })();
   const runtimeModels = buildRuntimeModelGroups(state.runtime);
   const runtimeReasoningOptions: ReasoningEffort[] =
     activeRuntimeModel?.reasoningOptions ??
     (state.runtime?.reasoningSupported ? ['off', 'high', 'max'] : ['off']);
 
   function createNewTask(projectId?: string) {
-    if (stateRef.current.busy || stateRef.current.creatingTask) return;
+    if (stateRef.current.creatingTask) return;
     const targetProjectId = projectId ?? stateRef.current.activeProjectId;
     if (!targetProjectId) {
       messageApi.error('请先创建一个项目');
@@ -1041,9 +1441,8 @@ function AgentWorkspace({
     pendingTaskDraftRef.current = { projectId: targetProjectId };
     setDraftTaskProjectId(targetProjectId);
     setPrompt('');
-    replaceTimeline([]);
-    setModelCalls([]);
-    setSelectedModelCallId(undefined);
+    // Preserve the current task's view and show an empty draft view.
+    switchTaskView(undefined);
     setShowScrollButton(false);
     patchState({
       activeProjectId: targetProjectId,
@@ -1056,13 +1455,35 @@ function AgentWorkspace({
     );
   }
 
+  function changeTaskModel(value: string) {
+    const selection = parseRuntimeModelSelectValue(value);
+    if (!selection) return;
+    const draft = pendingTaskDraftRef.current;
+    if (draft) {
+      // 新建任务草稿：任务还不存在，先记住模型选择，任务创建后随 prompt 应用。
+      pendingTaskDraftRef.current = { ...draft, taskModel: selection };
+      patchState({});
+      return;
+    }
+    const taskId = stateRef.current.activeTaskId;
+    if (!taskId) return;
+    send({
+      type: 'set_task_model',
+      taskId,
+      providerId: selection.provider,
+      model: selection.model,
+    });
+  }
+
   function submitPrompt(value = prompt.trim()) {
     const text = value.trim();
+    const hasDraft = Boolean(pendingTaskDraftRef.current);
     if (
       !text ||
       !stateRef.current.connected ||
       !stateRef.current.configured ||
-      stateRef.current.busy ||
+      // Creating a new task must not be blocked by the current task's busy state.
+      (!hasDraft && stateRef.current.busy) ||
       stateRef.current.creatingTask
     ) {
       return;
@@ -1073,7 +1494,13 @@ function AgentWorkspace({
     if (pendingTaskDraft) {
       pendingTaskDraftRef.current = { ...pendingTaskDraft, prompt: text };
       patchState({ creatingTask: true });
-      if (!send({ type: 'create_task', projectId: pendingTaskDraft.projectId })) {
+      if (
+        !send({
+          type: 'create_task',
+          projectId: pendingTaskDraft.projectId,
+          permissionMode: pendingTaskDraft.permissionMode,
+        })
+      ) {
         pendingTaskDraftRef.current = pendingTaskDraft;
         patchState({ creatingTask: false });
       }
@@ -1081,7 +1508,7 @@ function AgentWorkspace({
     }
     followOutputRef.current = true;
     appendMessage('user', text);
-    if (send({ type: 'prompt', text })) setPrompt('');
+    if (send({ type: 'prompt', text, taskId: stateRef.current.activeTaskId })) setPrompt('');
   }
 
   function discardTaskDraft() {
@@ -1098,6 +1525,7 @@ function AgentWorkspace({
       requestId: pending.requestId,
       approved,
       remember: rememberPermission,
+      taskId: pending.taskId ?? stateRef.current.activeTaskId,
     });
     patchState({ pendingPermission: undefined });
     setRememberPermission(false);
@@ -1296,7 +1724,7 @@ function AgentWorkspace({
       cancelText: '取消',
       onOk: () => {
         setCompressing(true);
-        send({ type: 'compress_context' });
+        send({ type: 'compress_context', taskId: stateRef.current.activeTaskId });
       },
     });
   }
@@ -1407,7 +1835,7 @@ function AgentWorkspace({
       tasks={state.tasks}
       activeProjectId={state.activeProjectId}
       activeTaskId={state.activeTaskId}
-      busy={state.busy || state.creatingTask}
+      busy={state.creatingTask}
       creatingTask={state.creatingTask}
       renamingTaskId={renamingTaskId}
       renameTitle={renameTitle}
@@ -1420,16 +1848,14 @@ function AgentWorkspace({
         setCollapsedProjects((current) => toggleId(current, projectId))
       }
       onProjectChange={(projectId) => {
-        if (!state.busy) {
-          discardTaskDraft();
-          // 切换到项目时自动展开其任务
-          setCollapsedProjects((current) => {
-            const next = new Set(current);
-            next.delete(projectId);
-            return next;
-          });
-          send({ type: 'select_project', projectId });
-        }
+        discardTaskDraft();
+        // 切换到项目时自动展开其任务
+        setCollapsedProjects((current) => {
+          const next = new Set(current);
+          next.delete(projectId);
+          return next;
+        });
+        send({ type: 'select_project', projectId });
       }}
       onCreateProject={() => {
         discardTaskDraft();
@@ -1439,7 +1865,6 @@ function AgentWorkspace({
       onCreateTask={createNewTask}
       onRefresh={() => send({ type: 'list_projects' })}
       onOpenTask={(taskId) => {
-        if (state.busy) return;
         discardTaskDraft();
         send({ type: 'open_task', taskId });
         patchState({ sidebarOpen: false });
@@ -1631,23 +2056,46 @@ function AgentWorkspace({
             compressing={compressing}
             permissionMode={state.permissionMode}
             pendingPermission={state.pendingPermission}
+            pendingTitle={
+              state.pendingPermission
+                ? (state.tasks.find(
+                    (task) => task.id === state.pendingPermission?.taskId,
+                  )?.title ?? '任务')
+                : undefined
+            }
             rememberPermission={rememberPermission}
             runtime={state.runtime}
             runtimeModelValue={runtimeModelValue}
+            taskModelValue={taskModelOptionValue}
             runtimeModels={runtimeModels}
+            onTaskModelChange={changeTaskModel}
             runtimeReasoningOptions={runtimeReasoningOptions}
             runtimeDisabled={runtimeDisabled}
             executionLabel={executionLabel}
             onPromptChange={setPrompt}
             onSubmit={submitPrompt}
-            onStop={() => send({ type: 'interrupt' })}
+            onStop={() => send({ type: 'interrupt', taskId: stateRef.current.activeTaskId })}
             onAnswerPermission={answerPermission}
             onRememberPermissionChange={setRememberPermission}
-            onPlanModeChange={(enabled) => send({ type: 'set_plan_mode', enabled })}
+            onPlanModeChange={(enabled) =>
+              send({ type: 'set_plan_mode', enabled, taskId: stateRef.current.activeTaskId })}
             onCompressContext={confirmCompressContext}
             onPermissionModeChange={(mode) => {
+              const draft = pendingTaskDraftRef.current;
+              if (draft) {
+                // 新建任务草稿：任务还不存在，不能发 set_permission_mode
+                // （否则会误改当前激活任务）。把权限记在草稿里，随 create_task
+                // 一起提交，任务创建后由 task_changed 回写。
+                pendingTaskDraftRef.current = { ...draft, permissionMode: mode };
+                patchState({ permissionMode: mode });
+                return;
+              }
               patchState({ permissionMode: mode });
-              send({ type: 'set_permission_mode', mode });
+              send({
+                type: 'set_permission_mode',
+                mode,
+                taskId: stateRef.current.activeTaskId,
+              });
             }}
             onModelChange={(value) => {
               const selection = parseRuntimeModelSelectValue(value);
@@ -1689,7 +2137,8 @@ function AgentWorkspace({
           activeProject={activeProject}
           activeTask={activeTask}
           rootPath={rootPath}
-          onApprovePlan={() => send({ type: 'approve_plan' })}
+          onApprovePlan={() =>
+            send({ type: 'approve_plan', taskId: stateRef.current.activeTaskId })}
         />
       </Drawer>
 
@@ -1878,9 +2327,6 @@ function AgentWorkspace({
                             <div>
                               <Space size={8}>
                                 <strong>{providerLabels[provider]}</strong>
-                                {providerSettings?.active === provider && (
-                                  <Tag color="success">当前使用</Tag>
-                                )}
                               </Space>
                               <Text type="secondary">{info.defaultModel}</Text>
                             </div>
@@ -2176,7 +2622,7 @@ function SidebarContent({
         project.id,
         tasks
           .filter((task) => task.projectId === project.id)
-          .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)),
+          .sort((left, right) => right.createdAt.localeCompare(left.createdAt)),
       );
     }
     return groups;
@@ -2462,13 +2908,13 @@ function TaskMenuItem({
             <button
               type="button"
               className="pa-task-main"
-              disabled={busy}
               onClick={() => onOpenTask(task.id)}
               title={`${task.title} · ${relativeTime(task.updatedAt)} · ${
                 task.sessionId ? '可恢复' : '尚未开始'
               }`}
             >
               <strong>{task.title}</strong>
+              {task.running && <Spin size="small" className="pa-task-running" />}
             </button>
             <Dropdown
               trigger={['click']}
@@ -2813,9 +3259,11 @@ function Composer({
   compressing,
   permissionMode,
   pendingPermission,
+  pendingTitle,
   rememberPermission,
   runtime,
   runtimeModelValue,
+  taskModelValue,
   runtimeModels,
   runtimeReasoningOptions,
   runtimeDisabled,
@@ -2829,6 +3277,7 @@ function Composer({
   onCompressContext,
   onPermissionModeChange,
   onModelChange,
+  onTaskModelChange,
   onReasoningChange,
 }: {
   rootPath: string;
@@ -2841,9 +3290,11 @@ function Composer({
   compressing: boolean;
   permissionMode: PermissionMode;
   pendingPermission?: PermissionRequest;
+  pendingTitle?: string;
   rememberPermission: boolean;
   runtime?: RuntimeInfo;
   runtimeModelValue?: string;
+  taskModelValue: string;
   runtimeModels: RuntimeModelGroup[];
   runtimeReasoningOptions: ReasoningEffort[];
   runtimeDisabled: boolean;
@@ -2857,6 +3308,7 @@ function Composer({
   onCompressContext: () => void;
   onPermissionModeChange: (mode: PermissionMode) => void;
   onModelChange: (value: string) => void;
+  onTaskModelChange: (value: string) => void;
   onReasoningChange: (effort: ReasoningEffort) => void;
 }) {
   const placeholder = !enabled
@@ -2865,10 +3317,21 @@ function Composer({
       ? 'Agent 正在处理…'
       : '给 personal-agent 发送消息…（Enter 发送，Shift+Enter 换行）';
   const activeModel = findRuntimeModel(runtime, runtime?.provider, runtime?.model);
-  const activeModelLabel = activeModel?.displayName || runtime?.model || '选择模型';
-  const activeModelTitle = runtime?.providerName
-    ? `${runtime.providerName} · ${activeModelLabel}`
-    : activeModelLabel;
+  // The select's displayed value: per-task model override, else the global
+  // default. The title/width must follow the *selected* model — using the
+  // global runtime model here makes the tooltip always show the default
+  // (e.g. deepseek-v4-flash) even after switching this task to another model.
+  const taskModelSelection = parseRuntimeModelSelectValue(taskModelValue);
+  const taskModelInfo = taskModelSelection
+    ? findRuntimeModel(runtime, taskModelSelection.provider, taskModelSelection.model)
+    : undefined;
+  const activeModelLabel =
+    taskModelInfo?.displayName ||
+    taskModelSelection?.model ||
+    activeModel?.displayName ||
+    runtime?.model ||
+    '选择模型';
+  const activeModelTitle = activeModelLabel;
 
   return (
     <footer className="pa-composer-wrap">
@@ -2883,7 +3346,11 @@ function Composer({
             <div className="pa-permission-header">
               <Avatar size={30} icon={<ToolOutlined />} />
               <div>
-                <strong id="permission-title">允许执行这个操作吗？</strong>
+                <strong id="permission-title">
+                  {pendingTitle
+                    ? `「${pendingTitle}」请求执行这个操作吗？`
+                    : '允许执行这个操作吗？'}
+                </strong>
                 <span id="permission-description">
                   Agent 请求调用 <Text code>{pendingPermission.toolName}</Text>
                 </span>
@@ -2985,15 +3452,15 @@ function Composer({
           </div>
           <div className="pa-composer-right">
             <Select
-              value={runtimeModelValue}
+              value={taskModelValue}
               options={runtimeModels.length ? runtimeModels : [{ label: '未配置', options: [] }]}
               disabled={runtimeDisabled}
               className="pa-model-select"
               popupMatchSelectWidth={false}
               style={{ width: getModelSelectWidth(activeModelLabel) }}
-              title={activeModelTitle}
-              aria-label="切换当前模型"
-              onChange={onModelChange}
+              title={`${activeModelTitle}（当前任务模型，可独立于其他任务）`}
+              aria-label="切换当前任务模型"
+              onChange={onTaskModelChange}
             />
             {runtime?.reasoningSupported && (
               <Select
@@ -3353,7 +3820,8 @@ function StatsModal({ open, onClose }: { open: boolean; onClose: () => void }) {
               { title: '输入 tokens', dataIndex: 'inputTokens', align: 'right' },
               { title: '输出 tokens', dataIndex: 'outputTokens', align: 'right' },
             ]}
-          />                  </>
+          />
+                  </>
                 ),
               },
               {
@@ -4127,7 +4595,7 @@ function buildRuntimeModelGroups(runtime?: RuntimeInfo): RuntimeModelGroup[] {
     group.options.push({
       value: runtimeModelSelectValue(model.provider, model.id),
       label: model.displayName || model.id,
-      title: `${model.providerName || model.provider} · ${model.id}`,
+      title: model.id,
     });
     groups.set(model.provider, group);
   }
@@ -4145,7 +4613,7 @@ function buildRuntimeModelGroups(runtime?: RuntimeInfo): RuntimeModelGroup[] {
     group.options.unshift({
       value: runtimeModelSelectValue(runtime.provider, runtime.model),
       label: runtime.model,
-      title: `${runtime.providerName || runtime.provider} · ${runtime.model}`,
+      title: runtime.model,
     });
     groups.set(runtime.provider, group);
   }
