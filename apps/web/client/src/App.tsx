@@ -8,6 +8,7 @@ import {
   Card,
   Checkbox,
   Collapse,
+  ColorPicker,
   ConfigProvider,
   Drawer,
   Dropdown,
@@ -340,20 +341,78 @@ function getInitialColorMode(): ColorMode {
   return localStorage.getItem('personal-agent-theme') === 'dark' ? 'dark' : 'light';
 }
 
+interface AccentColors {
+  light: string;
+  dark: string;
+}
+
+/** 内置默认主色（与原始主题一致） */
+const DEFAULT_ACCENT: AccentColors = { light: '#1677ff', dark: '#91caff' };
+
+/** 预设色板：每组提供浅色/深色模式下的主色 */
+const ACCENT_PRESETS: AccentColors[] = [
+  { light: '#1677ff', dark: '#91caff' }, // 蓝（默认）
+  { light: '#52c41a', dark: '#b7eb8f' }, // 绿
+  { light: '#722ed1', dark: '#d3adf7' }, // 紫
+  { light: '#fa8c16', dark: '#ffd591' }, // 橙
+  { light: '#13c2c2', dark: '#87e8de' }, // 青
+  { light: '#f5222d', dark: '#ffa39e' }, // 玫红
+];
+
+function getInitialAccent(): AccentColors {
+  try {
+    const raw = localStorage.getItem('personal-agent-accent');
+    if (!raw) return DEFAULT_ACCENT;
+    const parsed = JSON.parse(raw) as Partial<AccentColors>;
+    if (typeof parsed.light !== 'string' || typeof parsed.dark !== 'string') {
+      return DEFAULT_ACCENT;
+    }
+    return { light: parsed.light, dark: parsed.dark };
+  } catch {
+    return DEFAULT_ACCENT;
+  }
+}
+
+/** 将 #rgb / #rrggbb 转为 rgba 字符串（用于 AntD token 等 CSS 变量无法覆盖的场景） */
+function hexToRgba(hex: string, alpha: number): string {
+  const normalized = hex.replace('#', '');
+  const full =
+    normalized.length === 3
+      ? normalized
+          .split('')
+          .map((char) => char + char)
+          .join('')
+      : normalized;
+  const num = Number.parseInt(full, 16);
+  if (Number.isNaN(num)) return `rgba(0, 0, 0, ${alpha})`;
+  const r = (num >> 16) & 255;
+  const g = (num >> 8) & 255;
+  const b = num & 255;
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
 export default function PersonalAgentApp() {
   const [colorMode, setColorMode] = useState<ColorMode>(getInitialColorMode);
+  const [accentColors, setAccentColors] = useState<AccentColors>(getInitialAccent);
+  const accent = accentColors[colorMode];
 
   useEffect(() => {
     document.documentElement.dataset.theme = colorMode;
     localStorage.setItem('personal-agent-theme', colorMode);
   }, [colorMode]);
 
+  useEffect(() => {
+    // 覆盖 :root 中定义的默认主色，--pa-accent-soft 等派生变量自动跟随
+    document.documentElement.style.setProperty('--pa-accent', accent);
+    localStorage.setItem('personal-agent-accent', JSON.stringify(accentColors));
+  }, [accent, accentColors]);
+
   const themeConfig = useMemo(
     () => ({
       algorithm: colorMode === 'dark' ? antdTheme.darkAlgorithm : antdTheme.defaultAlgorithm,
       token: {
-        colorPrimary: colorMode === 'dark' ? '#b7e56d' : '#5f8f22',
-        colorInfo: colorMode === 'dark' ? '#b7e56d' : '#5f8f22',
+        colorPrimary: accent,
+        colorInfo: accent,
         borderRadius: 10,
         fontFamily:
           'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
@@ -368,11 +427,11 @@ export default function PersonalAgentApp() {
           controlHeight: 34,
         },
         Input: {
-          activeShadow: '0 0 0 2px rgba(95, 143, 34, 0.12)',
+          activeShadow: `0 0 0 2px ${hexToRgba(accent, 0.12)}`,
         },
       },
     }),
-    [colorMode],
+    [colorMode, accent],
   );
 
   return (
@@ -383,6 +442,9 @@ export default function PersonalAgentApp() {
           onToggleColorMode={() =>
             setColorMode((current) => (current === 'light' ? 'dark' : 'light'))
           }
+          accentColors={accentColors}
+          onAccentColorsChange={setAccentColors}
+          onResetAccent={() => setAccentColors(DEFAULT_ACCENT)}
         />
       </AntApp>
     </ConfigProvider>
@@ -392,9 +454,15 @@ export default function PersonalAgentApp() {
 function AgentWorkspace({
   colorMode,
   onToggleColorMode,
+  accentColors,
+  onAccentColorsChange,
+  onResetAccent,
 }: {
   colorMode: ColorMode;
   onToggleColorMode: () => void;
+  accentColors: AccentColors;
+  onAccentColorsChange: (colors: AccentColors) => void;
+  onResetAccent: () => void;
 }) {
   const { message: messageApi, modal } = AntApp.useApp();
   const screens = Grid.useBreakpoint();
@@ -2299,7 +2367,13 @@ function AgentWorkspace({
           <Spin spinning={providerLoading} className="pa-settings-spin">
             {settingsTab === 'general' && (
               <section className="pa-settings-content">
-                <GeneralSettingsPanel />
+                <GeneralSettingsPanel
+                  colorMode={colorMode}
+                  onToggleColorMode={onToggleColorMode}
+                  accentColors={accentColors}
+                  onAccentColorsChange={onAccentColorsChange}
+                  onResetAccent={onResetAccent}
+                />
               </section>
             )}
             <section
@@ -3974,7 +4048,19 @@ function excerptText(text: string, max = 60): string {
   return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine;
 }
 
-function GeneralSettingsPanel() {
+function GeneralSettingsPanel({
+  colorMode,
+  onToggleColorMode,
+  accentColors,
+  onAccentColorsChange,
+  onResetAccent,
+}: {
+  colorMode: ColorMode;
+  onToggleColorMode: () => void;
+  accentColors: AccentColors;
+  onAccentColorsChange: (colors: AccentColors) => void;
+  onResetAccent: () => void;
+}) {
   const { message: messageApi } = AntApp.useApp();
   const [recordPayloads, setRecordPayloads] = useState<boolean | null>(null);
   const [saving, setSaving] = useState(false);
@@ -4122,6 +4208,57 @@ function GeneralSettingsPanel() {
           <Text type="secondary">Agent 运行与模型请求统计的通用设置。</Text>
         </div>
       </div>
+      <Card size="small" title="外观" className="pa-appearance-card">
+        <Form
+          layout="horizontal"
+          colon
+          labelAlign="left"
+          labelCol={{ flex: '220px' }}
+          style={{ maxWidth: 640 }}
+        >
+          <Form.Item
+            label={
+              <Space size={4}>
+                主题模式
+                <Tooltip title="浅色与深色模式可各自配置主色，切换后互不影响。">
+                  <QuestionCircleOutlined className="pa-settings-help" />
+                </Tooltip>
+              </Space>
+            }
+          >
+            <Segmented
+              value={colorMode}
+              options={[
+                { value: 'light', label: '浅色' },
+                { value: 'dark', label: '深色' },
+              ]}
+              onChange={(value) => {
+                const mode = value as ColorMode;
+                if (mode !== colorMode) onToggleColorMode();
+              }}
+            />
+          </Form.Item>
+          <Form.Item label="浅色模式主色">
+            <AccentPicker
+              mode="light"
+              value={accentColors.light}
+              onChange={(color) => onAccentColorsChange({ ...accentColors, light: color })}
+            />
+          </Form.Item>
+          <Form.Item label="深色模式主色">
+            <AccentPicker
+              mode="dark"
+              value={accentColors.dark}
+              onChange={(color) => onAccentColorsChange({ ...accentColors, dark: color })}
+            />
+          </Form.Item>
+          <Form.Item label=" ">
+            <Button size="small" icon={<ReloadOutlined />} onClick={onResetAccent}>
+              恢复默认主色
+            </Button>
+          </Form.Item>
+        </Form>
+      </Card>
       <Card size="small">
         <Form
           layout="horizontal"
@@ -4198,6 +4335,44 @@ function GeneralSettingsPanel() {
         </Form>
       </Card>
     </div>
+  );
+}
+
+/** 主色选择器：预设色板（按当前模式显示对应色）+ 自由选色 */
+function AccentPicker({
+  mode,
+  value,
+  onChange,
+}: {
+  mode: keyof AccentColors;
+  value: string;
+  onChange: (color: string) => void;
+}) {
+  const normalized = value.toLowerCase();
+  return (
+    <Space wrap size={8} className="pa-accent-picker">
+      {ACCENT_PRESETS.map((preset) => {
+        const presetColor = preset[mode];
+        const active = presetColor.toLowerCase() === normalized;
+        return (
+          <Tooltip key={presetColor} title={presetColor}>
+            <button
+              type="button"
+              className={`pa-accent-swatch${active ? ' active' : ''}`}
+              style={{ background: presetColor }}
+              aria-label={`预设主色 ${presetColor}`}
+              onClick={() => onChange(presetColor)}
+            />
+          </Tooltip>
+        );
+      })}
+      <ColorPicker
+        value={value}
+        onChange={(color) => onChange(color.toHexString())}
+        showText
+        size="small"
+      />
+    </Space>
   );
 }
 

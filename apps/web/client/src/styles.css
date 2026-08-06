@@ -10,7 +10,7 @@
   --pa-muted: #718071;
   --pa-faint: #98a397;
   --pa-accent: #6e9e2f;
-  --pa-accent-soft: #edf6df;
+  --pa-accent-soft: color-mix(in srgb, var(--pa-accent) 12%, white);
   --pa-danger: #c74d45;
   --pa-shadow: rgba(45, 60, 47, 0.13);
   --pa-code: #f0f3ed;
@@ -28,7 +28,7 @@
   --pa-muted: #9ca89a;
   --pa-faint: #6f7c6e;
   --pa-accent: #b7e56d;
-  --pa-accent-soft: rgba(183, 229, 109, 0.1);
+  --pa-accent-soft: color-mix(in srgb, var(--pa-accent) 10%, transparent);
   --pa-danger: #ff8d84;
   --pa-shadow: rgba(0, 0, 0, 0.32);
   --pa-code: #0d110d;
@@ -774,7 +774,7 @@ select {
 .pa-message-avatar {
   flex: 0 0 auto;
   color: #fff;
-  background: #5f8f22;
+  background: var(--pa-accent);
   box-shadow: 0 6px 16px var(--pa-shadow);
 }
 
@@ -1433,7 +1433,7 @@ select {
 
 .pa-plan-step.completed {
   color: #fff;
-  background: #5f8f22;
+  background: var(--pa-accent);
 }
 
 .pa-plan-step.failed {
@@ -2248,6 +2248,30 @@ select {
 .pa-settings-help {
   color: rgba(0, 0, 0, 0.45);
   cursor: help;
+}
+.pa-appearance-card {
+  margin-bottom: 16px;
+}
+.pa-accent-picker {
+  align-items: center;
+}
+.pa-accent-swatch {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  cursor: pointer;
+  border: 2px solid var(--pa-panel);
+  border-radius: 6px;
+  box-shadow: 0 0 0 1px var(--pa-border-strong);
+  transition:
+    box-shadow 0.15s ease,
+    transform 0.15s ease;
+}
+.pa-accent-swatch:hover {
+  transform: scale(1.12);
+}
+.pa-accent-swatch.active {
+  box-shadow: 0 0 0 2px var(--pa-accent);
 }
 .pa-settings-general .ant-form-item {
   margin-bottom: 16px;
