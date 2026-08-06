@@ -164,7 +164,7 @@ export type ServerMessage =
   | { type: 'llm_call_end'; call: ModelCallDebugEnd; taskId?: string }
   | { type: 'thinking_delta'; thinking: string; turnNumber: number; taskId?: string }
   | { type: 'assistant_delta'; text: string; turnNumber: number; taskId?: string }
-  | { type: 'tool_start'; toolName: string; toolCallId: string; turnNumber: number; taskId?: string }
+  | { type: 'tool_start'; toolName: string; toolCallId: string; arguments: Record<string, unknown>; turnNumber: number; taskId?: string }
   | { type: 'tool_progress'; toolCallId: string; content: string; turnNumber: number; taskId?: string }
   | {
       type: 'permission_request';

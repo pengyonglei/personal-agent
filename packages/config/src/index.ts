@@ -11,3 +11,8 @@ export {
 } from './provider-settings';
 export { saveStatsSettings, type StatsSettingsUpdate } from './stats-settings';
 export { saveAgentSettings, type AgentSettingsUpdate } from './agent-settings';
+export {
+  saveToolsSettings,
+  type ToolsSettingsUpdate,
+  type ToolsShellPreference,
+} from './tools-settings';

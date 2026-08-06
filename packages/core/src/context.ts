@@ -23,6 +23,8 @@ export interface SystemPromptSection {
 export interface AssemblerContext {
   workingDirectory: string;
   platform: string;
+  /** Actual shell used by the bash tool (e.g. 'PowerShell (Windows)'). */
+  shell?: string;
   model: string;
   provider: string;
   mode: 'chat' | 'plan';
@@ -72,8 +74,14 @@ Use as few requests as possible for each task execution.
       content: `Current environment:
 - Working directory: ${this.ctx.workingDirectory}
 - Platform: ${this.ctx.platform}
+- Shell: ${this.ctx.shell ?? 'bash (Unix)'}
 - Model: ${this.ctx.model} (${this.ctx.provider})
-- Date: ${new Date().toISOString().split('T')[0]}`,
+- Date: ${new Date().toISOString().split('T')[0]}
+
+Shell usage notes:
+- When the Shell is PowerShell (Windows), write commands in PowerShell syntax (e.g. $env:VAR, Get-ChildItem, dir works too; PowerShell 7 supports && and ||). Git and npm commands work the same as in other shells.
+- When the Shell is bash (Git Bash), use bash syntax with Windows-style paths (C:\...).
+- When the Shell is bash (WSL), use bash syntax with Linux paths — Windows paths are exposed as /mnt/<drive>/... (e.g. D:\work maps to /mnt/d/work).`,
     });
 
     // Mode

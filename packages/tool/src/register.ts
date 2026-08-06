@@ -3,12 +3,16 @@ import { ReadFileTool, WriteFileTool, EditFileTool, ListDirectoryTool } from './
 import { BashTool } from './tools/shell';
 import { GlobTool, GrepTool } from './tools/search';
 import { WebFetchTool, WebSearchTool, TodoWriteTool, AskUserTool } from './tools/web';
+import type { ShellPreference } from './shell-resolver';
 
 /**
  * Register all built-in tools.
  * Returns the registry + executor ready for use.
  */
-export function registerBuiltinTools(): {
+export function registerBuiltinTools(options?: {
+  /** Shell preference for the bash tool (Windows: auto = PowerShell). */
+  shellPreference?: ShellPreference;
+}): {
   registry: ToolRegistry;
   executor: ToolExecutor;
   permissionManager: PermissionManager;
@@ -30,7 +34,7 @@ export function registerBuiltinTools(): {
     new GlobTool(),
     new GrepTool(),
     // Shell
-    new BashTool(),
+    new BashTool(options?.shellPreference),
     // Web tools
     new WebFetchTool(),
     new WebSearchTool(),

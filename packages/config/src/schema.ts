@@ -44,8 +44,7 @@ type PermissionRuleTarget = 'all' | `task:${string}` | `project:${string}`;
 const permissionTargetSchema = z.custom<PermissionRuleTarget>(
   (value) =>
     value === 'all' ||
-    (typeof value === 'string' &&
-      (value.startsWith('task:') || value.startsWith('project:'))),
+    (typeof value === 'string' && (value.startsWith('task:') || value.startsWith('project:'))),
   { message: 'target must be all, task:<id> or project:<id>' },
 );
 
@@ -122,6 +121,8 @@ export const appConfigSchema = z.object({
       permissions: z.array(permissionRuleSchema).default([]),
       shellTimeout: z.number().default(120000),
       webFetchTimeout: z.number().default(30000),
+      /** Windows 上 bash 工具使用的 shell：auto=PowerShell，bash=Git Bash/WSL。 */
+      shell: z.enum(['auto', 'powershell', 'bash']).default('auto'),
     })
     .default({}),
   mcp: z

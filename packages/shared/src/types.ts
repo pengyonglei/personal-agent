@@ -238,7 +238,7 @@ export type AgentEvent =
   | { type: 'turn_start'; turnNumber: number }
   | { type: 'assistant_thinking_delta'; thinkingDelta: string; turnNumber: number }
   | { type: 'assistant_text_delta'; textDelta: string; turnNumber: number }
-  | { type: 'tool_call_start'; toolName: string; toolCallId: string; turnNumber: number }
+  | { type: 'tool_call_start'; toolName: string; toolCallId: string; arguments: Record<string, unknown>; turnNumber: number }
   | { type: 'tool_call_progress'; toolCallId: string; content: string; turnNumber: number }
   | { type: 'tool_call_end'; toolCallId: string; result: ToolResult; turnNumber: number }
   | { type: 'permission_request'; toolName: string; params: Record<string, unknown> }

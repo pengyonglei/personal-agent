@@ -24,6 +24,7 @@ export const DEFAULT_CONFIG: AppConfig = {
     permissions: [],
     shellTimeout: 120000,
     webFetchTimeout: 30000,
+    shell: 'auto',
   },
   mcp: {
     servers: [],

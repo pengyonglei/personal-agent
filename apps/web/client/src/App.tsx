@@ -144,6 +144,7 @@ interface ToolTimelineItem {
   kind: 'tool';
   toolCallId: string;
   name: string;
+  arguments?: Record<string, unknown>;
   status: 'running' | 'success' | 'failed' | 'interrupted';
   output: string;
   duration?: number;
@@ -844,7 +845,8 @@ function AgentWorkspace({
               });
             }
             appendMessage('user', initialPrompt);
-            if (send({ type: 'prompt', text: initialPrompt, taskId: incoming.task.id })) setPrompt('');
+            if (send({ type: 'prompt', text: initialPrompt, taskId: incoming.task.id }))
+              setPrompt('');
           }
           requestAnimationFrame(() =>
             document.querySelector<HTMLTextAreaElement>('#prompt-input')?.focus(),
@@ -890,10 +892,7 @@ function AgentWorkspace({
           const eventTaskId = incoming.taskId ?? stateRef.current.activeTaskId;
           if (eventTaskId && eventTaskId !== stateRef.current.activeTaskId) {
             const data = taskDataRef.current[eventTaskId] ?? emptyTaskSnapshot();
-            data.modelCalls = [
-              ...data.modelCalls,
-              { ...incoming.call, status: 'running' },
-            ];
+            data.modelCalls = [...data.modelCalls, { ...incoming.call, status: 'running' }];
             taskDataRef.current[eventTaskId] = data;
             break;
           }
@@ -995,6 +994,7 @@ function AgentWorkspace({
                   kind: 'tool',
                   toolCallId: incoming.toolCallId,
                   name: incoming.toolName,
+                  arguments: incoming.arguments,
                   status: 'running',
                   output: '等待工具返回…',
                 }),
@@ -1016,6 +1016,7 @@ function AgentWorkspace({
                   kind: 'tool',
                   toolCallId: incoming.toolCallId,
                   name: incoming.toolName,
+                  arguments: incoming.arguments,
                   status: 'running',
                   output: '等待工具返回…',
                 }),
@@ -1268,7 +1269,16 @@ function AgentWorkspace({
           break;
       }
     },
-    [appendMessage, messageApi, nextId, patchState, replaceTimeline, send, updateTimeline, switchTaskView],
+    [
+      appendMessage,
+      messageApi,
+      nextId,
+      patchState,
+      replaceTimeline,
+      send,
+      updateTimeline,
+      switchTaskView,
+    ],
   );
 
   // Keep the latest handler in a ref so the connect effect never re-runs
@@ -1401,9 +1411,7 @@ function AgentWorkspace({
       ? runtimeModelSelectValue(state.runtime.provider, state.runtime.model)
       : undefined;
   /** Active model of the current task ('provider:model'), undefined = inherit global. */
-  const activeTaskModel = state.tasks.find(
-    (task) => task.id === state.activeTaskId,
-  )?.model;
+  const activeTaskModel = state.tasks.find((task) => task.id === state.activeTaskId)?.model;
   /** Task model as a dropdown option value (JSON '[provider,model]'). Falls back to the global default. */
   const taskModelOptionValue = (() => {
     // 新建任务草稿：优先显示草稿中已选的模型（任务创建后再应用）。
@@ -2058,9 +2066,8 @@ function AgentWorkspace({
             pendingPermission={state.pendingPermission}
             pendingTitle={
               state.pendingPermission
-                ? (state.tasks.find(
-                    (task) => task.id === state.pendingPermission?.taskId,
-                  )?.title ?? '任务')
+                ? (state.tasks.find((task) => task.id === state.pendingPermission?.taskId)?.title ??
+                  '任务')
                 : undefined
             }
             rememberPermission={rememberPermission}
@@ -2078,7 +2085,8 @@ function AgentWorkspace({
             onAnswerPermission={answerPermission}
             onRememberPermissionChange={setRememberPermission}
             onPlanModeChange={(enabled) =>
-              send({ type: 'set_plan_mode', enabled, taskId: stateRef.current.activeTaskId })}
+              send({ type: 'set_plan_mode', enabled, taskId: stateRef.current.activeTaskId })
+            }
             onCompressContext={confirmCompressContext}
             onPermissionModeChange={(mode) => {
               const draft = pendingTaskDraftRef.current;
@@ -2138,7 +2146,8 @@ function AgentWorkspace({
           activeTask={activeTask}
           rootPath={rootPath}
           onApprovePlan={() =>
-            send({ type: 'approve_plan', taskId: stateRef.current.activeTaskId })}
+            send({ type: 'approve_plan', taskId: stateRef.current.activeTaskId })
+          }
         />
       </Drawer>
 
@@ -2702,9 +2711,7 @@ function SidebarContent({
                   </div>
                 ) : (
                   <>
-                    <div
-                      className={`pa-project-row${project.archived ? ' archived' : ''}`}
-                    >
+                    <div className={`pa-project-row${project.archived ? ' archived' : ''}`}>
                       <button
                         type="button"
                         className="pa-project-collapse"
@@ -3038,6 +3045,10 @@ function TimelineEntry({
               ? `${item.duration} ms`
               : '已完成'
             : '执行失败';
+    const bashCommand =
+      item.name === 'bash' && typeof item.arguments?.command === 'string'
+        ? item.arguments.command
+        : undefined;
     return (
       <div className={`pa-tool-entry ${item.status}`}>
         <Collapse
@@ -3059,7 +3070,12 @@ function TimelineEntry({
                   <span>{status}</span>
                 </div>
               ),
-              children: <pre className="pa-tool-output">{item.output}</pre>,
+              children: (
+                <>
+                  {bashCommand && <pre className="pa-tool-command">{bashCommand}</pre>}
+                  <pre className="pa-tool-output">{item.output}</pre>
+                </>
+              ),
             },
           ]}
         />
@@ -3208,6 +3224,10 @@ function ThinkingTool({ tool }: { tool: ToolTimelineItem }) {
             ? `${tool.duration} ms`
             : '已完成'
           : '执行失败';
+  const bashCommand =
+    tool.name === 'bash' && typeof tool.arguments?.command === 'string'
+      ? tool.arguments.command
+      : undefined;
   return (
     <div className={`pa-thinking-tool ${tool.status}`}>
       <div className="pa-thinking-tool-head">
@@ -3221,6 +3241,7 @@ function ThinkingTool({ tool }: { tool: ToolTimelineItem }) {
         <strong>{tool.name}</strong>
         <span>{status}</span>
       </div>
+      {bashCommand && <pre className="pa-tool-command">{bashCommand}</pre>}
       <pre className="pa-tool-output">{tool.output}</pre>
     </div>
   );
@@ -3770,57 +3791,56 @@ function StatsModal({ open, onClose }: { open: boolean; onClose: () => void }) {
                 label: '统计概览',
                 children: (
                   <>
+                    <div className="pa-stats-summary">
+                      <Statistic title="调用次数" value={data.summary.count} />
+                      <Statistic
+                        title="失败"
+                        value={data.summary.errorCount}
+                        valueStyle={{ color: '#cf1322' }}
+                      />
+                      <Statistic title="中断" value={data.summary.interruptedCount} />
+                      <Statistic title="输入 tokens" value={data.summary.inputTokens} />
+                      <Statistic title="输出 tokens" value={data.summary.outputTokens} />
+                      <Statistic
+                        title="平均耗时"
+                        value={
+                          data.summary.avgDurationMs >= 1000
+                            ? `${(data.summary.avgDurationMs / 1000).toFixed(1)} s`
+                            : `${Math.round(data.summary.avgDurationMs)} ms`
+                        }
+                      />
+                    </div>
+                    <Table<StatsByModelRow>
+                      size="small"
+                      rowKey={(row) => `${row.provider}:${row.model}`}
+                      title={() => '按模型'}
+                      loading={loading}
+                      dataSource={data.byModel ?? []}
+                      pagination={false}
+                      columns={[
+                        { title: 'Provider', dataIndex: 'provider' },
+                        { title: '模型', dataIndex: 'model' },
+                        { title: '次数', dataIndex: 'count', align: 'right' },
+                        { title: '错误', dataIndex: 'errorCount', align: 'right' },
+                        { title: '输入 tokens', dataIndex: 'inputTokens', align: 'right' },
+                        { title: '输出 tokens', dataIndex: 'outputTokens', align: 'right' },
+                      ]}
+                    />
 
-          <div className="pa-stats-summary">
-            <Statistic title="调用次数" value={data.summary.count} />
-            <Statistic
-              title="失败"
-              value={data.summary.errorCount}
-              valueStyle={{ color: '#cf1322' }}
-            />
-            <Statistic title="中断" value={data.summary.interruptedCount} />
-            <Statistic title="输入 tokens" value={data.summary.inputTokens} />
-            <Statistic title="输出 tokens" value={data.summary.outputTokens} />
-            <Statistic
-              title="平均耗时"
-              value={
-                data.summary.avgDurationMs >= 1000
-                  ? `${(data.summary.avgDurationMs / 1000).toFixed(1)} s`
-                  : `${Math.round(data.summary.avgDurationMs)} ms`
-              }
-            />
-          </div>
-          <Table<StatsByModelRow>
-            size="small"
-            rowKey={(row) => `${row.provider}:${row.model}`}
-            title={() => '按模型'}
-            loading={loading}
-            dataSource={data.byModel ?? []}
-            pagination={false}
-            columns={[
-              { title: 'Provider', dataIndex: 'provider' },
-              { title: '模型', dataIndex: 'model' },
-              { title: '次数', dataIndex: 'count', align: 'right' },
-              { title: '错误', dataIndex: 'errorCount', align: 'right' },
-              { title: '输入 tokens', dataIndex: 'inputTokens', align: 'right' },
-              { title: '输出 tokens', dataIndex: 'outputTokens', align: 'right' },
-            ]}
-          />
-
-          <Table<StatsByDayRow>
-            size="small"
-            rowKey={(row) => row.day}
-            title={() => '按天'}
-            loading={loading}
-            dataSource={data.byDay ?? []}
-            pagination={false}
-            columns={[
-              { title: '日期', dataIndex: 'day' },
-              { title: '次数', dataIndex: 'count', align: 'right' },
-              { title: '输入 tokens', dataIndex: 'inputTokens', align: 'right' },
-              { title: '输出 tokens', dataIndex: 'outputTokens', align: 'right' },
-            ]}
-          />
+                    <Table<StatsByDayRow>
+                      size="small"
+                      rowKey={(row) => row.day}
+                      title={() => '按天'}
+                      loading={loading}
+                      dataSource={data.byDay ?? []}
+                      pagination={false}
+                      columns={[
+                        { title: '日期', dataIndex: 'day' },
+                        { title: '次数', dataIndex: 'count', align: 'right' },
+                        { title: '输入 tokens', dataIndex: 'inputTokens', align: 'right' },
+                        { title: '输出 tokens', dataIndex: 'outputTokens', align: 'right' },
+                      ]}
+                    />
                   </>
                 ),
               },
@@ -3828,70 +3848,69 @@ function StatsModal({ open, onClose }: { open: boolean; onClose: () => void }) {
                 key: 'records',
                 label: '详细记录',
                 children: (
-          <Table<StatsRecordRow>
-            size="small"
-            rowKey={(row) => row.id}
-            title={() => '详细记录'}
-            loading={loading}
-            dataSource={data.records ?? []}
-            pagination={{
-              current: page,
-              pageSize,
-              total: data.total ?? 0,
-              showSizeChanger: true,
-              pageSizeOptions: [10, 20, 50],
-              showTotal: (total) => `共 ${total} 条`,
-              onChange: (nextPage, nextPageSize) => {
-                setPage(nextPage);
-                setPageSize(nextPageSize);
-              },
-            }}
-            columns={[
-              {
-                title: '创建时间',
-                dataIndex: 'createdAt',
-                render: (value: number | undefined) =>
-                  value === undefined ? '-' : formatStatsTime(value),
-              },
-              { title: '供应商', dataIndex: 'provider' },
-              { title: '模型', dataIndex: 'model' },
-              { title: '输入 tokens', dataIndex: 'inputTokens', align: 'right' },
-              { title: '输出 tokens', dataIndex: 'outputTokens', align: 'right' },
-              {
-                title: '请求入参',
-                render: (value: unknown) =>
-                  value === undefined ? (
-                    <Text type="secondary">未记录</Text>
-                  ) : (
-                    <StatsPayloadCell
-                      text={excerptText(renderStatsPayload(value), 80)}
-                      copyValue={renderStatsPayload(value)}
-                    />
-                  ),
-              },
-              {
-                title: '出参',
-                render: (_value: unknown, row) =>
-                  row.response === undefined ? (
-                    row.error ? (
-                      <Text type="danger">{excerptText(row.error, 60)}</Text>
-                    ) : (
-                      '-'
-                    )
-                  ) : (
-                    <StatsPayloadCell
-                      text={excerptText(renderStatsPayload(row.response), 80)}
-                      copyValue={renderStatsPayload(row.response)}
-                    />
-                  ),
-              },
-            ]}
-          />
+                  <Table<StatsRecordRow>
+                    size="small"
+                    rowKey={(row) => row.id}
+                    title={() => '详细记录'}
+                    loading={loading}
+                    dataSource={data.records ?? []}
+                    pagination={{
+                      current: page,
+                      pageSize,
+                      total: data.total ?? 0,
+                      showSizeChanger: true,
+                      pageSizeOptions: [10, 20, 50],
+                      showTotal: (total) => `共 ${total} 条`,
+                      onChange: (nextPage, nextPageSize) => {
+                        setPage(nextPage);
+                        setPageSize(nextPageSize);
+                      },
+                    }}
+                    columns={[
+                      {
+                        title: '创建时间',
+                        dataIndex: 'createdAt',
+                        render: (value: number | undefined) =>
+                          value === undefined ? '-' : formatStatsTime(value),
+                      },
+                      { title: '供应商', dataIndex: 'provider' },
+                      { title: '模型', dataIndex: 'model' },
+                      { title: '输入 tokens', dataIndex: 'inputTokens', align: 'right' },
+                      { title: '输出 tokens', dataIndex: 'outputTokens', align: 'right' },
+                      {
+                        title: '请求入参',
+                        render: (value: unknown) =>
+                          value === undefined ? (
+                            <Text type="secondary">未记录</Text>
+                          ) : (
+                            <StatsPayloadCell
+                              text={excerptText(renderStatsPayload(value), 80)}
+                              copyValue={renderStatsPayload(value)}
+                            />
+                          ),
+                      },
+                      {
+                        title: '出参',
+                        render: (_value: unknown, row) =>
+                          row.response === undefined ? (
+                            row.error ? (
+                              <Text type="danger">{excerptText(row.error, 60)}</Text>
+                            ) : (
+                              '-'
+                            )
+                          ) : (
+                            <StatsPayloadCell
+                              text={excerptText(renderStatsPayload(row.response), 80)}
+                              copyValue={renderStatsPayload(row.response)}
+                            />
+                          ),
+                      },
+                    ]}
+                  />
                 ),
               },
             ]}
           />
-
         </div>
       ) : loading ? (
         <div className="pa-stats-loading">
@@ -3961,6 +3980,8 @@ function GeneralSettingsPanel() {
   const [saving, setSaving] = useState(false);
   const [maxTurns, setMaxTurns] = useState<number | null>(null);
   const [savingMaxTurns, setSavingMaxTurns] = useState(false);
+  const [shell, setShell] = useState<'auto' | 'powershell' | 'bash' | null>(null);
+  const [savingShell, setSavingShell] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -3985,10 +4006,16 @@ function GeneralSettingsPanel() {
     apiFetch('/api/agent-config')
       .then((response) => {
         if (!response.ok) throw new Error(`读取 Agent 配置失败 (${response.status})`);
-        return response.json() as Promise<{ maxTurns: number }>;
+        return response.json() as Promise<{
+          maxTurns: number;
+          shell: 'auto' | 'powershell' | 'bash';
+        }>;
       })
       .then((payload) => {
-        if (!cancelled) setMaxTurns(payload.maxTurns);
+        if (!cancelled) {
+          setMaxTurns(payload.maxTurns);
+          setShell(payload.shell);
+        }
       })
       .catch((err: unknown) => {
         if (!cancelled) messageApi.error(err instanceof Error ? err.message : String(err));
@@ -4011,9 +4038,7 @@ function GeneralSettingsPanel() {
         const payload = (await response.json().catch(() => ({}))) as { error?: string };
         throw new Error(payload.error ?? `保存失败 (${response.status})`);
       }
-      messageApi.success(
-        value ? '已开启：新请求将保存完整入参/出参' : '已关闭：仅保存统计元数据',
-      );
+      messageApi.success(value ? '已开启：新请求将保存完整入参/出参' : '已关闭：仅保存统计元数据');
     } catch (err) {
       messageApi.error(`保存失败: ${err instanceof Error ? err.message : String(err)}`);
       setRecordPayloads((current) => (current === null ? null : !current));
@@ -4059,6 +4084,36 @@ function GeneralSettingsPanel() {
     }
   }
 
+  async function persistShell(value: 'auto' | 'powershell' | 'bash' | null) {
+    if (value === null || value === undefined) return;
+    setSavingShell(true);
+    try {
+      const response = await apiFetch('/api/agent-config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ shell: value }),
+      });
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(payload.error ?? `保存失败 (${response.status})`);
+      }
+      const payload = (await response.json()) as {
+        shell: 'auto' | 'powershell' | 'bash';
+      };
+      setShell(payload.shell);
+      messageApi.success('已保存：bash 工具使用的 shell 配置');
+    } catch (err) {
+      messageApi.error(`保存失败: ${err instanceof Error ? err.message : String(err)}`);
+      // 保存失败时回滚为服务端当前值
+      apiFetch('/api/agent-config')
+        .then((response) => response.json() as Promise<{ shell: 'auto' | 'powershell' | 'bash' }>)
+        .then((payload) => setShell(payload.shell))
+        .catch(() => undefined);
+    } finally {
+      setSavingShell(false);
+    }
+  }
+
   return (
     <div className="pa-settings-general">
       <div className="pa-settings-heading">
@@ -4068,7 +4123,13 @@ function GeneralSettingsPanel() {
         </div>
       </div>
       <Card size="small">
-        <Form layout="horizontal" colon labelAlign="left" labelCol={{ flex: '220px' }} style={{ maxWidth: 640 }}>
+        <Form
+          layout="horizontal"
+          colon
+          labelAlign="left"
+          labelCol={{ flex: '220px' }}
+          style={{ maxWidth: 640 }}
+        >
           <Form.Item
             label={
               <Space size={4}>
@@ -4106,6 +4167,32 @@ function GeneralSettingsPanel() {
               onBlur={() => void persistMaxTurns(maxTurns)}
               onPressEnter={() => void persistMaxTurns(maxTurns)}
               style={{ width: 140 }}
+            />
+          </Form.Item>
+          <Form.Item
+            label={
+              <Space size={4}>
+                bash 工具 Shell
+                <Tooltip title="选择 bash 工具在 Windows 上使用的命令环境：自动（默认 PowerShell）→ PowerShell；bash → Git Bash 或 WSL（WSL 下工作目录自动转换为 /mnt/ 路径）。修改后对新执行的命令立即生效。">
+                  <QuestionCircleOutlined className="pa-settings-help" />
+                </Tooltip>
+              </Space>
+            }
+          >
+            <Select
+              value={shell ?? undefined}
+              disabled={shell === null || savingShell}
+              loading={savingShell}
+              style={{ width: 320 }}
+              onChange={(value: 'auto' | 'powershell' | 'bash') => void persistShell(value)}
+              options={[
+                {
+                  value: 'auto',
+                  label: '自动（Windows 默认 PowerShell）',
+                },
+                { value: 'powershell', label: 'PowerShell' },
+                { value: 'bash', label: 'bash（Git Bash 或 WSL）' },
+              ]}
             />
           </Form.Item>
         </Form>
@@ -4372,6 +4459,7 @@ function extractAssistantTools(message: UnifiedMessage): ToolTimelineItem[] {
         kind: 'tool',
         toolCallId: block.id,
         name: block.name,
+        arguments: block.input,
         status: 'running',
         output: '等待工具返回…',
         restored: true,
@@ -4385,12 +4473,25 @@ function extractAssistantTools(message: UnifiedMessage): ToolTimelineItem[] {
       kind: 'tool',
       toolCallId: toolCall.id,
       name: toolCall.function.name,
+      arguments: tryParseToolArguments(toolCall.function.arguments),
       status: 'running',
       output: '等待工具返回…',
       restored: true,
     });
   }
   return [...tools.values()];
+}
+
+function tryParseToolArguments(raw: string): Record<string, unknown> | undefined {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    // ignore malformed arguments
+  }
+  return undefined;
 }
 
 function getRestoredToolStatus(
@@ -4510,13 +4611,7 @@ function formatTokens(value: number): string {
   return value.toLocaleString('en-US');
 }
 
-function ContextUsagePanel({
-  usage,
-  footer,
-}: {
-  usage?: ContextUsage;
-  footer?: ReactNode;
-}) {
+function ContextUsagePanel({ usage, footer }: { usage?: ContextUsage; footer?: ReactNode }) {
   if (!usage || usage.totalTokens <= 0) {
     return <div className="pa-context-tip">暂无上下文数据</div>;
   }

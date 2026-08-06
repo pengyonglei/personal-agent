@@ -7,7 +7,12 @@ import { fileURLToPath } from 'node:url';
 import type { ViteDevServer } from 'vite';
 import { WebSocket, WebSocketServer } from 'ws';
 import { generateId, VERSION } from '@personal-agent/shared';
-import { loadConfig, saveAgentSettings, saveStatsSettings } from '@personal-agent/config';
+import {
+  loadConfig,
+  saveAgentSettings,
+  saveStatsSettings,
+  saveToolsSettings,
+} from '@personal-agent/config';
 import { UsageStore, getByDay, getByModel, getSummary } from '@personal-agent/stats';
 import {
   WebAgentRuntime,
@@ -22,7 +27,6 @@ import {
   type ServerMessage,
   type TaskSummary,
 } from './protocol';
-
 
 const UNTITLED_TASK_TITLE = '新任务';
 const sourceDirectory = dirname(fileURLToPath(import.meta.url));
@@ -237,14 +241,14 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
     }
   });
 
-  // Agent 通用配置（设置 -> 通用）：目前仅包含最大循环轮数 maxTurns
+  // Agent 通用配置（设置 -> 通用）：最大循环轮数 maxTurns、bash 工具 shell
   app.get('/api/agent-config', (req, res) => {
     if (!isAuthorized(req.headers.authorization, req.query.token, authToken)) {
       res.status(401).json({ error: 'Unauthorized' });
       return;
     }
     const config = loadConfig({ cwd: runtime.workingDirectory, configPath: configPath });
-    res.json({ maxTurns: config.agent.maxTurns });
+    res.json({ maxTurns: config.agent.maxTurns, shell: config.tools.shell });
   });
 
   app.put('/api/agent-config', async (req, res) => {
@@ -255,19 +259,33 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
     try {
       const body = req.body as Record<string, unknown> | undefined;
       const maxTurns = body?.maxTurns;
-      if (typeof maxTurns !== 'number' || !Number.isInteger(maxTurns)) {
-        throw new Error('maxTurns 必须是整数。');
+      const shell = body?.shell;
+      if (maxTurns === undefined && shell === undefined) {
+        throw new Error('没有需要保存的配置项。');
       }
-      if (maxTurns < 50) {
-        throw new Error('最大循环轮数不能低于 50。');
+      if (maxTurns !== undefined) {
+        if (typeof maxTurns !== 'number' || !Number.isInteger(maxTurns)) {
+          throw new Error('maxTurns 必须是整数。');
+        }
+        if (maxTurns < 50) {
+          throw new Error('最大循环轮数不能低于 50。');
+        }
+        if (maxTurns > 500) {
+          throw new Error('最大循环轮数不能超过 500。');
+        }
+        await saveAgentSettings({ maxTurns }, configPath);
+        // Take effect immediately for new tasks in the running process.
+        runtime.config.agent.maxTurns = maxTurns;
       }
-      if (maxTurns > 500) {
-        throw new Error('最大循环轮数不能超过 500。');
+      if (shell !== undefined) {
+        if (shell !== 'auto' && shell !== 'powershell' && shell !== 'bash') {
+          throw new Error('shell 必须是 auto、powershell 或 bash。');
+        }
+        await saveToolsSettings({ shell }, configPath);
+        // Take effect immediately for the bash tool in the running process.
+        runtime.setShellPreference(shell);
       }
-      await saveAgentSettings({ maxTurns }, configPath);
-      // Take effect immediately for new tasks in the running process.
-      runtime.config.agent.maxTurns = maxTurns;
-      res.json({ maxTurns });
+      res.json({ maxTurns: runtime.config.agent.maxTurns, shell: runtime.config.tools.shell });
     } catch (error) {
       res.status(400).json({ error: formatError(error) });
     }
@@ -373,29 +391,29 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
       ): Promise<{ approved: boolean; remember?: boolean }> => {
         const requestId = generateId();
         send({ type: 'permission_request', requestId, toolName, params, taskId });
-      return new Promise((resolvePermission) => {
-        let settled = false;
-        const finish = (answer: { approved: boolean; remember?: boolean }): void => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timeout);
-          signal?.removeEventListener('abort', onAbort);
-          pendingPermissions.delete(requestId);
-          resolvePermission(answer);
-        };
-        const onAbort = (): void => finish({ approved: false });
-        const timeout = setTimeout(
-          () => {
-            finish({ approved: false });
-            send({ type: 'notice', message: `工具 ${toolName} 的审批已超时并被拒绝。` });
-          },
-          5 * 60 * 1000,
-        );
-        pendingPermissions.set(requestId, { resolve: finish, timeout });
-        if (signal?.aborted) onAbort();
-        else signal?.addEventListener('abort', onAbort, { once: true });
-      });
-    };
+        return new Promise((resolvePermission) => {
+          let settled = false;
+          const finish = (answer: { approved: boolean; remember?: boolean }): void => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeout);
+            signal?.removeEventListener('abort', onAbort);
+            pendingPermissions.delete(requestId);
+            resolvePermission(answer);
+          };
+          const onAbort = (): void => finish({ approved: false });
+          const timeout = setTimeout(
+            () => {
+              finish({ approved: false });
+              send({ type: 'notice', message: `工具 ${toolName} 的审批已超时并被拒绝。` });
+            },
+            5 * 60 * 1000,
+          );
+          pendingPermissions.set(requestId, { resolve: finish, timeout });
+          if (signal?.aborted) onAbort();
+          else signal?.addEventListener('abort', onAbort, { once: true });
+        });
+      };
 
     const bootstrap = initializeWorkspace().catch((error) => {
       send({ type: 'error', message: formatError(error), code: 'WORKSPACE_START_FAILED' });
@@ -734,9 +752,7 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
         if (!conv) {
           // 恢复任务级模型覆盖：刷新/重连/重启后按持久化的任务模型构建会话，
           // 而不是回退到全局默认（deepseek-v4-flash）。
-          const taskOverride = task.model
-            ? await runtime.resolveTaskModel(task.model)
-            : undefined;
+          const taskOverride = task.model ? await runtime.resolveTaskModel(task.model) : undefined;
           // 任务模型已失效（供应商被删除或模型已下线）：清除持久化值，
           // 回退全局默认模型，避免后续每次激活都解析失败。
           if (task.model && !taskOverride) {

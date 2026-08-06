@@ -294,11 +294,12 @@ export class AgentLoop {
                   name: event.toolCallEnd.name,
                   arguments: event.toolCallEnd.arguments,
                 });
-                // 通知前端：某个工具即将开始执行
+                // 通知前端：某个工具即将开始执行（附带完整参数，供前端展示命令等）
                 yield {
                   type: 'tool_call_start',
                   toolName: event.toolCallEnd.name,
                   toolCallId: event.toolCallEnd.id,
+                  arguments: event.toolCallEnd.arguments,
                   turnNumber: this.turnCount,
                 };
                 break;

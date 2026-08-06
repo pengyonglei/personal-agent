@@ -14,12 +14,21 @@ import {
 } from '@personal-agent/core';
 import {
   BaseTool,
+  describeShell,
   registerBuiltinTools,
+  setDefaultShellPreference,
   type Tool,
   type ToolContext,
   type ToolResult,
 } from '@personal-agent/tool';
-import { createLogger, setLogLevel, LogLevel, VERSION, VERSION_LABEL, type ModelInfo } from '@personal-agent/shared';
+import {
+  createLogger,
+  setLogLevel,
+  LogLevel,
+  VERSION,
+  VERSION_LABEL,
+  type ModelInfo,
+} from '@personal-agent/shared';
 import { FileSystemMemoryStore } from '@personal-agent/memory';
 import {
   ModelRequestRecorder,
@@ -154,6 +163,7 @@ program
     }
 
     // Initialize tool system
+    setDefaultShellPreference(mergedConfig.tools.shell);
     const {
       registry: toolRegistry,
       executor: toolExecutor,
@@ -195,6 +205,7 @@ program
     const contextAssembler = new ContextAssembler({
       workingDirectory: process.cwd(),
       platform: `${process.platform} ${process.arch}`,
+      shell: describeShell(process.platform, mergedConfig.tools.shell),
       model: provider.getModel(),
       provider: provider.providerId,
       mode: 'chat',
@@ -558,12 +569,7 @@ program
         const tool = toolRegistry.get(toolName);
         const decision = permissionManager.check(toolName, params);
         if (decision === 'allow') return true;
-        if (
-          decision === 'ask' &&
-          tool &&
-          !tool.requiresPermission &&
-          !tool.isDangerous
-        ) {
+        if (decision === 'ask' && tool && !tool.requiresPermission && !tool.isDangerous) {
           return true;
         }
         return promptUserPermission(toolName, params);

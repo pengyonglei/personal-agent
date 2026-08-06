@@ -38,7 +38,9 @@ import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import {
   BaseTool,
+  describeShell,
   registerBuiltinTools,
+  setDefaultShellPreference,
   type PermissionManager,
   type ToolContext,
   type ToolExecutor,
@@ -144,6 +146,9 @@ export class WebAgentRuntime {
     this.sessionsDirectory = sessionsDirectory;
     this.projects = new ProjectManager(projectStoragePath);
 
+    // Sync the shell preference into the tool layer so the bash tool follows
+    // the setting without rebuilding (the settings page can change it live).
+    setDefaultShellPreference(config.tools.shell);
     const tools = registerBuiltinTools();
     this.toolRegistry = tools.registry;
     this.toolExecutor = tools.executor;
@@ -645,6 +650,14 @@ export class WebAgentRuntime {
   }
 
   /**
+   * Live-update the shell preference used by the bash tool (settings page).
+   */
+  setShellPreference(shell: 'auto' | 'powershell' | 'bash'): void {
+    this.config.tools.shell = shell;
+    setDefaultShellPreference(shell);
+  }
+
+  /**
    * Add a task-specific permission rule to the shared rules table.
    * The rule only takes effect for the target task (see PermissionManager.check).
    */
@@ -717,10 +730,7 @@ export class WebAgentRuntime {
 
       for (const conversation of this.conversations.values()) {
         if (conversation.providerInstance.providerId !== pid) continue;
-        const currentModel = normalizeProviderModel(
-          pid,
-          conversation.providerInstance.getModel(),
-        );
+        const currentModel = normalizeProviderModel(pid, conversation.providerInstance.getModel());
         if (allowed.has(currentModel)) continue;
         // 正在执行的任务：不打断，完成后由调用方再触发本方法
         if (conversation.isBusy) continue;
@@ -1508,6 +1518,7 @@ Execute in dependency order and use update_plan_step to report progress.`,
     this.context = new ContextAssembler({
       workingDirectory: this.workingDirectory,
       platform: `${process.platform} ${process.arch}`,
+      shell: describeShell(process.platform, this.runtime.config.tools.shell),
       model: this.provider.getModel(),
       provider: this.provider.providerId,
       mode: 'chat',
@@ -1631,6 +1642,7 @@ Execute in dependency order and use update_plan_step to report progress.`,
           type: 'tool_start',
           toolName: event.toolName,
           toolCallId: event.toolCallId,
+          arguments: event.arguments,
           turnNumber: event.turnNumber,
         });
         break;

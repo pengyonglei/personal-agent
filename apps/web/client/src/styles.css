@@ -1151,6 +1151,22 @@ select {
   white-space: pre-wrap;
 }
 
+.pa-tool-command {
+  max-height: 280px;
+  margin: 0 0 8px;
+  padding: 10px 12px;
+  overflow: auto;
+  border: 1px solid color-mix(in srgb, var(--pa-accent), transparent 78%);
+  border-radius: 8px;
+  color: var(--pa-accent);
+  background: color-mix(in srgb, var(--pa-accent), transparent 93%);
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
 .pa-scroll-latest {
   position: absolute;
   right: max(24px, calc((100% - 860px) / 2));

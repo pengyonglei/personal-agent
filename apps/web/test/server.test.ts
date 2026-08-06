@@ -697,3 +697,72 @@ test('agent-config API reads and persists maxTurns (minimum 50)', async () => {
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test('agent-config API reads and persists the bash tool shell preference', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'personal-agent-web-shell-'));
+  const configPath = join(directory, 'config.yaml');
+  await writeFile(
+    configPath,
+    ['memory:', '  enabled: false', 'plugins:', '  enabled: false', 'mcp:', '  servers: []'].join(
+      '\n',
+    ),
+    'utf-8',
+  );
+  const browsableRoot = join(directory, 'browse-root');
+  const clientBuildDirectory = join(directory, 'client');
+  await mkdir(browsableRoot);
+  await mkdir(clientBuildDirectory);
+  await writeFile(join(clientBuildDirectory, 'index.html'), '<h1>test client</h1>', 'utf8');
+
+  const instance = await createWebServer({
+    host: '127.0.0.1',
+    port: 0,
+    workingDirectory: directory,
+    configPath,
+    projectStoragePath: join(directory, 'projects.json'),
+    clientBuildDirectory,
+  });
+
+  const baseUrl = `http://127.0.0.1:${instance.port}`;
+
+  try {
+    // 未配置时读取默认值 auto
+    const initial = await fetch(`${baseUrl}/api/agent-config`);
+    assert.equal(initial.status, 200);
+    const initialPayload = (await initial.json()) as { maxTurns: number; shell: string };
+    assert.equal(initialPayload.maxTurns, 100);
+    assert.equal(initialPayload.shell, 'auto');
+
+    // 更新为 bash
+    const updated = await fetch(`${baseUrl}/api/agent-config`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ shell: 'bash' }),
+    });
+    assert.equal(updated.status, 200);
+    assert.equal(((await updated.json()) as { shell: string }).shell, 'bash');
+
+    // 重启后仍持久化到 YAML
+    const savedYaml = await readFile(configPath, 'utf8');
+    assert.match(savedYaml, /shell: bash/);
+
+    // 非法值被拒绝
+    const tooHigh = await fetch(`${baseUrl}/api/agent-config`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ shell: 'fish' }),
+    });
+    assert.equal(tooHigh.status, 400);
+
+    // 空请求体被拒绝
+    const empty = await fetch(`${baseUrl}/api/agent-config`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    assert.equal(empty.status, 400);
+  } finally {
+    await instance.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

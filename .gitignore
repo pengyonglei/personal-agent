@@ -60,6 +60,13 @@ Desktop.ini
 # Accidental Windows device-name artifact
 /apps/cli/nul
 
+# release file
 releases
 
+# AI Agent
 .reasonix
+.claude
+.codex
+
+# Qoder test
+.tmp*-verify
