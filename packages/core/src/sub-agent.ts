@@ -13,6 +13,11 @@ import { createLogger, generateId } from '@personal-agent/shared';
 
 const log = createLogger('sub-agent');
 
+/** 子代理默认提示词模板（${config.description} 会被替换为实际任务描述） */
+const DEFAULT_SUB_AGENT = `You are a sub-agent with a specific task. Complete it efficiently and return only the result.
+Your task: ${'${config.description}'}
+Do not spawn further sub-agents. Focus on using the allowed tools to complete your task.`;
+
 // ---------------------------------------------------------------------------
 // Sub-agent configuration
 // ---------------------------------------------------------------------------
@@ -69,6 +74,8 @@ export class SubAgentManager {
     signal?: AbortSignal,
   ) => Promise<ToolResult>;
   private maxConcurrent: number;
+  /** 用户自定义提示词覆盖（key → 内容），未覆盖的 key 使用内置默认 */
+  private prompts?: Record<string, string>;
 
   constructor(
     toolExecutor: (
@@ -76,10 +83,11 @@ export class SubAgentManager {
       input: Record<string, unknown>,
       signal?: AbortSignal,
     ) => Promise<ToolResult>,
-    options: { maxConcurrent?: number } = {},
+    options: { maxConcurrent?: number; prompts?: Record<string, string> } = {},
   ) {
     this.globalToolExecutor = toolExecutor;
     this.maxConcurrent = options.maxConcurrent ?? 4;
+    this.prompts = options.prompts;
   }
 
   /**
@@ -181,15 +189,17 @@ export class SubAgentManager {
       contextAssembler.addSection({
         name: 'sub-agent',
         priority: 1,
-        content: `You are a sub-agent with a specific task. Complete it efficiently and return only the result.
-Your task: ${config.description}
-Do not spawn further sub-agents. Focus on using the allowed tools to complete your task.`,
+        // replacement 用函数形式，避免任务描述中的 $& $` $' 等被特殊解释
+        content: (this.prompts?.['sub-agent'] ?? DEFAULT_SUB_AGENT).replaceAll(
+          '${config.description}',
+          () => config.description,
+        ),
       });
 
       const tokenBudget = new TokenBudget(
         config.contextTokens ?? 100000,
         8192,
-        createLlmContextSummarizer(config.provider),
+        createLlmContextSummarizer(config.provider, this.prompts),
       );
       const maxTurns = config.maxTurns ?? 50;
 

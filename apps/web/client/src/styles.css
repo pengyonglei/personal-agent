@@ -1495,7 +1495,7 @@ select {
 .pa-settings-nav {
   padding: 14px 8px;
   border-right: 1px solid var(--pa-border);
-  background: var(--pa-panel-soft);
+  /*background: var(--pa-panel-soft);*/
 }
 
 .pa-settings-nav .ant-menu {
@@ -2251,7 +2251,19 @@ select {
 }
 .pa-appearance-card {
   margin-bottom: 16px;
+}/* 创建项目：本地根目录输入框 + 选择按钮 同行布局 */
+.pa-root-path-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  margin-bottom: 24px;
 }
+.pa-root-path-row .ant-form-item {
+  flex: 1;
+  min-width: 0;
+  margin-bottom: 0;
+}
+
 .pa-accent-picker {
   align-items: center;
 }
@@ -2282,6 +2294,94 @@ select {
 /* Settings general panel */
 .pa-settings-general .pa-settings-heading {
   margin-bottom: 16px;
+}
+
+/* Settings prompts panel */
+.pa-settings-prompts .pa-prompts-group {
+  margin-bottom: 16px;
+}
+.pa-prompts-group .ant-collapse {
+  border-color: var(--pa-border);
+  background: var(--pa-panel-soft);
+}
+.pa-prompts-group .pa-prompt-item + .pa-prompt-item {
+  margin-top: 8px;
+}
+.pa-prompt-label {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+}
+.pa-prompt-label strong {
+  color: var(--pa-text);
+}
+.pa-prompt-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pa-prompt-description {
+  font-size: 10px;
+}
+.pa-prompt-content {
+  max-height: 320px;
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  border-radius: 8px;
+  color: var(--pa-muted);
+  background: var(--pa-code);
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  font-size: 10px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+.pa-prompt-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.pa-prompt-location {
+  font-size: 10px;
+  font-family: 'SFMono-Regular', Consolas, monospace;
+}
+.pa-prompt-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pa-prompt-edit-hint {
+  font-size: 10px;
+}
+.pa-prompt-variables {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+.pa-prompt-variables-label {
+  color: var(--pa-muted);
+  font-size: 10px;
+}
+.pa-prompt-variable.ant-tag {
+  margin-inline-end: 0;
+  cursor: pointer;
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  transition:
+    opacity 0.15s ease,
+    transform 0.15s ease;
+}
+.pa-prompt-variable.ant-tag:hover {
+  opacity: 0.8;
+  transform: scale(1.05);
+}
+.pa-prompt-edit-textarea {
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.6;
 }
 
 .pa-stats-modal .pa-stats-payload {

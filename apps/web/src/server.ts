@@ -10,6 +10,7 @@ import { generateId, VERSION } from '@personal-agent/shared';
 import {
   loadConfig,
   saveAgentSettings,
+  savePromptSettings,
   saveStatsSettings,
   saveToolsSettings,
 } from '@personal-agent/config';
@@ -27,6 +28,7 @@ import {
   type ServerMessage,
   type TaskSummary,
 } from './protocol';
+import { BUILTIN_PROMPTS, PROMPT_KEYS } from './prompts';
 
 const UNTITLED_TASK_TITLE = '新任务';
 const sourceDirectory = dirname(fileURLToPath(import.meta.url));
@@ -124,6 +126,43 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
       version: VERSION,
       runtime: info,
     });
+  });
+
+  app.get('/api/prompts', (req, res) => {
+    if (!isAuthorized(req.headers.authorization, req.query.token, authToken)) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    res.json({ prompts: buildPromptInventory(runtime.promptOverrides) });
+  });
+
+  app.put('/api/prompts', async (req, res) => {
+    if (!isAuthorized(req.headers.authorization, req.query.token, authToken)) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    try {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const key = typeof body.key === 'string' ? body.key : '';
+      if (!PROMPT_KEYS.includes(key as (typeof PROMPT_KEYS)[number])) {
+        res.status(400).json({ error: `未知的提示词 key: ${key}` });
+        return;
+      }
+      const reset = body.reset === true;
+      const content = body.content;
+      if (!reset && typeof content !== 'string') {
+        res.status(400).json({ error: 'content 必须为字符串，或使用 reset: true 恢复默认' });
+        return;
+      }
+      const update: Record<string, string | null> = reset
+        ? { [key]: null }
+        : { [key]: content as string };
+      await savePromptSettings(update, configPath);
+      runtime.updatePromptOverrides(update);
+      res.json({ prompts: buildPromptInventory(runtime.promptOverrides) });
+    } catch (error) {
+      res.status(400).json({ error: formatError(error) });
+    }
   });
 
   app.get('/api/runtime', (req, res) => {
@@ -1196,6 +1235,21 @@ function isAuthorized(
   if (!configuredToken) return true;
   const bearer = authorization?.startsWith('Bearer ') ? authorization.slice(7) : undefined;
   return bearer === configuredToken || queryToken === configuredToken;
+}
+
+/** 合并用户覆盖，生成前端可展示的提示词清单（含生效内容与自定义标记） */
+function buildPromptInventory(
+  promptOverrides: Record<string, string>,
+): Array<Record<string, unknown>> {
+  return BUILTIN_PROMPTS.map((prompt) => {
+    const customized = promptOverrides[prompt.key] !== undefined;
+    return {
+      ...prompt,
+      content: customized ? promptOverrides[prompt.key] : prompt.content,
+      defaultContent: prompt.content,
+      customized,
+    };
+  });
 }
 
 function isLoopback(host: string): boolean {

@@ -9,7 +9,18 @@ import { createWebServer } from '@personal-agent/web';
 
 const APP_USER_MODEL_ID = 'com.squirrel.PersonalAgent.PersonalAgent';
 const SELECT_DIRECTORY_CHANNEL = 'desktop:select-directory';
+const TOGGLE_DEVTOOLS_CHANNEL = 'desktop:toggle-devtools';
 const mainDirectory = dirname(fileURLToPath(import.meta.url));
+
+// Preload 脚本缺失会导致 window.personalAgentDesktop 不可用
+//（桌面端原生目录选择器失效，前端静默回退到 Web 目录树）。
+// 启动时显式检查并打印，便于排查。
+const preloadPath = join(mainDirectory, 'preload.cjs');
+if (!existsSync(preloadPath)) {
+  console.error(`[desktop] preload script not found: ${preloadPath}`);
+} else {
+  console.log(`[desktop] preload ready: ${preloadPath}`);
+}
 
 let mainWindow: BrowserWindow | null = null;
 let closeWebServer: (() => Promise<void>) | undefined;
@@ -38,8 +49,11 @@ function startDesktopApplication(): void {
   });
 
   ipcMain.handle(SELECT_DIRECTORY_CHANNEL, async (event, suggestedPath?: unknown) => {
-    if (!mainWindow || event.sender !== mainWindow.webContents) {
-      throw new Error('目录选择请求来源无效');
+    if (!mainWindow) return null;
+    // 来源校验仅警告不阻断：sender 不匹配时仍尝试用主窗口弹窗，
+    // 避免严格校验导致目录选择静默失败
+    if (event.sender !== mainWindow.webContents) {
+      console.warn('[desktop] select-directory: unexpected sender, falling back to main window');
     }
 
     const result = await dialog.showOpenDialog(mainWindow, {
@@ -47,7 +61,21 @@ function startDesktopApplication(): void {
       defaultPath: resolveDirectoryPickerDefaultPath(suggestedPath),
       properties: ['openDirectory', 'dontAddToRecent'],
     });
+    console.log(
+      '[desktop] select-directory:',
+      result.canceled ? 'cancelled' : `picked ${JSON.stringify(result.filePaths)}`,
+    );
     return result.canceled ? null : (result.filePaths[0] ?? null);
+  });
+
+  ipcMain.handle(TOGGLE_DEVTOOLS_CHANNEL, (event) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents) return;
+    const webContents = mainWindow.webContents;
+    if (webContents.isDevToolsOpened()) {
+      webContents.closeDevTools();
+    } else {
+      webContents.openDevTools({ mode: 'detach' });
+    }
   });
 
   app.on('before-quit', (event) => {
@@ -133,6 +161,21 @@ async function createDesktopWindow(): Promise<void> {
     if (isApplicationUrl(url, applicationOrigin)) return;
     event.preventDefault();
     openExternalUrl(url);
+  });
+
+  // F12 / Ctrl+Shift+I：切换开发者工具（生产构建默认无菜单快捷键）
+  window.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown') return;
+    const isF12 = input.key === 'F12';
+    const isCtrlShiftI = input.control && input.shift && input.key.toLowerCase() === 'i';
+    if (!isF12 && !isCtrlShiftI) return;
+    event.preventDefault();
+    const webContents = window.webContents;
+    if (webContents.isDevToolsOpened()) {
+      webContents.closeDevTools();
+    } else {
+      webContents.openDevTools({ mode: 'detach' });
+    }
   });
 
   const pageUrl = new URL(applicationOrigin);

@@ -1,6 +1,7 @@
 import {
   appConfigSchema,
   loadConfig,
+  loadPromptSettings,
   removeProviderSettings,
   resolveWritableConfigPath,
   saveProviderSettings,
@@ -114,6 +115,8 @@ export class WebAgentRuntime {
   readonly workingDirectory: string;
   readonly projects: ProjectManager;
   readonly sessionsDirectory?: string;
+  /** 用户自定义提示词覆盖（key → 内容），所有会话共享同一引用，支持热更新 */
+  readonly promptOverrides: Record<string, string>;
 
   private readonly configPath?: string;
   private providerRegistry: ProviderRegistry | null = null;
@@ -136,12 +139,14 @@ export class WebAgentRuntime {
   private constructor(
     config: AppConfig,
     workingDirectory: string,
+    promptOverrides: Record<string, string>,
     projectStoragePath?: string,
     configPath?: string,
     sessionsDirectory?: string,
   ) {
     this.config = config;
     this.workingDirectory = workingDirectory;
+    this.promptOverrides = promptOverrides;
     this.configPath = configPath;
     this.sessionsDirectory = sessionsDirectory;
     this.projects = new ProjectManager(projectStoragePath);
@@ -197,12 +202,28 @@ export class WebAgentRuntime {
     const runtime = new WebAgentRuntime(
       config,
       workingDirectory,
+      loadPromptSettings(options.configPath),
       options.projectStoragePath,
       options.configPath,
       options.sessionsDirectory,
     );
     await runtime.initialize();
     return runtime;
+  }
+
+  /**
+   * 原地更新提示词覆盖（不替换引用，已存在会话的 ContextAssembler 共享
+   * 同一对象，保存后下一条消息组装系统提示词即读到最新值）。
+   * value 为 null 表示删除该 key（恢复默认）。
+   */
+  updatePromptOverrides(update: Record<string, string | null>): void {
+    for (const [key, value] of Object.entries(update)) {
+      if (value === null) {
+        delete this.promptOverrides[key];
+      } else {
+        this.promptOverrides[key] = value;
+      }
+    }
   }
 
   private async initialize(): Promise<void> {
@@ -869,7 +890,8 @@ export class WebAgentRuntime {
           conversation.context.addSection({
             name: 'automatic-memory-context',
             priority: 6,
-            content: `## Remembered Context\n\n${memory}`,
+            content: (this.promptOverrides?.['memory-inject-web'] ??
+              '## Remembered Context\n\n${memory}').replace('${memory}', () => memory),
           });
         }
       } catch (error) {
@@ -882,7 +904,14 @@ export class WebAgentRuntime {
       conversation.context.addSection({
         name: 'active-plugin-skills',
         priority: 7,
-        content: skills.map((skill) => `## Skill: ${skill.name}\n\n${skill.content}`).join('\n\n'),
+        content: skills
+          .map(
+            (skill) =>
+              (this.promptOverrides?.['skills-inject-web'] ?? '## Skill: ${name}\n\n${content}')
+                .replaceAll('${name}', () => skill.name)
+                .replaceAll('${content}', () => skill.content),
+          )
+          .join('\n\n'),
       });
     }
   }
@@ -1422,7 +1451,9 @@ export class WebConversation {
       this.context.addSection({
         name: 'web-plan-mode',
         priority: 2,
-        content: `## Plan Mode (READ-ONLY)
+        content:
+          this.runtime.promptOverrides?.['plan-mode-web'] ??
+          `## Plan Mode (READ-ONLY)
 
 Inspect the project with read-only tools, create a detailed plan, and call submit_plan.
 Do not execute changes until the user approves the plan in the Web UI.`,
@@ -1433,11 +1464,16 @@ Do not execute changes until the user approves the plan in the Web UI.`,
         this.context.addSection({
           name: 'plan-execution',
           priority: 5,
-          content: `## Approved Plan
+          content:
+            (this.runtime.promptOverrides?.['plan-execution-web'] ??
+              `## Approved Plan
 
-${formatPlan(approved)}
+${'${plan}'}
 
-Execute in dependency order and use update_plan_step to report progress.`,
+Execute in dependency order and use update_plan_step to report progress.`).replace(
+              '${plan}',
+              () => formatPlan(approved),
+            ),
         });
       }
     }
@@ -1515,14 +1551,17 @@ Execute in dependency order and use update_plan_step to report progress.`,
   }
 
   private createAgentState(history: ReturnType<ContextAssembler['getHistory']> = []): void {
-    this.context = new ContextAssembler({
-      workingDirectory: this.workingDirectory,
-      platform: `${process.platform} ${process.arch}`,
-      shell: describeShell(process.platform, this.runtime.config.tools.shell),
-      model: this.provider.getModel(),
-      provider: this.provider.providerId,
-      mode: 'chat',
-    });
+    this.context = new ContextAssembler(
+      {
+        workingDirectory: this.workingDirectory,
+        platform: `${process.platform} ${process.arch}`,
+        shell: describeShell(process.platform, this.runtime.config.tools.shell),
+        model: this.provider.getModel(),
+        provider: this.provider.providerId,
+        mode: 'chat',
+      },
+      this.runtime.promptOverrides,
+    );
     this.planEngine = new PlanModeEngine();
     this.statsRecorder = this.runtime.statsStore
       ? new ModelRequestRecorder(this.runtime.statsStore, () => this.sessionId)
@@ -1532,7 +1571,7 @@ Execute in dependency order and use update_plan_step to report progress.`,
     this.tokenBudget = new TokenBudget(
       this.getTotalContextWindow(),
       TOKEN_BUDGET_RESERVED_OUTPUT,
-      createLlmContextSummarizer(this.provider),
+      createLlmContextSummarizer(this.provider, this.runtime.promptOverrides),
     );
     this.agentLoop = new AgentLoop({
       provider: this.provider,

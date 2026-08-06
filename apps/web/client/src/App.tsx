@@ -36,6 +36,7 @@ import {
   theme as antdTheme,
 } from 'antd';
 import zhCN from 'antd/es/locale/zh_CN';
+import type { TextAreaRef } from 'antd/es/input/TextArea';
 import {
   AppstoreOutlined,
   BarChartOutlined,
@@ -50,6 +51,8 @@ import {
   DashboardOutlined,
   DeleteOutlined,
   EditOutlined,
+  ExperimentOutlined,
+  FileTextOutlined,
   FolderAddOutlined,
   FolderOpenOutlined,
   InfoCircleOutlined,
@@ -294,6 +297,30 @@ const starterPrompts = [
   },
 ];
 
+type StarterPrompt = (typeof starterPrompts)[number];
+
+/**
+ * 解析 starter-prompts 自定义内容（格式与内置一致：
+ * 每条为「N. 标题（描述）：」+ 下一行缩进的提示词）。
+ */
+function parseStarterPrompts(content: string): StarterPrompt[] {
+  const result: StarterPrompt[] = [];
+  let current: StarterPrompt | null = null;
+  for (const raw of content.split('\n')) {
+    const line = raw.trim();
+    if (!line) continue;
+    const match = line.match(/^\d+\.\s*(.+?)(?:[（(]([^）)]+)[）)])?\s*[：:]\s*$/);
+    if (match) {
+      if (current && current.title && current.prompt) result.push(current);
+      current = { title: match[1].trim(), description: (match[2] ?? '').trim(), prompt: '' };
+      continue;
+    }
+    if (current) current.prompt = (current.prompt ? current.prompt + '\n' : '') + line;
+  }
+  if (current && current.title && current.prompt) result.push(current);
+  return result.length > 0 ? result : starterPrompts;
+}
+
 const permissionOptions = [
   {
     value: 'allow',
@@ -483,12 +510,33 @@ function AgentWorkspace({
   const [activeTurnId, setActiveTurnId] = useState<string>();
   const [turnNavLeft, setTurnNavLeft] = useState(30);
   const [prompt, setPrompt] = useState('');
+  const [starterItems, setStarterItems] = useState<StarterPrompt[]>(starterPrompts);
+
+  /** 从服务端拉取 starter-prompts 自定义内容并更新首页示例（保存后也会被调用） */
+  const reloadStarterPrompts = useCallback(async () => {
+    try {
+      const response = await apiFetch('/api/prompts');
+      if (!response.ok) return;
+      const payload = (await response.json()) as { prompts: BuiltinPromptItem[] };
+      const starter = payload.prompts.find((item) => item.key === 'starter-prompts');
+      setStarterItems(
+        starter?.customized ? parseStarterPrompts(starter.content) : starterPrompts,
+      );
+    } catch {
+      // 拉取失败时保持内置示例
+    }
+  }, []);
+
+  useEffect(() => {
+    void reloadStarterPrompts();
+  }, [reloadStarterPrompts]);
   const [draftTaskProjectId, setDraftTaskProjectId] = useState<string>();
   const pendingTaskDraftRef = useRef<{
     projectId: string;
     prompt?: string;
     permissionMode?: PermissionMode;
     taskModel?: { provider: string; model: string };
+    planMode?: boolean;
   }>();
   const [projectModalOpen, setProjectModalOpen] = useState(false);
   const [directoryPickerOpen, setDirectoryPickerOpen] = useState(false);
@@ -496,7 +544,7 @@ function AgentWorkspace({
   const [directoryTreeData, setDirectoryTreeData] = useState<DirectoryTreeNode[]>([]);
   const [selectedDirectory, setSelectedDirectory] = useState<string>();
   const [providerModalOpen, setProviderModalOpen] = useState(false);
-  const [settingsTab, setSettingsTab] = useState<'providers' | 'general'>('providers');
+  const [settingsTab, setSettingsTab] = useState<'providers' | 'general' | 'prompts'>('general');
   const [providerView, setProviderView] = useState<'list' | 'form'>('list');
   const [providerLoading, setProviderLoading] = useState(false);
   const [providerSaving, setProviderSaving] = useState(false);
@@ -900,10 +948,11 @@ function AgentWorkspace({
           ) {
             const initialPrompt = pendingTaskDraftRef.current.prompt;
             const draftTaskModel = pendingTaskDraftRef.current.taskModel;
+            const draftPlanMode = pendingTaskDraftRef.current.planMode;
             pendingTaskDraftRef.current = undefined;
             setDraftTaskProjectId(undefined);
             followOutputRef.current = true;
-            // 草稿中选过任务模型：先应用模型（任务空闲），再发 prompt。
+            // 草稿中的任务模型/计划模式：先应用（任务空闲），再发 prompt。
             if (draftTaskModel) {
               send({
                 type: 'set_task_model',
@@ -911,6 +960,9 @@ function AgentWorkspace({
                 providerId: draftTaskModel.provider,
                 model: draftTaskModel.model,
               });
+            }
+            if (draftPlanMode) {
+              send({ type: 'set_plan_mode', enabled: true, taskId: incoming.task.id });
             }
             appendMessage('user', initialPrompt);
             if (send({ type: 'prompt', text: initialPrompt, taskId: incoming.task.id }))
@@ -1669,8 +1721,12 @@ function AgentWorkspace({
     setRenamingProjectId(undefined);
   }
 
-  async function openProviderSettings() {
+  async function openProviderSettings(tab: 'providers' | 'general' = 'general') {
+    // 防御：React onClick 可能把 MouseEvent 误传为 tab，非法值回退到通用
+    const targetTab: 'providers' | 'general' =
+      tab === 'providers' ? 'providers' : 'general';
     setProviderModalOpen(true);
+    setSettingsTab(targetTab);
     setProviderLoading(true);
     try {
       const response = await apiFetch('/api/provider-settings');
@@ -1851,18 +1907,34 @@ function AgentWorkspace({
 
   async function openDirectoryPicker() {
     const initialDirectory = projectForm.getFieldValue('rootPath')?.trim() || undefined;
-    if (window.personalAgentDesktop) {
+    const desktopApi = window.personalAgentDesktop;
+    if (desktopApi && typeof desktopApi.selectDirectory === 'function') {
       try {
-        const directory = await window.personalAgentDesktop.selectDirectory(initialDirectory);
-        if (!directory) return;
-        projectForm.setFieldValue('rootPath', directory);
-        await projectForm.validateFields(['rootPath']);
+        const directory = await desktopApi.selectDirectory(initialDirectory);
+        // 诊断日志：确认桌面端选择器实际返回的内容
+        console.log('[directory-picker] desktop returned:', typeof directory, directory);
+        if (typeof directory === 'string' && directory.trim()) {
+          projectForm.setFieldValue('rootPath', directory);
+          await projectForm.validateFields(['rootPath']);
+          return;
+        }
+        // 未返回有效路径（取消/异常）：提示并回退到 Web 目录树，避免静默失败
+        messageApi.info(`未获得有效目录（返回类型 ${typeof directory}），已打开目录树选择器`);
       } catch (error) {
-        messageApi.error(formatError(error));
+        messageApi.error(`目录选择失败：${formatError(error)}，已改用目录树选择`);
+      }
+      setDirectoryPickerOpen(true);
+      setSelectedDirectory(initialDirectory);
+      if (directoryTreeData.length === 0) {
+        await loadDirectoryChildren();
       }
       return;
     }
 
+    if (desktopApi === undefined) {
+      // 诊断日志：确认桌面 preload 是否注入
+      console.log('[directory-picker] personalAgentDesktop unavailable, using tree picker');
+    }
     setDirectoryPickerOpen(true);
     setSelectedDirectory(initialDirectory);
     if (directoryTreeData.length === 0) {
@@ -2034,6 +2106,15 @@ function AgentWorkspace({
                 <span className="pa-button-label">{colorMode === 'light' ? '浅色' : '深色'}</span>
               </Button>
             </Tooltip>
+            {window.personalAgentDesktop && (
+              <Tooltip title="打开开发者工具（F12 亦可）">
+                <Button
+                  icon={<ExperimentOutlined />}
+                  onClick={() => void window.personalAgentDesktop?.toggleDevTools()}
+                  aria-label="打开开发者工具"
+                />
+              </Tooltip>
+            )}
             <Tooltip title="模型调用调试">
               <Badge count={modelCalls.length} size="small" overflowCount={99}>
                 <Button
@@ -2071,7 +2152,7 @@ function AgentWorkspace({
                 state.runtime.initializationError || '选择 Provider、模型并保存后即可开始对话。'
               }
               action={
-                <Button size="small" onClick={openProviderSettings}>
+                <Button size="small" onClick={() => openProviderSettings('providers')}>
                   立即配置
                 </Button>
               }
@@ -2102,7 +2183,7 @@ function AgentWorkspace({
           >
             <div className="pa-transcript-inner">
               {timeline.length === 0 ? (
-                <Welcome onSelectPrompt={submitPrompt} />
+                <Welcome onSelectPrompt={submitPrompt} prompts={starterItems} />
               ) : (
                 timeline.map((item) => (
                   <TimelineEntry
@@ -2152,9 +2233,18 @@ function AgentWorkspace({
             onStop={() => send({ type: 'interrupt', taskId: stateRef.current.activeTaskId })}
             onAnswerPermission={answerPermission}
             onRememberPermissionChange={setRememberPermission}
-            onPlanModeChange={(enabled) =>
-              send({ type: 'set_plan_mode', enabled, taskId: stateRef.current.activeTaskId })
-            }
+            onPlanModeChange={(enabled) => {
+              const draft = pendingTaskDraftRef.current;
+              if (draft) {
+                // 新建任务草稿：任务还不存在，不能发 set_plan_mode
+                // （否则会误改当前激活任务）。本地切换 UI 并把选择记进
+                // 草稿，任务创建后随 prompt 一起应用。
+                pendingTaskDraftRef.current = { ...draft, planMode: enabled };
+                patchState({ planActive: enabled });
+                return;
+              }
+              send({ type: 'set_plan_mode', enabled, taskId: stateRef.current.activeTaskId });
+            }}
             onCompressContext={confirmCompressContext}
             onPermissionModeChange={(mode) => {
               const draft = pendingTaskDraftRef.current;
@@ -2257,29 +2347,24 @@ function AgentWorkspace({
           >
             <Input autoFocus placeholder="例如：personal-agent" />
           </Form.Item>
-          <Form.Item
-            name="rootPath"
-            label="本地根目录"
-            rules={[{ required: true, whitespace: true, message: '请输入本地根目录' }]}
-          >
-            <Space.Compact style={{ width: '100%' }}>
-              <Input
-                placeholder="请选择本地根目录"
-                onClick={() => {
-                  void openDirectoryPicker();
-                }}
-              />
-              <Button
-                type="primary"
-                icon={<FolderOpenOutlined />}
-                onClick={() => {
-                  void openDirectoryPicker();
-                }}
-              >
-                选择
-              </Button>
-            </Space.Compact>
-          </Form.Item>
+          <div className="pa-root-path-row">
+            <Form.Item
+              name="rootPath"
+              label="本地根目录"
+              rules={[{ required: true, whitespace: true, message: '请输入本地根目录' }]}
+            >
+              <Input placeholder="请选择本地根目录" />
+            </Form.Item>
+            <Button
+              type="primary"
+              icon={<FolderOpenOutlined />}
+              onClick={() => {
+                void openDirectoryPicker();
+              }}
+            >
+              选择
+            </Button>
+          </div>
           <div className="pa-modal-actions">
             <Button onClick={() => setProjectModalOpen(false)}>取消</Button>
             <Button type="primary" htmlType="submit" loading={state.creatingProject}>
@@ -2327,6 +2412,15 @@ function AgentWorkspace({
                   node.children ? Promise.resolve() : loadDirectoryChildren(String(node.key))
                 }
                 onSelect={(_, info) => selectDirectory(String(info.node.key))}
+                onDoubleClick={(_, node) => {
+                  selectDirectory(String(node.key));
+                  applyDirectorySelection();
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' && selectedDirectory) {
+                    applyDirectorySelection();
+                  }
+                }}
               />
             ) : (
               <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有可浏览的目录" />
@@ -2348,13 +2442,18 @@ function AgentWorkspace({
           <nav className="pa-settings-nav" aria-label="设置菜单">
             <Menu
               mode="inline"
-              onClick={({ key }) => setSettingsTab(key as 'providers' | 'general')}
+              onClick={({ key }) => setSettingsTab(key as 'providers' | 'general' | 'prompts')}
               selectedKeys={[settingsTab]}
               items={[
                 {
                   key: 'general',
                   icon: <SettingOutlined />,
                   label: '通用',
+                },
+                {
+                  key: 'prompts',
+                  icon: <FileTextOutlined />,
+                  label: '系统内置提示词',
                 },
                 {
                   key: 'providers',
@@ -2376,9 +2475,14 @@ function AgentWorkspace({
                 />
               </section>
             )}
+            {settingsTab === 'prompts' && (
+              <section className="pa-settings-content">
+                <PromptsPanel onStarterPromptsChange={() => void reloadStarterPrompts()} />
+              </section>
+            )}
             <section
               className="pa-settings-content"
-              style={settingsTab === 'general' ? { display: 'none' } : undefined}
+              style={settingsTab !== 'providers' ? { display: 'none' } : undefined}
             >
               <div className="pa-settings-heading">
                 <div>
@@ -2721,7 +2825,7 @@ function SidebarContent({
         </div>
         <div>
           <strong>personal-agent</strong>
-          <small>LOCAL WORKSPACE</small>
+          <small>你真正的一览无余的私人助理</small>
         </div>
       </div>
 
@@ -2927,7 +3031,7 @@ function SidebarContent({
             type="text"
             icon={<SettingOutlined />}
             aria-label="打开设置"
-            onClick={onOpenSettings}
+            onClick={() => onOpenSettings()}
           >
             设置
           </Button>
@@ -3034,7 +3138,13 @@ function TaskMenuItem({
   );
 }
 
-function Welcome({ onSelectPrompt }: { onSelectPrompt: (prompt: string) => void }) {
+function Welcome({
+  onSelectPrompt,
+  prompts,
+}: {
+  onSelectPrompt: (prompt: string) => void;
+  prompts: StarterPrompt[];
+}) {
   return (
     <section className="pa-welcome">
       <div className="pa-welcome-symbol" aria-hidden="true">
@@ -3048,7 +3158,7 @@ function Welcome({ onSelectPrompt }: { onSelectPrompt: (prompt: string) => void 
         直接描述目标。Agent 可以理解项目、编辑文件、运行命令，并在敏感操作前请求你的批准。
       </Text>
       <div className="pa-starter-grid">
-        {starterPrompts.map((starter) => (
+        {prompts.map((starter) => (
           <Card
             key={starter.title}
             hoverable
@@ -4271,7 +4381,7 @@ function GeneralSettingsPanel({
             label={
               <Space size={4}>
                 统计模型请求入参/出参
-                <Tooltip title="开启后，新产生的模型请求会保存完整入参（messages/tools/options）；关闭时仅保存统计元数据（token、模型、状态、耗时等）。数据存储在本地 SQLite（~/.personal-agent/stats/model-requests.db），配置在下次启动时生效。">
+                <Tooltip title="开启后，新产生的模型请求会保存完整入参。">
                   <QuestionCircleOutlined className="pa-settings-help" />
                 </Tooltip>
               </Space>
@@ -4310,7 +4420,7 @@ function GeneralSettingsPanel({
             label={
               <Space size={4}>
                 bash 工具 Shell
-                <Tooltip title="选择 bash 工具在 Windows 上使用的命令环境：自动（默认 PowerShell）→ PowerShell；bash → Git Bash 或 WSL（WSL 下工作目录自动转换为 /mnt/ 路径）。修改后对新执行的命令立即生效。">
+                <Tooltip title="选择bash工具在系统上使用的命令环境">
                   <QuestionCircleOutlined className="pa-settings-help" />
                 </Tooltip>
               </Space>
@@ -4334,6 +4444,253 @@ function GeneralSettingsPanel({
           </Form.Item>
         </Form>
       </Card>
+    </div>
+  );
+}
+
+interface BuiltinPromptItem {
+  key: string;
+  category: string;
+  name: string;
+  description: string;
+  content: string;
+  dynamic?: boolean;
+  variables?: Array<{ name: string; description: string }>;
+  location: string;
+  defaultContent: string;
+  customized: boolean;
+}
+
+function PromptsPanel({ onStarterPromptsChange }: { onStarterPromptsChange: () => void }) {
+  const { message: messageApi, modal } = AntApp.useApp();
+  const [prompts, setPrompts] = useState<BuiltinPromptItem[] | null>(null);
+  const [editing, setEditing] = useState<BuiltinPromptItem | null>(null);
+  const [editText, setEditText] = useState('');
+  const [saving, setSaving] = useState(false);
+  const editTextAreaRef = useRef<TextAreaRef | null>(null);
+
+  const loadPrompts = useCallback(async () => {
+    try {
+      const response = await apiFetch('/api/prompts');
+      if (!response.ok) throw new Error(`读取提示词清单失败 (${response.status})`);
+      const payload = (await response.json()) as { prompts: BuiltinPromptItem[] };
+      setPrompts(payload.prompts);
+    } catch (err) {
+      messageApi.error(err instanceof Error ? err.message : String(err));
+    }
+  }, [messageApi]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadPrompts();
+    return () => {
+      cancelled = true;
+    };
+  }, [loadPrompts]);
+
+  const savePrompt = async (key: string, content: string | null): Promise<void> => {
+    setSaving(true);
+    try {
+      const response = await apiFetch('/api/prompts', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(content === null ? { key, reset: true } : { key, content }),
+      });
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(payload.error ?? `保存失败 (${response.status})`);
+      }
+      const payload = (await response.json()) as { prompts: BuiltinPromptItem[] };
+      setPrompts(payload.prompts);
+      messageApi.success(content === null ? '已恢复默认提示词' : '提示词已保存，下一条消息生效');
+      if (key === 'starter-prompts') onStarterPromptsChange();
+    } catch (err) {
+      messageApi.error(`保存失败: ${err instanceof Error ? err.message : String(err)}`);
+      throw err;
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const openEditor = (prompt: BuiltinPromptItem): void => {
+    setEditing(prompt);
+    setEditText(prompt.content);
+  };
+
+  const confirmSave = async (): Promise<void> => {
+    if (!editing) return;
+    try {
+      await savePrompt(editing.key, editText);
+      setEditing(null);
+    } catch {
+      // 错误提示已在 savePrompt 中处理
+    }
+  };
+
+  const confirmReset = (prompt: BuiltinPromptItem): void => {
+    modal.confirm({
+      title: '恢复默认提示词',
+      content: `确定将「${prompt.name}」恢复为内置默认内容吗？`,
+      okText: '恢复默认',
+      cancelText: '取消',
+      onOk: () => void savePrompt(prompt.key, null),
+    });
+  };
+  
+  /** 在编辑框光标位置插入变量占位符 */
+  const insertVariable = (variable: string): void => {
+    const textarea = editTextAreaRef.current?.nativeElement as HTMLTextAreaElement | null;
+    if (!textarea) return;
+    const start = textarea.selectionStart ?? editText.length;
+    const end = textarea.selectionEnd ?? start;
+    const next = editText.slice(0, start) + variable + editText.slice(end);
+    setEditText(next);
+    requestAnimationFrame(() => {
+      textarea.focus();
+      const position = start + variable.length;
+      textarea.setSelectionRange(position, position);
+    });
+  };
+
+  const groups = useMemo(() => {
+    const map = new Map<string, BuiltinPromptItem[]>();
+    for (const prompt of prompts ?? []) {
+      const list = map.get(prompt.category) ?? [];
+      list.push(prompt);
+      map.set(prompt.category, list);
+    }
+    return [...map.entries()];
+  }, [prompts]);
+
+  return (
+    <div className="pa-settings-prompts">
+      <div className="pa-settings-heading">
+        <div>
+          <Title level={4}>系统内置提示词</Title>
+          <Text type="secondary">查看系统内置提示词及其作用，可编辑自定义（Web 下一条消息生效，CLI 重启生效）。</Text>
+        </div>
+      </div>
+      {prompts === null ? (
+        <Spin />
+      ) : (
+        groups.map(([category, items]) => (
+          <Card key={category} size="small" title={category} className="pa-prompts-group">
+            {items.map((prompt) => (
+              <PromptCard
+                key={`${category}-${prompt.name}`}
+                prompt={prompt}
+                onEdit={() => openEditor(prompt)}
+                onReset={() => confirmReset(prompt)}
+              />
+            ))}
+          </Card>
+        ))
+      )}
+      <Modal
+        title={editing ? `编辑提示词 · ${editing.name}` : '编辑提示词'}
+        open={Boolean(editing)}
+        onCancel={() => setEditing(null)}
+        onOk={() => void confirmSave()}
+        okText="保存"
+        cancelText="取消"
+        confirmLoading={saving}
+        width={720}
+        destroyOnHidden
+      >
+        <div className="pa-prompt-edit">
+          <Text type="secondary" className="pa-prompt-edit-hint">
+            {editing?.dynamic
+              ? '动态模板：正文中的 ${...} 占位符会在运行时替换为实际数据，编辑时请保留。'
+              : '编辑后将覆盖内置默认内容；Web 下一条消息生效，CLI 重启生效。'}
+          </Text>
+          {editing?.variables && editing.variables.length > 0 && (
+            <div className="pa-prompt-variables">
+              <span className="pa-prompt-variables-label">可用变量（点击插入光标处）：</span>
+              {editing.variables.map((variable) => (
+                <Tooltip key={variable.name} title={variable.description}>
+                  <Tag
+                    color="blue"
+                    className="pa-prompt-variable"
+                    onClick={() => insertVariable(variable.name)}
+                  >
+                    {variable.name}
+                  </Tag>
+                </Tooltip>
+              ))}
+            </div>
+          )}
+          <TextArea
+            ref={editTextAreaRef}
+            value={editText}
+            onChange={(event) => setEditText(event.target.value)}
+            autoSize={{ minRows: 8, maxRows: 22 }}
+            className="pa-prompt-edit-textarea"
+          />
+        </div>
+      </Modal>
+    </div>
+  );
+}
+
+function PromptCard({
+  prompt,
+  onEdit,
+  onReset,
+}: {
+  prompt: BuiltinPromptItem;
+  onEdit: () => void;
+  onReset: () => void;
+}) {
+  const { message: messageApi } = AntApp.useApp();
+  const copyPrompt = (): void => {
+    void copyTextToClipboard(prompt.content)
+      .then(() => messageApi.success('提示词内容已复制'))
+      .catch(() => messageApi.error('复制失败，请手动选择文本'));
+  };
+  return (
+    <div className="pa-prompt-item">
+      <Collapse
+        size="small"
+        defaultActiveKey={[prompt.name]}
+        items={[
+          {
+            key: prompt.name,
+            label: (
+              <div className="pa-prompt-label">
+                <strong>{prompt.name}</strong>
+                {prompt.dynamic && <Tag color="blue">动态模板</Tag>}
+                {prompt.customized && <Tag color="green">已自定义</Tag>}
+              </div>
+            ),
+            children: (
+              <div className="pa-prompt-body">
+                <Text type="secondary" className="pa-prompt-description">
+                  {prompt.description}
+                </Text>
+                <pre className="pa-prompt-content">{prompt.content}</pre>
+                <div className="pa-prompt-footer">
+                  <Text type="secondary" className="pa-prompt-location">
+                    来源：{prompt.location}
+                  </Text>
+                  <Space size={8}>
+                    {prompt.customized && (
+                      <Button size="small" icon={<ReloadOutlined />} onClick={onReset}>
+                        恢复默认
+                      </Button>
+                    )}
+                    <Button size="small" icon={<EditOutlined />} onClick={onEdit}>
+                      编辑
+                    </Button>
+                    <Button size="small" icon={<CopyOutlined />} onClick={copyPrompt}>
+                      复制
+                    </Button>
+                  </Space>
+                </div>
+              </div>
+            ),
+          },
+        ]}
+      />
     </div>
   );
 }

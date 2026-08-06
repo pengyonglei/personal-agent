@@ -12,6 +12,12 @@ export {
 export { saveStatsSettings, type StatsSettingsUpdate } from './stats-settings';
 export { saveAgentSettings, type AgentSettingsUpdate } from './agent-settings';
 export {
+  loadPromptSettings,
+  resolvePromptConfigPath,
+  savePromptSettings,
+  PROMPT_SETTINGS_FILE,
+} from './prompt-settings';
+export {
   saveToolsSettings,
   type ToolsSettingsUpdate,
   type ToolsShellPreference,

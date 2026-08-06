@@ -15,7 +15,11 @@ const log = createLogger('context');
 
 export interface SystemPromptSection {
   name: string;
-  content: string;
+  /**
+   * 内容或内容求值函数。函数形式会在每次 assemble() 时求值，
+   * 用于支持用户自定义提示词覆盖（prompts 参数）的即时生效。
+   */
+  content: string | ((ctx: AssemblerContext) => string);
   priority: number;
   conditional?: (ctx: AssemblerContext) => boolean;
 }
@@ -34,13 +38,45 @@ export interface AssemblerContext {
 // Context assembler
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Default system prompt sections (supporting per-key user overrides)
+// ---------------------------------------------------------------------------
+
+const DEFAULT_IDENTITY = `You are personal-agent, a powerful AI agent CLI tool. You help users with software engineering tasks by providing direct assistance, executing tools, and reasoning through complex problems.
+
+You are operating in a terminal environment with access to the user's filesystem.
+Use as few requests as possible for each task execution.
+`;
+
+const DEFAULT_SAFETY = `IMPORTANT: Assist with authorized tasks only. Refuse destructive or malicious requests. When editing files, always show the user what you changed. Double check your work before declaring something done.`;
+
+const DEFAULT_ENVIRONMENT = `Current environment:
+- Working directory: ${'${workingDirectory}'}
+- Platform: ${'${platform}'}
+- Shell: ${'${shell ?? "bash (Unix)"}'}
+- Model: ${'${model}'} (${'${provider}'})
+- Date: ${'${date}'}
+
+Shell usage notes:
+- When the Shell is PowerShell (Windows), write commands in PowerShell syntax (e.g. $env:VAR, Get-ChildItem, dir works too; PowerShell 7 supports && and ||). Git and npm commands work the same as in other shells.
+- When the Shell is bash (Git Bash), use bash syntax with Windows-style paths (C:\...).
+- When the Shell is bash (WSL), use bash syntax with Linux paths — Windows paths are exposed as /mnt/<drive>/... (e.g. D:\work maps to /mnt/d/work).`;
+
+const DEFAULT_MODE = `Plan mode is active. Inspect with the exposed read-only tools, produce a detailed structured plan, and submit it with submit_plan. Do not make edits, run side-effecting tools, or execute the plan until the user approves it with /exit-plan.`;
+
+const DEFAULT_TOOLS_INTRO = `You have access to the following tools. Use them by responding with a tool_use content block. Use read_memory to query past facts, and write_memory to persist important information.`;
+
 export class ContextAssembler {
   private sections: SystemPromptSection[] = [];
   private conversationHistory: UnifiedMessage[] = [];
   private injectedMemories: string[] = [];
   private extraInstructions: string[] = [];
 
-  constructor(private ctx: AssemblerContext) {
+  constructor(
+    private ctx: AssemblerContext,
+    /** 用户自定义提示词覆盖（key → 内容），未覆盖的 key 使用内置默认 */
+    private prompts?: Record<string, string>,
+  ) {
     this.registerDefaultSections();
   }
 
@@ -53,35 +89,24 @@ export class ContextAssembler {
     this.addSection({
       name: 'identity',
       priority: 1,
-      content: `You are personal-agent, a powerful AI agent CLI tool. You help users with software engineering tasks by providing direct assistance, executing tools, and reasoning through complex problems.
-
-You are operating in a terminal environment with access to the user's filesystem.
-Use as few requests as possible for each task execution.
-`,
+      content: () => this.prompts?.identity ?? DEFAULT_IDENTITY,
     });
 
     // Safety
     this.addSection({
       name: 'safety',
       priority: 2,
-      content: `IMPORTANT: Assist with authorized tasks only. Refuse destructive or malicious requests. When editing files, always show the user what you changed. Double check your work before declaring something done.`,
+      content: () => this.prompts?.safety ?? DEFAULT_SAFETY,
     });
 
     // Environment
     this.addSection({
       name: 'environment',
       priority: 3,
-      content: `Current environment:
-- Working directory: ${this.ctx.workingDirectory}
-- Platform: ${this.ctx.platform}
-- Shell: ${this.ctx.shell ?? 'bash (Unix)'}
-- Model: ${this.ctx.model} (${this.ctx.provider})
-- Date: ${new Date().toISOString().split('T')[0]}
-
-Shell usage notes:
-- When the Shell is PowerShell (Windows), write commands in PowerShell syntax (e.g. $env:VAR, Get-ChildItem, dir works too; PowerShell 7 supports && and ||). Git and npm commands work the same as in other shells.
-- When the Shell is bash (Git Bash), use bash syntax with Windows-style paths (C:\...).
-- When the Shell is bash (WSL), use bash syntax with Linux paths — Windows paths are exposed as /mnt/<drive>/... (e.g. D:\work maps to /mnt/d/work).`,
+      // 用户自定义内容同样执行变量替换（与默认模板一致），
+      // 自定义文本中可直接使用 ${workingDirectory} 等占位符
+      content: () =>
+        fillEnvironmentTemplate(this.prompts?.environment ?? DEFAULT_ENVIRONMENT, this.ctx),
     });
 
     // Mode
@@ -89,7 +114,7 @@ Shell usage notes:
       name: 'mode',
       priority: 4,
       conditional: (ctx) => ctx.mode === 'plan',
-      content: `Plan mode is active. Inspect with the exposed read-only tools, produce a detailed structured plan, and submit it with submit_plan. Do not make edits, run side-effecting tools, or execute the plan until the user approves it with /exit-plan.`,
+      content: () => this.prompts?.mode ?? DEFAULT_MODE,
     });
   }
 
@@ -152,7 +177,9 @@ Shell usage notes:
       .filter((s) => !s.conditional || s.conditional(this.ctx))
       .sort((a, b) => a.priority - b.priority);
 
-    let systemPrompt = activeSections.map((s) => s.content).join('\n\n');
+    let systemPrompt = activeSections
+      .map((s) => (typeof s.content === 'function' ? s.content(this.ctx) : s.content))
+      .join('\n\n');
 
     // Append injected memories
     if (this.injectedMemories.length > 0) {
@@ -175,8 +202,7 @@ Shell usage notes:
     if (toolDefinitions.length > 0) {
       systemPrompt += '\n\n';
       systemPrompt += '## Available Tools\n\n';
-      systemPrompt +=
-        'You have access to the following tools. Use them by responding with a tool_use content block. Use read_memory to query past facts, and write_memory to persist important information.\n\n';
+      systemPrompt += (this.prompts?.['tools-intro'] ?? DEFAULT_TOOLS_INTRO) + '\n\n';
       for (const tool of toolDefinitions) {
         systemPrompt += `### ${tool.name}\n${tool.description}\n`;
       }
@@ -215,17 +241,22 @@ Write the summary in the same language as the conversation. Output only the summ
  * The summary call uses low max tokens, zero temperature and reasoning off so
  * it stays cheap and deterministic. On any provider error the caller falls
  * back to the statistical summary.
+ * 支持通过 prompts['summarize'] 自定义摘要提示词。
  */
-export function createLlmContextSummarizer(provider: LLMProvider): ContextSummarizer {
+export function createLlmContextSummarizer(
+  provider: LLMProvider,
+  prompts?: Record<string, string>,
+): ContextSummarizer {
   return async (messages) => {
     const transcript = messages
       .map((message) => `${message.role}: ${extractText(message)}`)
       .join('\n\n');
+    const summarizePrompt = prompts?.summarize ?? CONTEXT_SUMMARIZE_PROMPT;
     const response = await provider.chat(
       [
         {
           role: 'user',
-          content: `${CONTEXT_SUMMARIZE_PROMPT}\n\n<conversation>\n${transcript}\n</conversation>`,
+          content: `${summarizePrompt}\n\n<conversation>\n${transcript}\n</conversation>`,
         },
       ],
       undefined,
@@ -355,4 +386,19 @@ function extractText(msg: UnifiedMessage): string {
     .filter((b) => b.type === 'text')
     .map((b) => b.text)
     .join(' ');
+}
+
+/** 填充 environment 模板中的占位符（默认模板与用户自定义模板都执行替换） */
+function fillEnvironmentTemplate(template: string, ctx: AssemblerContext): string {
+  const shell = ctx.shell ?? 'bash (Unix)';
+  const date = new Date().toISOString().split('T')[0];
+  // 注意：replacement 必须使用函数形式，避免值中的 $& $` $' 等被特殊解释
+  return template
+    .replaceAll('${workingDirectory}', () => ctx.workingDirectory)
+    .replaceAll('${platform}', () => ctx.platform)
+    .replaceAll('${shell ?? "bash (Unix)"}', () => shell)
+    .replaceAll('${shell}', () => shell)
+    .replaceAll('${model}', () => ctx.model)
+    .replaceAll('${provider}', () => ctx.provider)
+    .replaceAll('${date}', () => date);
 }

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
-import { loadConfig, mergeCliFlags, type StatsConfig } from '@personal-agent/config';
+import { loadConfig, loadPromptSettings, mergeCliFlags, type StatsConfig } from '@personal-agent/config';
 import { ProviderRegistry, type LLMProvider } from '@personal-agent/provider';
 import {
   AgentLoop,
@@ -141,6 +141,9 @@ program
       maxTokens: options.maxTokens as number | undefined,
     });
 
+    // 用户自定义提示词覆盖（built-in-prompt.yaml），未覆盖的 key 使用内置默认
+    const promptOverrides = loadPromptSettings(options.config as string | undefined);
+
     // Initialize providers
     log.info('Initializing providers...');
     const registry = await ProviderRegistry.fromConfig(mergedConfig);
@@ -202,14 +205,17 @@ program
     }
 
     // Create context assembler
-    const contextAssembler = new ContextAssembler({
-      workingDirectory: process.cwd(),
-      platform: `${process.platform} ${process.arch}`,
-      shell: describeShell(process.platform, mergedConfig.tools.shell),
-      model: provider.getModel(),
-      provider: provider.providerId,
-      mode: 'chat',
-    });
+    const contextAssembler = new ContextAssembler(
+      {
+        workingDirectory: process.cwd(),
+        platform: `${process.platform} ${process.arch}`,
+        shell: describeShell(process.platform, mergedConfig.tools.shell),
+        model: provider.getModel(),
+        provider: provider.providerId,
+        mode: 'chat',
+      },
+      promptOverrides,
+    );
 
     // Initialize memory store for context injection
     const memoryStore = mergedConfig.memory.enabled
@@ -234,7 +240,11 @@ program
             contextAssembler.addSection({
               name: 'automatic-memory-context',
               priority: 6,
-              content: `## Remembered Context (auto-injected from memory)\n\n${context}\n\nUse this context when relevant to the user's request.`,
+              content: (promptOverrides?.['memory-inject-cli'] ??
+                '## Remembered Context (auto-injected from memory)\n\n${memory}\n\nUse this context when relevant to the user\'s request.').replace(
+                '${memory}',
+                () => context,
+              ),
             });
           }
         } catch {
@@ -247,7 +257,12 @@ program
           name: 'active-plugin-skills',
           priority: 7,
           content: skills
-            .map((skill) => `## Skill: ${skill.name}\n\n${skill.content}`)
+            .map(
+              (skill) =>
+                (promptOverrides?.['skills-inject-cli'] ?? '## Skill: ${name}\n\n${content}')
+                  .replaceAll('${name}', () => skill.name)
+                  .replaceAll('${content}', () => skill.content),
+            )
             .join('\n\n'),
         });
       }
@@ -382,7 +397,7 @@ program
     const tokenBudget = new TokenBudget(
       resolveCliContextWindow(provider),
       8192,
-      createLlmContextSummarizer(provider),
+      createLlmContextSummarizer(provider, promptOverrides),
     );
     const planEngine = new PlanModeEngine();
     const planModeState: PlanModeState = { active: false };
@@ -586,6 +601,7 @@ program
         };
         return toolExecutor.execute(toolName, toolInput, toolCtx);
       },
+      { prompts: promptOverrides },
     );
 
     const spawnSubAgentTool = new (class extends BaseTool {
@@ -650,7 +666,7 @@ program
       name: 'tools',
       priority: 5,
       conditional: () => false,
-      content: buildToolInstructions(toolRegistry.listAll()),
+      content: buildToolInstructions(toolRegistry.listAll(), promptOverrides),
     });
 
     // Inject plan system prompt section (disabled by default)
@@ -658,7 +674,9 @@ program
       name: 'plan',
       priority: 2,
       conditional: () => planModeState.active,
-      content: `## Plan Mode (READ-ONLY)
+      content:
+        promptOverrides?.['plan-mode-cli'] ??
+        `## Plan Mode (READ-ONLY)
 You are currently in PLAN MODE. In this mode:
 1. You may inspect the project with the exposed read-only tools, but you MUST NOT cause side effects.
 2. Analyze the request and create a detailed implementation plan with explicit dependencies and risks.
@@ -697,6 +715,7 @@ When the user is satisfied, they will use /exit-plan to leave plan mode. Then yo
         injectMemoryContext,
         statsStore,
         planModeState,
+        promptOverrides,
         onExit: async () => {
           statsStore?.close();
           await pluginLoader.dispatchHook('on_session_end', {
@@ -742,6 +761,7 @@ When the user is satisfied, they will use /exit-plan to leave plan mode. Then yo
           statsStore,
           planEngine,
           planModeState,
+          promptOverrides,
         });
         if (result.status === 'exit') {
           syncSessionMessages(session, contextAssembler);
@@ -825,6 +845,8 @@ interface TuiModeOptions {
   statsStore: UsageStore | null;
   planEngine?: PlanModeEngine;
   injectMemoryContext?: (userInput: string) => Promise<void>;
+  /** 用户自定义提示词覆盖（key → 内容） */
+  promptOverrides: Record<string, string>;
   planModeState: PlanModeState;
   onExit?: () => Promise<void>;
 }
@@ -907,6 +929,7 @@ async function runTuiMode(opts: TuiModeOptions) {
             statsStore: opts.statsStore,
             planEngine: opts.planEngine,
             planModeState: opts.planModeState,
+            promptOverrides: opts.promptOverrides,
           };
           const result = await handleSlashCommand(input, ctx);
           syncTuiPlan();
@@ -1020,13 +1043,11 @@ async function runSinglePrompt(
 // Tool instructions
 // ---------------------------------------------------------------------------
 
-function buildToolInstructions(tools: Tool[]): string {
-  const lines: string[] = ['## Tool Usage Instructions', ''];
-  lines.push(
-    'You have access to tools. Use them by including tool_use content blocks in your response.',
-  );
-  lines.push('');
-  lines.push('Available tools:');
+function buildToolInstructions(tools: Tool[], prompts?: Record<string, string>): string {
+  const intro =
+    prompts?.['tools-intro-cli'] ??
+    '## Tool Usage Instructions\n\nYou have access to tools. Use them by including tool_use content blocks in your response.\n\nAvailable tools:';
+  const lines: string[] = [intro, ''];
   for (const tool of tools) {
     const perm = tool.isDangerous
       ? '⚠️ requires approval'
@@ -1144,6 +1165,8 @@ interface CommandContext {
   statsStore: UsageStore | null;
   planEngine?: PlanModeEngine;
   planModeState: PlanModeState;
+  /** 用户自定义提示词覆盖（key → 内容） */
+  promptOverrides: Record<string, string>;
 }
 
 async function handleSlashCommand(
@@ -1226,7 +1249,9 @@ async function handleSlashCommand(
         name: 'plan',
         priority: 2,
         conditional: () => true,
-        content: `## Plan Mode (READ-ONLY)
+        content:
+          ctx.promptOverrides?.['plan-mode-cli'] ??
+          `## Plan Mode (READ-ONLY)
 You are currently in PLAN MODE. In this mode:
 1. You may inspect the project with the exposed read-only tools, but you MUST NOT cause side effects.
 2. Analyze the request and create a detailed implementation plan with explicit dependencies and risks.
@@ -1260,11 +1285,16 @@ When the user is satisfied with the plan, they will use /exit-plan to leave plan
         ctx.contextAssembler.addSection({
           name: 'plan-execution',
           priority: 5,
-          content: `## Approved Plan
+          content:
+            (ctx.promptOverrides?.['plan-execution-cli'] ??
+              `## Approved Plan
 
-${formatPlan(approvedPlan)}
+${'${plan}'}
 
-Execute this plan in dependency order. Call update_plan_step before starting each step and again when it completes, fails, or is skipped.`,
+Execute this plan in dependency order. Call update_plan_step before starting each step and again when it completes, fails, or is skipped.`).replace(
+              '${plan}',
+              () => formatPlan(approvedPlan),
+            ),
         });
       }
       return {
