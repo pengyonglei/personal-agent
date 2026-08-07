@@ -198,6 +198,35 @@ export interface ToolResult {
 }
 
 // ---------------------------------------------------------------------------
+// Interactive user questions (ask_user)
+// ---------------------------------------------------------------------------
+
+/**
+ * A question posed to the user through the ask_user tool. The UI renders it
+ * as a single-select (radio) or multi-select (checkbox) list, capped at 4
+ * model-recommended options, plus a built-in "custom answer" option.
+ */
+export interface UserQuestion {
+  id: string;
+  /** The question text shown to the user */
+  question: string;
+  /** Model-recommended answers (at most 4) */
+  options: string[];
+  /** true = multi-select (checkbox), false = single-select (radio) */
+  multiSelect: boolean;
+  /** Whether to include the "custom answer" option (default true) */
+  allowCustom: boolean;
+}
+
+/** The user's answer to a UserQuestion. */
+export interface UserAnswer {
+  /** Selected recommended options (empty when a custom answer is given) */
+  selections: string[];
+  /** Custom free-text answer; present when the user chose "custom answer" */
+  custom?: string;
+}
+
+// ---------------------------------------------------------------------------
 // Provider feature flags
 // ---------------------------------------------------------------------------
 

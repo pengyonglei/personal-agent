@@ -165,3 +165,35 @@ test('tasks are direct project children and archive independently', async () => 
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test('task plan mode persists across reloads', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'personal-agent-project-planmode-'));
+  const root = join(directory, 'workspace');
+  const storagePath = join(directory, 'projects.json');
+  await mkdir(root);
+  try {
+    const manager = new ProjectManager(storagePath);
+    await manager.initialize();
+    const project = await manager.createProject({ name: 'PlanMode', rootPath: root });
+    const task = await manager.createTask({
+      projectId: project.id,
+      title: '计划模式任务',
+      planMode: true,
+    });
+    assert.equal(manager.getTask(task.id)?.planMode, true);
+
+    await manager.setTaskPlanMode(task.id, false);
+    assert.equal(manager.getTask(task.id)?.planMode, undefined);
+
+    await manager.setTaskPlanMode(task.id, true);
+    const restored = new ProjectManager(storagePath);
+    await restored.initialize();
+    assert.equal(restored.getTask(task.id)?.planMode, true);
+
+    // 未设置的旧任务记录默认为 undefined（不开启）
+    const plainTask = await restored.createTask({ projectId: project.id, title: '普通任务' });
+    assert.equal(restored.getTask(plainTask.id)?.planMode, undefined);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

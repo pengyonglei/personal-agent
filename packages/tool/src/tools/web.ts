@@ -1,7 +1,7 @@
-import type { ToolResult, ToolContext } from '../types';
+import type { ToolResult, ToolContext, ValidationResult } from '../types';
 import { BaseTool } from '../types';
-import type { JSONSchema } from '@personal-agent/shared';
-import { USER_AGENT } from '@personal-agent/shared';
+import type { JSONSchema, UserAnswer, UserQuestion } from '@personal-agent/shared';
+import { USER_AGENT, generateId } from '@personal-agent/shared';
 
 // ---------------------------------------------------------------------------
 // web_fetch — fetch and parse a URL
@@ -179,15 +179,23 @@ export class TodoWriteTool extends BaseTool {
 }
 
 // ---------------------------------------------------------------------------
-// ask_user — ask the user a question
+// ask_user — ask the user a question with an interactive single/multi select
 // ---------------------------------------------------------------------------
+
+/** Maximum number of model-recommended options per question. */
+export const ASK_USER_MAX_OPTIONS = 4;
 
 export class AskUserTool extends BaseTool {
   readonly name = 'ask_user';
   readonly description = `Ask the user a question to resolve ambiguity or get a decision.
-Use this when you're blocked on something only the user can decide.`;
+Use this when you're blocked on something only the user can decide.
+- Provide at most ${ASK_USER_MAX_OPTIONS} recommended options; the UI renders them as a selectable list (single or multi select).
+- A "custom answer" option is automatically appended, so users who dislike all options can type their own answer.
+- Set multi_select=true when multiple options can be chosen at once.`;
   readonly category = 'utility' as const;
   readonly requiresPermission = false;
+  /** Interactive only — sub-agents have no UI to answer. */
+  readonly canBeUsedInSubAgent = false;
 
   readonly inputSchema: JSONSchema = {
     type: 'object',
@@ -195,24 +203,96 @@ Use this when you're blocked on something only the user can decide.`;
       question: { type: 'string', description: 'The question to ask the user' },
       options: {
         type: 'array',
-        description: 'Available options for the user',
+        description: `Recommended answers (at most ${ASK_USER_MAX_OPTIONS})`,
         items: { type: 'string' },
+      },
+      multi_select: {
+        type: 'boolean',
+        description: 'Allow multiple selections (default false = single select)',
+      },
+      allow_custom: {
+        type: 'boolean',
+        description: 'Append a custom answer option (default true)',
       },
     },
     required: ['question'],
   };
 
-  async execute(params: Record<string, unknown>, _context: ToolContext): Promise<ToolResult> {
-    const question = params.question as string;
-    const options = params.options as string[] | undefined;
+  validateParams(params: Record<string, unknown>): ValidationResult {
+    const base = super.validateParams(params);
+    if (!base.valid) return base;
+    const options = params.options;
+    if (options !== undefined) {
+      if (!Array.isArray(options)) {
+        return { valid: false, errors: ['options must be an array'] };
+      }
+      if (options.length > ASK_USER_MAX_OPTIONS) {
+        return {
+          valid: false,
+          errors: [`options must contain at most ${ASK_USER_MAX_OPTIONS} items`],
+        };
+      }
+      for (const option of options) {
+        if (typeof option !== 'string' || !option.trim()) {
+          return { valid: false, errors: ['every option must be a non-empty string'] };
+        }
+      }
+    }
+    return { valid: true, errors: [] };
+  }
 
-    let output = `[QUESTION] ${question}`;
-    if (options && options.length > 0) {
-      output += '\n\nOptions:\n' + options.map((o, i) => `  ${i + 1}. ${o}`).join('\n');
+  async execute(params: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
+    const question = String(params.question ?? '').trim();
+    const rawOptions = Array.isArray(params.options) ? params.options : [];
+    const options: string[] = [];
+    for (const option of rawOptions.slice(0, ASK_USER_MAX_OPTIONS)) {
+      const text = String(option).trim();
+      if (text && !options.includes(text)) options.push(text);
+    }
+    const multiSelect = params.multi_select === true;
+    const allowCustom = params.allow_custom !== false;
+
+    // Interactive path: the host UI renders the question and waits for the answer.
+    if (context.askUser) {
+      try {
+        const answer = await context.askUser(
+          { id: generateId(), question, options, multiSelect, allowCustom },
+          context.signal,
+        );
+        return this.success(formatUserAnswer(answer));
+      } catch (err) {
+        if (context.signal?.aborted) {
+          return {
+            success: false,
+            content: '',
+            error: 'Question interrupted by user',
+            metadata: { duration: 0, interrupted: true },
+          };
+        }
+        return this.error(`Failed to get user answer: ${(err as Error).message}`);
+      }
     }
 
+    // Fallback (non-interactive): describe the question so the model can
+    // surface it in the chat, but make clear no answer was collected.
+    let output = `[QUESTION] ${question}`;
+    if (options.length > 0) {
+      output += '\n\nOptions:\n' + options.map((o, i) => `  ${i + 1}. ${o}`).join('\n');
+    }
+    output += '\n\n(no interactive input available — ask the user in the chat instead)';
     return this.success(output);
   }
+}
+
+function formatUserAnswer(answer: UserAnswer): string {
+  const lines: string[] = [];
+  if (answer.custom !== undefined && answer.custom.trim()) {
+    lines.push(`User answered (custom): ${answer.custom.trim()}`);
+  }
+  if (answer.selections.length > 0) {
+    lines.push(`User selected: ${answer.selections.join(', ')}`);
+  }
+  return lines.length > 0 ? lines.join('\n') : 'User did not select any option.';
 }
 
 // ---------------------------------------------------------------------------

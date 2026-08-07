@@ -28,6 +28,8 @@ import {
   VERSION,
   VERSION_LABEL,
   type ModelInfo,
+  type UserAnswer,
+  type UserQuestion,
 } from '@personal-agent/shared';
 import { FileSystemMemoryStore } from '@personal-agent/memory';
 import {
@@ -402,6 +404,13 @@ program
     const planEngine = new PlanModeEngine();
     const planModeState: PlanModeState = { active: false };
 
+    // Interactive ask_user wiring: readline fallback by default; TUI mode
+    // replaces this with an ink QuestionCard bridge (see runTuiMode).
+    const askUserRef: { current: ToolContext['askUser'] | undefined } = { current: undefined };
+    if (!(useTui && process.stdin.isTTY)) {
+      askUserRef.current = buildReadlineAskUser();
+    }
+
     // Model request stats tracking (SQLite, graceful degradation)
     const statsStore = mergedConfig.stats.enabled ? createStatsStore(mergedConfig.stats) : null;
     const statsRecorder = statsStore
@@ -536,6 +545,7 @@ program
       'read_memory',
       'get_plan',
       'submit_plan',
+      'ask_user',
     ]);
 
     const agentLoop = new AgentLoop({
@@ -565,6 +575,7 @@ program
           sessionId: session.getSessionId(),
           workingDirectory: process.cwd(),
           signal,
+          askUser: askUserRef.current,
         };
         await pluginLoader.dispatchHook('on_tool_execute', {
           sessionId: session.getSessionId(),
@@ -683,7 +694,7 @@ You are currently in PLAN MODE. In this mode:
 3. You MUST call submit_plan with the final structured plan before finishing your response.
 4. Do not execute the plan until the user approves it with /exit-plan.
 5. The plan should be comprehensive — break the task into logical phases with clear dependencies.
-6. Do NOT ask the user questions — just output the best plan you can.
+6. When you need the user to make a decision, call ask_user with the question and up to 4 recommended options (use multi_select when multiple answers fit). The UI renders the options as a selectable list (single/multi select) with a custom answer option, so the user can always type their own answer.
 
 When the user is satisfied, they will use /exit-plan to leave plan mode. Then you can execute the plan step by step using the available tools.`,
     });
@@ -716,6 +727,7 @@ When the user is satisfied, they will use /exit-plan to leave plan mode. Then yo
         statsStore,
         planModeState,
         promptOverrides,
+        askUserRef,
         onExit: async () => {
           statsStore?.close();
           await pluginLoader.dispatchHook('on_session_end', {
@@ -848,6 +860,8 @@ interface TuiModeOptions {
   /** 用户自定义提示词覆盖（key → 内容） */
   promptOverrides: Record<string, string>;
   planModeState: PlanModeState;
+  /** Mutable holder for the interactive ask_user handler (set by TUI mode). */
+  askUserRef: { current: ToolContext['askUser'] | undefined };
   onExit?: () => Promise<void>;
 }
 
@@ -883,6 +897,30 @@ async function runTuiMode(opts: TuiModeOptions) {
     });
   };
   opts.planEngine?.onUpdate(syncTuiPlan);
+
+  // Bridge: the agent loop's ask_user tool waits on a promise that the TUI
+  // QuestionCard resolves through the App's onAskUser prop.
+  let pendingAskUser: {
+    resolve: (answer: UserAnswer) => void;
+    onAbort: () => void;
+    signal: AbortSignal | null;
+  } | null = null;
+
+  opts.askUserRef.current = (question: UserQuestion, signal?: AbortSignal) =>
+    new Promise<UserAnswer>((resolve) => {
+      const onAbort = (): void => {
+        if (pendingAskUser?.resolve === resolve) pendingAskUser = null;
+        tuiDispatch?.({ type: 'CLEAR_QUESTION' });
+        resolve({ selections: [] });
+      };
+      pendingAskUser = { resolve, onAbort, signal: signal ?? null };
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
+      signal?.addEventListener('abort', onAbort, { once: true });
+      tuiDispatch?.({ type: 'SET_QUESTION', question });
+    });
 
   // Build the TUI app
   const tuiInstance = render(
@@ -945,6 +983,13 @@ async function runTuiMode(opts: TuiModeOptions) {
         }
       },
       themeName: 'dark',
+      onAskUser: (_question, answer) => {
+        const pending = pendingAskUser;
+        if (!pending) return;
+        pendingAskUser = null;
+        pending.signal?.removeEventListener('abort', pending.onAbort);
+        pending.resolve(answer);
+      },
     }),
   );
 
@@ -1086,6 +1131,93 @@ function promptUserPermission(toolName: string, params: Record<string, unknown>)
       resolve(a === 'y' || a === 'yes' || a === 'a' || a === 'all');
     });
   });
+}
+
+// ---------------------------------------------------------------------------
+// Interactive ask_user (readline fallback mode)
+// ---------------------------------------------------------------------------
+
+function buildReadlineAskUser(): NonNullable<ToolContext['askUser']> {
+  return (question: UserQuestion, signal?: AbortSignal) =>
+    new Promise<UserAnswer>((resolve) => {
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      const customIndex = question.options.length;
+      const total = question.options.length + (question.allowCustom ? 1 : 0);
+      const selections: string[] = [];
+
+      const finish = (answer: UserAnswer): void => {
+        signal?.removeEventListener('abort', onAbort);
+        rl.close();
+        resolve(answer);
+      };
+      const onAbort = (): void => finish({ selections: [] });
+      if (signal?.aborted) {
+        finish({ selections: [] });
+        return;
+      }
+      signal?.addEventListener('abort', onAbort, { once: true });
+
+      console.log(`\n\x1b[1;36m❓ ${question.question}\x1b[0m`);
+      question.options.forEach((option, i) => {
+        console.log(`  \x1b[33m${i + 1}.\x1b[0m ${option}`);
+      });
+      if (question.allowCustom) {
+        console.log(`  \x1b[33m${total}.\x1b[0m ✎ 自定义答案（以上都不选）`);
+      }
+      console.log(
+        question.multiSelect
+          ? '\x1b[2m  输入编号切换选择，输入 0 或直接回车提交\x1b[0m'
+          : '\x1b[2m  输入编号后回车确认\x1b[0m',
+      );
+
+      const promptCustom = (): void => {
+        rl.question('\x1b[36m  请输入自定义答案: \x1b[0m', (text) => {
+          finish({ selections: [], custom: text.trim() || undefined });
+        });
+      };
+
+      const promptLine = (): void => {
+        const label = question.multiSelect
+          ? `  已选 [${selections.join(', ')}] 继续/提交 (0=提交): `
+          : `  请选择 1-${total}: `;
+        rl.question(`\x1b[36m${label}\x1b[0m`, (raw) => {
+          const answer = raw.trim();
+          if (question.multiSelect) {
+            if (answer === '0' || answer === '') {
+              finish({ selections });
+              return;
+            }
+            const index = Number.parseInt(answer, 10) - 1;
+            if (index >= 0 && index < question.options.length) {
+              const option = question.options[index];
+              const pos = selections.indexOf(option);
+              if (pos >= 0) selections.splice(pos, 1);
+              else selections.push(option);
+            } else if (index === customIndex && question.allowCustom) {
+              promptCustom();
+              return;
+            } else {
+              console.log(`  \x1b[31m无效编号: ${answer}\x1b[0m`);
+            }
+            promptLine();
+            return;
+          }
+          const index = Number.parseInt(answer, 10) - 1;
+          if (index >= 0 && index < question.options.length) {
+            finish({ selections: [question.options[index]] });
+            return;
+          }
+          if (index === customIndex && question.allowCustom) {
+            promptCustom();
+            return;
+          }
+          console.log(`  \x1b[31m无效编号: ${answer}\x1b[0m`);
+          promptLine();
+        });
+      };
+
+      promptLine();
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -1258,7 +1390,7 @@ You are currently in PLAN MODE. In this mode:
 3. You MUST call submit_plan with the final structured plan before finishing your response.
 4. Do not execute the plan until the user approves it with /exit-plan.
 5. The plan should be comprehensive — break the task into logical phases with clear dependencies.
-6. Do NOT ask the user questions — just output the best plan you can.
+6. When you need the user to make a decision, call ask_user with the question and up to 4 recommended options (use multi_select when multiple answers fit). The UI renders the options as a selectable list (single/multi select) with a custom answer option, so the user can always type their own answer.
 
 When the user is satisfied with the plan, they will use /exit-plan to leave plan mode, then you can execute it step by step using the available tools.`,
       });

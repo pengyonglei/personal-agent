@@ -1,11 +1,13 @@
 import React, { useState, useCallback } from 'react';
 import type { Theme } from './themes/theme';
 import { darkTheme, lightTheme } from './themes/theme';
+import type { UserAnswer } from '@personal-agent/shared';
 import { AgentChatView } from './components/AgentChatView';
 import { TuiContext } from './hooks/use-tui-context';
 import { useAppState } from './hooks/use-app-state';
 import { useInput } from 'ink';
 import { VERSION_LABEL } from '@personal-agent/shared';
+import type { DisplayQuestion } from './types';
 
 export interface AppProps {
   model?: string;
@@ -14,6 +16,8 @@ export interface AppProps {
   themeName?: 'dark' | 'light';
   onDispatchReady?: (dispatch: (action: any) => void) => void;
   onSlashCommand?: (input: string) => Promise<string | void>;
+  /** Bridge: called when the user answers a pending question in the QuestionCard. */
+  onAskUser?: (question: DisplayQuestion, answer: UserAnswer) => void;
 }
 
 /**
@@ -27,6 +31,7 @@ export function App({
   themeName = 'dark',
   onDispatchReady,
   onSlashCommand,
+  onAskUser,
 }: AppProps) {
   const [theme, setTheme] = useState<Theme>(
     themeName === 'light' ? lightTheme : darkTheme,
@@ -75,6 +80,14 @@ export function App({
       }
     }
   });
+
+  const handleQuestionAnswer = useCallback(
+    (question: DisplayQuestion, answer: UserAnswer) => {
+      dispatch({ type: 'CLEAR_QUESTION' });
+      onAskUser?.(question, answer);
+    },
+    [onAskUser, dispatch],
+  );
 
   const handleSubmit = useCallback(
     async (text: string) => {
@@ -143,6 +156,8 @@ export function App({
         dispatch={dispatch}
         onSubmit={handleSubmit}
         disabled={isProcessing}
+        pendingQuestion={state.pendingQuestion}
+        onQuestionAnswer={handleQuestionAnswer}
       />
     </TuiContext.Provider>
   );

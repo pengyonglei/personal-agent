@@ -107,7 +107,9 @@ function ToolCallCard({
           {icon} {tc.name}
         </Text>
         {tc.status === 'running' && (
-          <Text color={colors.warning}> ...</Text>
+          <Text color={colors.warning}>
+            {tc.name === 'ask_user' ? ' 等待用户回答…' : ' ...'}
+          </Text>
         )}
         {tc.status !== 'running' && tc.outputPreview && (
           <Text dimColor> ({tc.expanded ? '− fold' : '+ expand'})</Text>

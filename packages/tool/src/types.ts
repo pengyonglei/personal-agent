@@ -2,6 +2,8 @@ import type {
   ToolResult as SharedToolResult,
   JSONSchema,
   UnifiedToolDefinition,
+  UserAnswer,
+  UserQuestion,
 } from '@personal-agent/shared';
 import { isAbsolute, relative, resolve } from 'node:path';
 
@@ -20,6 +22,8 @@ export interface ToolContext {
   workingDirectory: string;
   signal?: AbortSignal;
   onProgress?: (message: string) => void;
+  /** Interactive question handler (ask_user). Absent in non-interactive contexts. */
+  askUser?: (question: UserQuestion, signal?: AbortSignal) => Promise<UserAnswer>;
 }
 
 export interface Tool {

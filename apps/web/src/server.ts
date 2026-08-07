@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import type { ViteDevServer } from 'vite';
 import { WebSocket, WebSocketServer } from 'ws';
 import { generateId, VERSION } from '@personal-agent/shared';
+import type { UserAnswer, UserQuestion } from '@personal-agent/shared';
 import {
   loadConfig,
   saveAgentSettings,
@@ -31,6 +32,8 @@ import {
 import { BUILTIN_PROMPTS, PROMPT_KEYS } from './prompts';
 
 const UNTITLED_TASK_TITLE = '新任务';
+/** 批准计划后自动触发执行的内部提示（作为 user 消息写入历史，驱动模型开始执行已批准的计划）。 */
+const APPROVED_PLAN_EXECUTE_PROMPT = '计划已批准，请开始执行。';
 const sourceDirectory = dirname(fileURLToPath(import.meta.url));
 const webDirectory = resolve(sourceDirectory, '..');
 const defaultClientBuildDirectory = resolve(webDirectory, 'dist/client');
@@ -38,6 +41,11 @@ const viteConfigPath = resolve(webDirectory, 'vite.config.ts');
 
 interface PendingPermission {
   resolve: (answer: { approved: boolean; remember?: boolean }) => void;
+  timeout: ReturnType<typeof setTimeout>;
+}
+
+interface PendingQuestion {
+  resolve: (answer: UserAnswer) => void;
   timeout: ReturnType<typeof setTimeout>;
 }
 
@@ -58,6 +66,8 @@ export interface WebServerOptions {
   clientBuildDirectory?: string;
   /** Stats SQLite database path. Defaults to ~/.personal-agent/stats/model-requests.db */
   statsDbPath?: string;
+  /** 计划文档落盘目录。Defaults to ~/.personal-agent/plans */
+  plansDirectory?: string;
   viteDev?: boolean;
 }
 
@@ -87,6 +97,7 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
     projectStoragePath: options.projectStoragePath ?? process.env.PERSONAL_AGENT_PROJECTS_PATH,
     sessionsDirectory: options.sessionsDirectory ?? process.env.PERSONAL_AGENT_SESSIONS_PATH,
     statsDbPath: options.statsDbPath,
+    plansDirectory: options.plansDirectory,
   });
   // Model request stats (SQLite) — graceful degradation when node:sqlite is
   // unavailable on the runtime (Node < 22.13). Never blocks server startup.
@@ -134,6 +145,19 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
       return;
     }
     res.json({ prompts: buildPromptInventory(runtime.promptOverrides) });
+  });
+
+  app.get('/api/plans', async (req, res) => {
+    if (!isAuthorized(req.headers.authorization, req.query.token, authToken)) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    try {
+      const plans = await runtime.listPlanDocs();
+      res.json({ plans });
+    } catch (error) {
+      res.status(500).json({ error: formatError(error) });
+    }
   });
 
   app.put('/api/prompts', async (req, res) => {
@@ -412,6 +436,7 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
     );
     const preferredTaskId = connectionUrl.searchParams.get('task') ?? undefined;
     const pendingPermissions = new Map<string, PendingPermission>();
+    const pendingQuestions = new Map<string, PendingQuestion>();
     const send = (message: ServerMessage): void => {
       if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message));
     };
@@ -449,6 +474,40 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
             5 * 60 * 1000,
           );
           pendingPermissions.set(requestId, { resolve: finish, timeout });
+          if (signal?.aborted) onAbort();
+          else signal?.addEventListener('abort', onAbort, { once: true });
+        });
+      };
+
+    const requestQuestionFor =
+      (taskId: string) =>
+      (question: UserQuestion, signal?: AbortSignal): Promise<UserAnswer> => {
+        const requestId = generateId();
+        send({
+          type: 'ask_user_request',
+          requestId,
+          question: question.question,
+          options: question.options,
+          multiSelect: question.multiSelect,
+          allowCustom: question.allowCustom,
+          taskId,
+        });
+        return new Promise((resolveAnswer) => {
+          let settled = false;
+          const finish = (answer: UserAnswer): void => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeout);
+            signal?.removeEventListener('abort', onAbort);
+            pendingQuestions.delete(requestId);
+            resolveAnswer(answer);
+          };
+          const onAbort = (): void => finish({ selections: [] });
+          const timeout = setTimeout(() => {
+            finish({ selections: [] });
+            send({ type: 'notice', message: '问题等待超时，未收到回答。' });
+          }, 5 * 60 * 1000);
+          pendingQuestions.set(requestId, { resolve: finish, timeout });
           if (signal?.aborted) onAbort();
           else signal?.addEventListener('abort', onAbort, { once: true });
         });
@@ -512,7 +571,11 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
         send({ type: 'error', message: formatError(error), code: 'INVALID_MESSAGE' });
         return;
       }
-      if (message.type === 'interrupt' || message.type === 'permission_response') {
+      if (
+        message.type === 'interrupt' ||
+        message.type === 'permission_response' ||
+        message.type === 'ask_user_response'
+      ) {
         void handleMessage(message).catch(sendRequestError);
         return;
       }
@@ -533,6 +596,14 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
         clearTimeout(pending.timeout);
         pendingPermissions.delete(message.requestId);
         pending.resolve({ approved: message.approved, remember: message.remember });
+        return;
+      }
+      if (message.type === 'ask_user_response') {
+        const pending = pendingQuestions.get(message.requestId);
+        if (!pending) return;
+        clearTimeout(pending.timeout);
+        pendingQuestions.delete(message.requestId);
+        pending.resolve(message.answer);
         return;
       }
       if (message.type === 'list_sessions') {
@@ -728,6 +799,11 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
           break;
         case 'set_plan_mode':
           conversation.setPlanMode(message.enabled);
+          if (routedTaskId) {
+            // 持久化任务级计划模式：刷新/重启后恢复。
+            await runtime.projects.setTaskPlanMode(routedTaskId, message.enabled);
+            sendProjectState();
+          }
           send({
             type: 'notice',
             message: message.enabled
@@ -742,10 +818,30 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
             sendProjectState();
           }
           break;
-        case 'approve_plan':
-          conversation.setPlanMode(false);
-          send({ type: 'notice', message: '计划已批准，执行工具现已解锁。' });
+        case 'approve_plan': {
+          const before = conversation.planEngine.getPlan();
+          const approvedPlan = conversation.setPlanMode(false);
+          if (approvedPlan && before?.status === 'draft') {
+            send({ type: 'notice', message: '计划已批准，开始执行…' });
+            // 批准后自动开始执行：与 prompt 分支相同的异步执行路径，不阻塞消息队列。
+            // 触发文本会作为 user 消息写入会话历史，模型按已注入的 plan-execution
+            // section（依赖顺序 + update_plan_step）执行计划。
+            void conversation
+              .runPrompt(APPROVED_PLAN_EXECUTE_PROMPT)
+              .then(async () => {
+                if (routedTaskId) await runtime.projects.touchTask(routedTaskId);
+                await runtime.refreshInvalidTaskModels();
+                sendProjectState();
+                await sendSessionList(runtime, send);
+              })
+              .catch((error) => {
+                send({ type: 'error', message: formatError(error), code: 'REQUEST_FAILED' });
+              });
+          } else {
+            send({ type: 'notice', message: '计划已批准，执行工具现已解锁。' });
+          }
           break;
+        }
         case 'compress_context':
           await conversation.compressContext();
           send({ type: 'notice', message: '上下文已压缩，早期对话已生成语义摘要。' });
@@ -800,6 +896,7 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
           conv = runtime.createConversation(
             send,
             requestPermissionFor(task.id),
+            requestQuestionFor(task.id),
             project.rootPath,
             taskOverride,
             task.id,
@@ -821,6 +918,8 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
             await runtime.projects.attachSession(task.id, conv.sessionId);
           }
           conversations.set(taskId, conv);
+          // 恢复任务级计划模式（服务端重启/会话重建后仍保持计划模式开启）。
+          if (task.planMode) conv.setPlanMode(true);
         }
       } else {
         send({ type: 'history', sessionId: task.sessionId ?? '', messages: [] });
@@ -831,6 +930,9 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
       if (conv) {
         // Must not fail when the task is still executing (no idle check).
         conv.applyPermissionMode(permissionMode);
+        // 刷新/重连后客户端 planActive 初始为 false：重推当前计划状态，
+        // 让「概要」Tab 与输入框的计划模式开关恢复（含已存在会话的场合）。
+        conv.publishPlan();
       } else {
         send({ type: 'permission_mode', mode: permissionMode, taskId });
       }
@@ -913,6 +1015,11 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
         pending.resolve({ approved: false });
       }
       pendingPermissions.clear();
+      for (const pending of pendingQuestions.values()) {
+        clearTimeout(pending.timeout);
+        pending.resolve({ selections: [] });
+      }
+      pendingQuestions.clear();
       for (const conv of conversations.values()) {
         void conv.close().catch(() => undefined);
       }

@@ -33,9 +33,17 @@ import {
   VolcanoArkProvider,
   type LLMProvider,
 } from '@personal-agent/provider';
-import type { AgentEvent, ModelInfo, ReasoningEffort, ToolResult } from '@personal-agent/shared';
+import type {
+  AgentEvent,
+  ModelInfo,
+  ReasoningEffort,
+  ToolResult,
+  UserAnswer,
+  UserQuestion,
+} from '@personal-agent/shared';
 import { createLogger, ProviderFeature } from '@personal-agent/shared';
 import { existsSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import {
   BaseTool,
@@ -54,6 +62,8 @@ import type {
   ServerMessage,
   SessionSummary,
 } from './protocol';
+import { planToMarkdown, type PlanDoc } from './plan-doc';
+import { PlanStore } from './plan-store';
 
 const log = createLogger('web-runtime');
 /** Reserved output tokens used by TokenBudget (must stay in sync with its default). */
@@ -67,6 +77,7 @@ const PLAN_MODE_TOOLS = new Set([
   'read_memory',
   'get_plan',
   'submit_plan',
+  'ask_user',
 ]);
 
 export type RuntimeEmitter = (message: ServerMessage) => void;
@@ -75,6 +86,10 @@ export type PermissionRequester = (
   params: Record<string, unknown>,
   signal?: AbortSignal,
 ) => Promise<{ approved: boolean; remember?: boolean }>;
+export type QuestionRequester = (
+  question: UserQuestion,
+  signal?: AbortSignal,
+) => Promise<UserAnswer>;
 
 export interface ProviderSettingsInput {
   provider: ProviderId;
@@ -135,6 +150,8 @@ export class WebAgentRuntime {
   private conversations = new Map<string, WebConversation>();
   /** Shared stats store for all conversations (null when unavailable). */
   readonly statsStore: UsageStore | null;
+  /** 计划文档落盘存储（~/.personal-agent/plans）。 */
+  readonly planStore: PlanStore;
 
   private constructor(
     config: AppConfig,
@@ -143,12 +160,16 @@ export class WebAgentRuntime {
     projectStoragePath?: string,
     configPath?: string,
     sessionsDirectory?: string,
+    plansDirectory?: string,
   ) {
     this.config = config;
     this.workingDirectory = workingDirectory;
     this.promptOverrides = promptOverrides;
     this.configPath = configPath;
     this.sessionsDirectory = sessionsDirectory;
+    this.planStore = new PlanStore(
+      plansDirectory ?? resolve(homedir(), '.personal-agent', 'plans'),
+    );
     this.projects = new ProjectManager(projectStoragePath);
 
     // Sync the shell preference into the tool layer so the bash tool follows
@@ -189,6 +210,8 @@ export class WebAgentRuntime {
       sessionsDirectory?: string;
       /** Stats SQLite path override (defaults to config stats.dbPath). */
       statsDbPath?: string;
+      /** 计划文档落盘目录（默认 ~/.personal-agent/plans）。 */
+      plansDirectory?: string;
     } = {},
   ): Promise<WebAgentRuntime> {
     const workingDirectory =
@@ -206,9 +229,15 @@ export class WebAgentRuntime {
       options.projectStoragePath,
       options.configPath,
       options.sessionsDirectory,
+      options.plansDirectory,
     );
     await runtime.initialize();
     return runtime;
+  }
+
+  /** 列出全部已落盘的计划文档（按 updatedAt 降序），供路由与测试使用。 */
+  async listPlanDocs(): Promise<PlanDoc[]> {
+    return this.planStore.list();
   }
 
   /**
@@ -314,6 +343,7 @@ export class WebAgentRuntime {
   createConversation(
     emit: RuntimeEmitter,
     requestPermission: PermissionRequester,
+    askUser: QuestionRequester,
     workingDirectory = this.workingDirectory,
     providerOverride?: LLMProvider,
     taskId?: string,
@@ -327,6 +357,7 @@ export class WebAgentRuntime {
       provider,
       emit,
       requestPermission,
+      askUser,
       workingDirectory,
       this.sessionsDirectory,
       taskId,
@@ -931,6 +962,7 @@ export class WebAgentRuntime {
       sessionId: conversation.sessionId,
       workingDirectory: conversation.workingDirectory,
       signal,
+      askUser: (question, questionSignal) => conversation.askUser(question, questionSignal),
     };
     const result = await this.toolExecutor.executeWithPermission(name, input, context, true);
     await this.pluginLoader.dispatchHook('on_tool_result', {
@@ -1244,6 +1276,7 @@ export class WebConversation {
     private provider: LLMProvider,
     emit: RuntimeEmitter,
     private permissionRequester: PermissionRequester,
+    private questionRequester: QuestionRequester,
     public workingDirectory: string,
     private sessionsDirectory?: string,
     public taskId?: string,
@@ -1456,7 +1489,8 @@ export class WebConversation {
           `## Plan Mode (READ-ONLY)
 
 Inspect the project with read-only tools, create a detailed plan, and call submit_plan.
-Do not execute changes until the user approves the plan in the Web UI.`,
+Do not execute changes until the user approves the plan in the Web UI.
+When you need the user to make a decision, call ask_user with the question and up to 4 recommended options (use multi_select when multiple answers fit). The UI renders the options as a selectable list with a custom answer option.`,
       });
     } else {
       const approved = this.planEngine.approvePlan();
@@ -1482,12 +1516,30 @@ Execute in dependency order and use update_plan_step to report progress.`).repla
   }
 
   publishPlan(): void {
+    const plan = this.planEngine.getPlan();
+    const markdown = plan ? planToMarkdown(plan) : undefined;
     this.emit({
       type: 'plan',
       active: this.planModeActive,
-      plan: this.planEngine.getPlan(),
+      plan,
       progress: this.planEngine.getProgress(),
+      markdown,
     });
+    if (plan) {
+      // 计划文档异步落盘（创建/批准/步骤状态更新都会重推并刷新 updatedAt；
+      // 保存失败只记日志，绝不影响对话主流程）。
+      void this.runtime.planStore
+        .save({
+          id: plan.id,
+          taskId: this.taskId,
+          title: plan.title,
+          markdown: markdown!,
+          plan,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        })
+        .catch((error) => log.warn(`Plan doc save failed: ${formatError(error)}`));
+    }
   }
 
   askPermission(
@@ -1496,6 +1548,10 @@ Execute in dependency order and use update_plan_step to report progress.`).repla
     signal?: AbortSignal,
   ): Promise<{ approved: boolean; remember?: boolean }> {
     return this.permissionRequester(toolName, params, signal);
+  }
+
+  askUser(question: UserQuestion, signal?: AbortSignal): Promise<UserAnswer> {
+    return this.questionRequester(question, signal);
   }
 
   rememberPermission(toolName: string, approved: boolean): void {

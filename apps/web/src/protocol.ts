@@ -9,6 +9,7 @@ import type {
   ToolResult,
   UnifiedMessage,
   UsageInfo,
+  UserAnswer,
 } from '@personal-agent/shared';
 
 export type PermissionMode = 'allow' | 'ask' | 'approval';
@@ -36,6 +37,12 @@ export type ClientMessage =
       requestId: string;
       approved: boolean;
       remember?: boolean;
+      taskId?: string;
+    }
+  | {
+      type: 'ask_user_response';
+      requestId: string;
+      answer: UserAnswer;
       taskId?: string;
     }
   | { type: 'list_sessions' }
@@ -174,6 +181,15 @@ export type ServerMessage =
       taskId: string;
     }
   | {
+      type: 'ask_user_request';
+      requestId: string;
+      question: string;
+      options: string[];
+      multiSelect: boolean;
+      allowCustom: boolean;
+      taskId: string;
+    }
+  | {
       type: 'tool_end';
       toolCallId: string;
       result: ToolResult;
@@ -184,7 +200,15 @@ export type ServerMessage =
   | { type: 'done'; totalTurns: number; totalUsage: UsageInfo; taskId?: string }
   | { type: 'interrupted'; taskId?: string }
   | { type: 'permission_mode'; mode: PermissionMode; taskId?: string }
-  | { type: 'plan'; active: boolean; plan: Plan | null; progress: PlanProgress; taskId?: string }
+  | {
+      type: 'plan';
+      active: boolean;
+      plan: Plan | null;
+      progress: PlanProgress;
+      taskId?: string;
+      /** 服务端生成的计划 Markdown 文档（plan 非空时提供，前端直接展示同一份内容）。 */
+      markdown?: string;
+    }
   | { type: 'context_usage'; usage: ContextUsage; taskId?: string }
   | { type: 'notice'; message: string; taskId?: string }
   | { type: 'error'; message: string; code?: string; taskId?: string }
@@ -227,6 +251,27 @@ export function parseClientMessage(raw: string): ClientMessage {
         remember: message.remember === true,
         taskId: parseOptionalTaskId(message),
       };
+    case 'ask_user_response': {
+      if (typeof message.requestId !== 'string' || !message.requestId.trim()) {
+        throw new Error('ask_user_response.requestId 不能为空');
+      }
+      const answer = message.answer as Partial<UserAnswer> | undefined;
+      if (
+        !answer ||
+        typeof answer !== 'object' ||
+        !Array.isArray(answer.selections) ||
+        answer.selections.some((selection) => typeof selection !== 'string') ||
+        (answer.custom !== undefined && typeof answer.custom !== 'string')
+      ) {
+        throw new Error('ask_user_response.answer 格式无效');
+      }
+      return {
+        type: 'ask_user_response',
+        requestId: message.requestId.trim(),
+        answer: { selections: answer.selections, custom: answer.custom },
+        taskId: parseOptionalTaskId(message),
+      };
+    }
     case 'load_session':
       if (typeof message.sessionId !== 'string' || !message.sessionId.trim()) {
         throw new Error('load_session.sessionId 不能为空');

@@ -21,6 +21,7 @@ import {
   Menu,
   Modal,
   Progress,
+  Radio,
   Segmented,
   Select,
   Space,
@@ -57,6 +58,7 @@ import {
   FolderOpenOutlined,
   InfoCircleOutlined,
   MenuOutlined,
+  MenuUnfoldOutlined,
   MoonOutlined,
   MoreOutlined,
   PlusOutlined,
@@ -81,7 +83,7 @@ import {
 } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import type { ReasoningEffort, UnifiedMessage } from '@personal-agent/shared';
+import type { ReasoningEffort, UnifiedMessage, UserAnswer } from '@personal-agent/shared';
 import { VERSION } from '@personal-agent/shared';
 import type {
   ClientMessage,
@@ -93,6 +95,8 @@ import type {
   TaskSummary,
 } from '../../src/protocol';
 import { assistantTurnId } from './timeline';
+import type { PlanDoc } from './plan-doc';
+import { planStatusLabel, planToMarkdown } from './plan-doc';
 
 const { Header, Content, Sider } = Layout;
 const { Text, Title } = Typography;
@@ -103,6 +107,7 @@ type ConnectionState = 'connecting' | 'online' | 'offline';
 type ProviderId = 'openai' | 'anthropic' | 'deepseek' | 'ollama' | 'volcano';
 type PlanMessage = Extract<ServerMessage, { type: 'plan' }>;
 type PermissionRequest = Extract<ServerMessage, { type: 'permission_request' }>;
+type AskUserRequest = Extract<ServerMessage, { type: 'ask_user_request' }>;
 type ModelCallStart = Extract<ServerMessage, { type: 'llm_call_start' }>['call'];
 type ModelCallEnd = Extract<ServerMessage, { type: 'llm_call_end' }>['call'];
 
@@ -122,6 +127,7 @@ interface WorkspaceState {
   plan: PlanMessage['plan'];
   planProgress: PlanMessage['progress'];
   pendingPermission?: PermissionRequest;
+  pendingQuestion?: AskUserRequest;
   contextUsage?: ContextUsage;
   creatingProject: boolean;
   creatingTask: boolean;
@@ -155,7 +161,29 @@ interface ToolTimelineItem {
   restored?: boolean;
 }
 
-type TimelineItem = MessageTimelineItem | ToolTimelineItem;
+type TimelineItem = MessageTimelineItem | ToolTimelineItem | PlanDocTimelineItem;
+
+/** 计划文档卡片：对话时间线中可点击打开侧边栏文档 Tab 的条目。 */
+interface PlanDocTimelineItem {
+  id: string;
+  kind: 'plan-doc';
+  docId: string;
+  title: string;
+  time: string;
+}
+
+/** 右侧侧边栏的 Tab：第一个「概要」固定不可删除，其余为可关闭的计划文档 Tab。 */
+type InspectorTab =
+  | { key: string; title: string; kind: 'overview' }
+  | { key: string; title: string; kind: 'plan-doc'; docId: string };
+
+/** 计划文档卡片/头部 Tag 的颜色映射（按计划状态）。 */
+const PLAN_STATUS_TAG_COLORS: Record<string, string> = {
+  draft: 'gold',
+  approved: 'blue',
+  in_progress: 'processing',
+  completed: 'success',
+};
 
 interface ModelCallTrace {
   callId: string;
@@ -182,6 +210,7 @@ interface TaskViewSnapshot {
   permissionMode: PermissionMode;
   sessionId?: string;
   pendingPermission?: PermissionRequest;
+  pendingQuestion?: AskUserRequest;
   responseSeq: number;
 }
 
@@ -272,6 +301,7 @@ const initialState: WorkspaceState = {
     percentage: 0,
   },
   contextUsage: undefined,
+  pendingQuestion: undefined,
   creatingProject: false,
   creatingTask: false,
   switchingRuntime: false,
@@ -366,6 +396,22 @@ const providerIcons: Partial<Record<ProviderId, string>> = {
 
 function getInitialColorMode(): ColorMode {
   return localStorage.getItem('personal-agent-theme') === 'dark' ? 'dark' : 'light';
+}
+
+const INSPECTOR_WIDTH_MIN = 280;
+const INSPECTOR_WIDTH_MAX = 720;
+const INSPECTOR_WIDTH_DEFAULT = 380;
+
+/** 读取持久化的右侧侧边栏宽度（默认 380，clamp 280–720）。 */
+function getInitialInspectorWidth(): number {
+  try {
+    const raw = localStorage.getItem('personal-agent-inspector-width');
+    const parsed = raw === null ? NaN : Number(raw);
+    if (!Number.isFinite(parsed)) return INSPECTOR_WIDTH_DEFAULT;
+    return Math.min(INSPECTOR_WIDTH_MAX, Math.max(INSPECTOR_WIDTH_MIN, Math.round(parsed)));
+  } catch {
+    return INSPECTOR_WIDTH_DEFAULT;
+  }
 }
 
 interface AccentColors {
@@ -512,6 +558,33 @@ function AgentWorkspace({
   const [prompt, setPrompt] = useState('');
   const [starterItems, setStarterItems] = useState<StarterPrompt[]>(starterPrompts);
 
+  // 右侧侧边栏：宽度（可拖拽调宽，持久化到 localStorage）
+  const [inspectorWidth, setInspectorWidth] = useState(getInitialInspectorWidth);
+  const inspectorWidthRef = useRef(inspectorWidth);
+  useEffect(() => {
+    inspectorWidthRef.current = inspectorWidth;
+    localStorage.setItem('personal-agent-inspector-width', String(inspectorWidth));
+  }, [inspectorWidth]);
+  // 侧边栏 Tab：第一个「概要」固定不可删除，其余为可关闭的计划文档 Tab
+  const [inspectorTabs, setInspectorTabs] = useState<InspectorTab[]>([
+    { key: 'overview', title: '概要', kind: 'overview' },
+  ]);
+  const inspectorTabsRef = useRef(inspectorTabs);
+  useEffect(() => {
+    inspectorTabsRef.current = inspectorTabs;
+  }, [inspectorTabs]);
+  const [activeInspectorTab, setActiveInspectorTab] = useState('overview');
+  const activeInspectorTabRef = useRef(activeInspectorTab);
+  useEffect(() => {
+    activeInspectorTabRef.current = activeInspectorTab;
+  }, [activeInspectorTab]);
+  // 计划文档（全局 map：跨任务保留，任务切换/历史恢复时按 taskId 重放卡片）
+  const [planDocs, setPlanDocs] = useState<Record<string, PlanDoc>>({});
+  const planDocsRef = useRef(planDocs);
+  useEffect(() => {
+    planDocsRef.current = planDocs;
+  }, [planDocs]);
+
   /** 从服务端拉取 starter-prompts 自定义内容并更新首页示例（保存后也会被调用） */
   const reloadStarterPrompts = useCallback(async () => {
     try {
@@ -615,6 +688,7 @@ function AgentWorkspace({
     permissionMode: 'ask',
     sessionId: undefined,
     pendingPermission: undefined,
+    pendingQuestion: undefined,
     responseSeq: 0,
   });
   /** Per-task view snapshots, preserved while switching tasks. */
@@ -631,6 +705,7 @@ function AgentWorkspace({
       permissionMode: stateRef.current.permissionMode,
       sessionId: stateRef.current.sessionId,
       pendingPermission: stateRef.current.pendingPermission,
+      pendingQuestion: stateRef.current.pendingQuestion,
       responseSeq: activeResponseSequenceRef.current,
     };
   }, []);
@@ -655,6 +730,7 @@ function AgentWorkspace({
           permissionMode: 'ask',
           sessionId: undefined,
           pendingPermission: undefined,
+          pendingQuestion: undefined,
         });
         return;
       }
@@ -678,6 +754,7 @@ function AgentWorkspace({
         permissionMode: data.permissionMode,
         sessionId: data.sessionId,
         pendingPermission: data.pendingPermission,
+        pendingQuestion: data.pendingQuestion,
       });
     },
     [patchState],
@@ -695,6 +772,122 @@ function AgentWorkspace({
     },
     [snapshotTaskView, applyTaskView],
   );
+
+  /**
+   * 将 plan 消息中的计划生成为 Markdown 文档：同 plan.id 已存在（批准/步骤状态
+   * 更新后的重推）时仅刷新 markdown/plan/updatedAt，不重复加卡片；不存在时创建
+   * 文档并返回（调用方负责追加时间线卡片）。
+   * markdown 优先使用服务端生成的同一份文档（已落盘），缺失时回退本地生成。
+   */
+  const upsertPlanDoc = useCallback(
+    (plan: PlanMessage['plan'], taskId?: string, markdown?: string): PlanDoc | null => {
+      if (!plan) return null;
+      const content = markdown ?? planToMarkdown(plan);
+      const existing = planDocsRef.current[plan.id];
+      if (existing) {
+        const updated: PlanDoc = {
+          ...existing,
+          markdown: content,
+          plan,
+          updatedAt: Date.now(),
+        };
+        planDocsRef.current[plan.id] = updated;
+        setPlanDocs({ ...planDocsRef.current });
+        return null;
+      }
+      const doc: PlanDoc = {
+        id: plan.id,
+        taskId,
+        title: plan.title,
+        markdown: content,
+        plan,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      };
+      planDocsRef.current[plan.id] = doc;
+      setPlanDocs({ ...planDocsRef.current });
+      return doc;
+    },
+    [],
+  );
+
+  /** 打开（或激活）侧边栏中的计划文档 Tab，并展开侧边栏。 */
+  const openPlanDocTab = useCallback(
+    (docId: string) => {
+      const doc = planDocsRef.current[docId];
+      if (!doc) return;
+      const existing = inspectorTabsRef.current.find(
+        (tab) => tab.kind === 'plan-doc' && tab.docId === docId,
+      );
+      if (existing) {
+        setActiveInspectorTab(existing.key);
+      } else {
+        const tab: InspectorTab = {
+          key: `doc-${docId}`,
+          title: doc.title,
+          kind: 'plan-doc',
+          docId,
+        };
+        setInspectorTabs((current) => [...current, tab]);
+        setActiveInspectorTab(tab.key);
+      }
+      patchState({ inspectorOpen: true });
+    },
+    [patchState],
+  );
+
+  /** 关闭侧边栏 Tab（「概要」固定不可删除）；关闭激活 Tab 后切回「概要」。 */
+  const removeInspectorTab = useCallback((key: string) => {
+    setInspectorTabs((current) => current.filter((tab) => tab.key !== key));
+    if (activeInspectorTabRef.current === key) setActiveInspectorTab('overview');
+  }, []);
+
+  /** 拖拽右侧侧边栏左缘调整宽度（clamp 280–720），拖拽期间禁止文本选择。 */
+  const startResize = useCallback((event: React.PointerEvent) => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = inspectorWidthRef.current;
+    const onMove = (moveEvent: PointerEvent) => {
+      const next = startWidth + startX - moveEvent.clientX;
+      setInspectorWidth(
+        Math.min(INSPECTOR_WIDTH_MAX, Math.max(INSPECTOR_WIDTH_MIN, Math.round(next))),
+      );
+    };
+    const onUp = () => {
+      document.body.style.userSelect = '';
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    document.body.style.userSelect = 'none';
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }, []);
+
+  /** 挂载时从服务端拉取已落盘的计划文档并补齐缺失的时间线卡片。 */
+  const seedPlanDocs = useCallback(async () => {
+    try {
+      const response = await apiFetch('/api/plans');
+      if (!response.ok) return;
+      const payload = (await response.json()) as { plans: PlanDoc[] };
+      const docs: Record<string, PlanDoc> = {};
+      for (const doc of payload.plans) docs[doc.id] = normalizeStoredPlanDoc(doc);
+      planDocsRef.current = docs;
+      setPlanDocs(docs);
+      // plans 接口可能晚于 history 到达：主动补齐当前时间线与各任务快照缺失的卡片
+      updateTimeline((items) =>
+        appendPlanDocCards(items, docs, stateRef.current.activeTaskId),
+      );
+      for (const [taskId, data] of Object.entries(taskDataRef.current)) {
+        data.timeline = appendPlanDocCards(data.timeline, docs, taskId);
+      }
+    } catch {
+      // 服务端不可用时保持当前内存态（不阻断页面）
+    }
+  }, [updateTimeline]);
+
+  useEffect(() => {
+    void seedPlanDocs();
+  }, [seedPlanDocs]);
 
   const userTurns = useMemo(
     () =>
@@ -812,7 +1005,7 @@ function AgentWorkspace({
           setModelCalls([]);
           modelCallsRef.current = [];
           setSelectedModelCallId(undefined);
-          const restored: TimelineItem[] = [];
+          let restored: TimelineItem[] = [];
           const restoredToolOwners = new Map<string, number>();
           for (const historyMessage of incoming.messages) {
             if (historyMessage.role === 'system') continue;
@@ -871,6 +1064,8 @@ function AgentWorkspace({
             }
           }
           followOutputRef.current = true;
+          // 重放该任务的计划文档卡片（切任务/重连/刷新后保持可见）
+          restored = appendPlanDocCards(restored, planDocsRef.current, eventTaskId);
           replaceTimeline(restored);
           patchState({ sessionId: incoming.sessionId });
           if (eventTaskId && eventTaskId !== viewingTask && viewingTask) {
@@ -1243,6 +1438,17 @@ function AgentWorkspace({
           patchState({ pendingPermission: incoming });
           break;
         }
+        case 'ask_user_request': {
+          const eventTaskId = incoming.taskId ?? stateRef.current.activeTaskId;
+          if (eventTaskId && eventTaskId !== stateRef.current.activeTaskId) {
+            const data = taskDataRef.current[eventTaskId] ?? emptyTaskSnapshot();
+            data.pendingQuestion = incoming;
+            taskDataRef.current[eventTaskId] = data;
+            break;
+          }
+          patchState({ pendingQuestion: incoming });
+          break;
+        }
         case 'turn_end': {
           const eventTaskId = incoming.taskId ?? stateRef.current.activeTaskId;
           if (eventTaskId && eventTaskId !== stateRef.current.activeTaskId) {
@@ -1288,35 +1494,42 @@ function AgentWorkspace({
           if (eventTaskId && eventTaskId !== stateRef.current.activeTaskId) {
             const data = taskDataRef.current[eventTaskId] ?? emptyTaskSnapshot();
             data.pendingPermission = undefined;
+            data.pendingQuestion = undefined;
             data.timeline = data.timeline.map((item) => {
               if (item.kind === 'tool') {
                 return item.status === 'running' ? { ...item, status: 'interrupted' } : item;
               }
-              return {
-                ...item,
-                streaming: false,
-                tools: item.tools?.map((tool) =>
-                  tool.status === 'running' ? { ...tool, status: 'interrupted' } : tool,
-                ),
-              };
+              if (item.kind === 'message') {
+                return {
+                  ...item,
+                  streaming: false,
+                  tools: item.tools?.map((tool) =>
+                    tool.status === 'running' ? { ...tool, status: 'interrupted' } : tool,
+                  ),
+                };
+              }
+              return item;
             });
             taskDataRef.current[eventTaskId] = data;
             break;
           }
           messageApi.info('已停止生成');
-          patchState({ pendingPermission: undefined });
+          patchState({ pendingPermission: undefined, pendingQuestion: undefined });
           updateTimeline((items) =>
             items.map((item) => {
               if (item.kind === 'tool') {
                 return item.status === 'running' ? { ...item, status: 'interrupted' } : item;
               }
-              return {
-                ...item,
-                streaming: false,
-                tools: item.tools?.map((tool) =>
-                  tool.status === 'running' ? { ...tool, status: 'interrupted' } : tool,
-                ),
-              };
+              if (item.kind === 'message') {
+                return {
+                  ...item,
+                  streaming: false,
+                  tools: item.tools?.map((tool) =>
+                    tool.status === 'running' ? { ...tool, status: 'interrupted' } : tool,
+                  ),
+                };
+              }
+              return item;
             }),
           );
           break;
@@ -1334,12 +1547,24 @@ function AgentWorkspace({
         }
         case 'plan': {
           const eventTaskId = incoming.taskId ?? stateRef.current.activeTaskId;
+          const newDoc = upsertPlanDoc(incoming.plan, eventTaskId, incoming.markdown);
           if (eventTaskId && eventTaskId !== stateRef.current.activeTaskId) {
             const data = taskDataRef.current[eventTaskId] ?? emptyTaskSnapshot();
             data.planActive = incoming.active;
             data.plan = incoming.plan;
             data.planProgress = incoming.progress;
+            if (newDoc) data.timeline = [...data.timeline, planDocCardItem(newDoc)];
             taskDataRef.current[eventTaskId] = data;
+            // 初始化/刷新重连阶段（activeTaskId 尚未就绪）：plan 事件来自服务端
+            // 当前激活的任务（服务端在 ready 之前推送），直接同步到全局状态，
+            // 避免刷新后计划模式开关停留在 false（此后 task_list 不再触发切任务回放）。
+            if (!stateRef.current.activeTaskId) {
+              patchState({
+                planActive: incoming.active,
+                plan: incoming.plan,
+                planProgress: incoming.progress,
+              });
+            }
             break;
           }
           patchState({
@@ -1347,6 +1572,7 @@ function AgentWorkspace({
             plan: incoming.plan,
             planProgress: incoming.progress,
           });
+          if (newDoc) updateTimeline((items) => [...items, planDocCardItem(newDoc)]);
           break;
         }
         case 'context_usage': {
@@ -1397,6 +1623,7 @@ function AgentWorkspace({
       replaceTimeline,
       send,
       updateTimeline,
+      upsertPlanDoc,
       switchTaskView,
     ],
   );
@@ -1454,6 +1681,7 @@ function AgentWorkspace({
           connection: 'offline',
           busy: false,
           pendingPermission: undefined,
+          pendingQuestion: undefined,
           creatingProject: false,
           creatingTask: false,
         });
@@ -1657,6 +1885,18 @@ function AgentWorkspace({
     });
     patchState({ pendingPermission: undefined });
     setRememberPermission(false);
+  }
+
+  function answerQuestion(answer: UserAnswer) {
+    const pending = stateRef.current.pendingQuestion;
+    if (!pending) return;
+    send({
+      type: 'ask_user_response',
+      requestId: pending.requestId,
+      answer,
+      taskId: pending.taskId ?? stateRef.current.activeTaskId,
+    });
+    patchState({ pendingQuestion: undefined });
   }
 
   function startTaskRename(task: TaskSummary) {
@@ -2045,6 +2285,49 @@ function AgentWorkspace({
     (provider) => !providerSettings?.providers[provider].configured,
   );
 
+  /** 右侧侧边栏面板：第一个固定 Tab「概要」（运行详情），其余为可关闭的计划文档 Tab。 */
+  const inspectorPanel = (
+    <div className="pa-right-sidebar-panel">
+      <Tabs
+        type="editable-card"
+        hideAdd
+        size="small"
+        activeKey={activeInspectorTab}
+        onChange={setActiveInspectorTab}
+        onEdit={(key, action) => {
+          if (action === 'remove' && typeof key === 'string') removeInspectorTab(key);
+        }}
+        items={inspectorTabs.map((tab) => ({
+          key: tab.key,
+          closable: tab.kind !== 'overview',
+          label:
+            tab.kind === 'overview' ? (
+              '概要'
+            ) : (
+              <span className="pa-doc-tab-label" title={tab.title}>
+                <FileTextOutlined />
+                <span>{tab.title}</span>
+              </span>
+            ),
+          children:
+            tab.kind === 'overview' ? (
+              <Inspector
+                state={state}
+                activeProject={activeProject}
+                activeTask={activeTask}
+                rootPath={rootPath}
+                onApprovePlan={() =>
+                  send({ type: 'approve_plan', taskId: stateRef.current.activeTaskId })
+                }
+              />
+            ) : (
+              <PlanDocViewer doc={planDocs[tab.docId]} />
+            ),
+        }))}
+      />
+    </div>
+  );
+
   return (
     <Layout className="pa-shell">
       {desktop ? (
@@ -2070,7 +2353,7 @@ function AgentWorkspace({
             {!desktop && (
               <Button
                 type="text"
-                icon={<MenuOutlined />}
+                icon={<MenuUnfoldOutlined />}
                 aria-label="打开任务侧栏"
                 onClick={() => patchState({ sidebarOpen: true })}
               />
@@ -2131,11 +2414,11 @@ function AgentWorkspace({
                 aria-label="打开模型统计"
               />
             </Tooltip>
-            <Tooltip title="运行详情">
+            <Tooltip title="侧边栏">
               <Button
-                icon={<InfoCircleOutlined />}
-                onClick={() => patchState({ inspectorOpen: true })}
-                aria-label="运行详情"
+                icon={<MenuUnfoldOutlined />}
+                onClick={() => patchState({ inspectorOpen: !stateRef.current.inspectorOpen })}
+                aria-label="侧边栏"
               />
             </Tooltip>
           </Space>
@@ -2189,7 +2472,9 @@ function AgentWorkspace({
                   <TimelineEntry
                     key={item.id}
                     item={item}
+                    planDocs={planDocs}
                     onMessageElement={registerMessageElement}
+                    onOpenPlanDoc={openPlanDocTab}
                   />
                 ))
               )}
@@ -2219,6 +2504,13 @@ function AgentWorkspace({
                   '任务')
                 : undefined
             }
+            pendingQuestion={state.pendingQuestion}
+            pendingQuestionTitle={
+              state.pendingQuestion
+                ? (state.tasks.find((task) => task.id === state.pendingQuestion?.taskId)?.title ??
+                  '任务')
+                : undefined
+            }
             rememberPermission={rememberPermission}
             runtime={state.runtime}
             runtimeModelValue={runtimeModelValue}
@@ -2232,6 +2524,7 @@ function AgentWorkspace({
             onSubmit={submitPrompt}
             onStop={() => send({ type: 'interrupt', taskId: stateRef.current.activeTaskId })}
             onAnswerPermission={answerPermission}
+            onAnswerQuestion={answerQuestion}
             onRememberPermissionChange={setRememberPermission}
             onPlanModeChange={(enabled) => {
               const draft = pendingTaskDraftRef.current;
@@ -2285,29 +2578,29 @@ function AgentWorkspace({
         </Content>
       </Layout>
 
-      <Drawer
-        title={
-          <div>
-            <span className="pa-eyebrow">LIVE CONTEXT</span>
-            <div>运行详情</div>
-          </div>
-        }
-        placement="right"
-        size={380}
-        open={state.inspectorOpen}
-        onClose={() => patchState({ inspectorOpen: false })}
-        className="pa-inspector"
-      >
-        <Inspector
-          state={state}
-          activeProject={activeProject}
-          activeTask={activeTask}
-          rootPath={rootPath}
-          onApprovePlan={() =>
-            send({ type: 'approve_plan', taskId: stateRef.current.activeTaskId })
-          }
-        />
-      </Drawer>
+      {desktop ? (
+        <aside
+          className="pa-right-sidebar"
+          style={{ width: state.inspectorOpen ? inspectorWidth : 0 }}
+        >
+          {state.inspectorOpen && (
+            <>
+              <div className="pa-right-resizer" onPointerDown={startResize} />
+              {inspectorPanel}
+            </>
+          )}
+        </aside>
+      ) : (
+        <Drawer
+          placement="right"
+          width={Math.min(inspectorWidth, Math.round(window.innerWidth * 0.92))}
+          open={state.inspectorOpen}
+          onClose={() => patchState({ inspectorOpen: false })}
+          className="pa-inspector pa-inspector-drawer"
+        >
+          {inspectorPanel}
+        </Drawer>
+      )}
 
       <StatsModal open={statsModalOpen} onClose={() => setStatsModalOpen(false)} />
       <ModelDebugModal
@@ -3211,12 +3504,39 @@ function TurnNavigation({
 
 function TimelineEntry({
   item,
+  planDocs,
   onMessageElement,
+  onOpenPlanDoc,
 }: {
   item: TimelineItem;
+  planDocs?: Record<string, PlanDoc>;
   onMessageElement?: (id: string, element: HTMLElement | null) => void;
+  onOpenPlanDoc?: (docId: string) => void;
 }) {
   const { message: messageApi } = AntApp.useApp();
+
+  if (item.kind === 'plan-doc') {
+    const status = planDocs?.[item.docId]?.plan.status;
+    return (
+      <button
+        type="button"
+        className="pa-plan-doc-card"
+        title="查看计划文档"
+        onClick={() => onOpenPlanDoc?.(item.docId)}
+      >
+        <span className="pa-plan-doc-card-icon" aria-hidden="true">
+          <FileTextOutlined />
+        </span>
+        <span className="pa-plan-doc-card-copy">
+          <strong>{item.title}</strong>
+          <span className="pa-plan-doc-card-meta">
+            {status && <Tag color={PLAN_STATUS_TAG_COLORS[status] ?? 'default'}>{planStatusLabel(status)}</Tag>}
+            <time>{item.time}</time>
+          </span>
+        </span>
+      </button>
+    );
+  }
 
   if (item.kind === 'tool') {
     const status =
@@ -3412,6 +3732,10 @@ function ThinkingTool({ tool }: { tool: ToolTimelineItem }) {
     tool.name === 'bash' && typeof tool.arguments?.command === 'string'
       ? tool.arguments.command
       : undefined;
+  const askQuestion =
+    tool.name === 'ask_user' && typeof tool.arguments?.question === 'string'
+      ? tool.arguments.question
+      : undefined;
   return (
     <div className={`pa-thinking-tool ${tool.status}`}>
       <div className="pa-thinking-tool-head">
@@ -3426,6 +3750,7 @@ function ThinkingTool({ tool }: { tool: ToolTimelineItem }) {
         <span>{status}</span>
       </div>
       {bashCommand && <pre className="pa-tool-command">{bashCommand}</pre>}
+      {askQuestion && <pre className="pa-tool-command">{askQuestion}</pre>}
       <pre className="pa-tool-output">{tool.output}</pre>
     </div>
   );
@@ -3453,6 +3778,122 @@ function MarkdownContent({ text }: { text: string }) {
   );
 }
 
+function AskUserCard({
+  request,
+  taskTitle,
+  onAnswer,
+}: {
+  request: AskUserRequest;
+  taskTitle?: string;
+  onAnswer: (answer: UserAnswer) => void;
+}) {
+  const [selected, setSelected] = useState<string[]>([]);
+  const [customMode, setCustomMode] = useState(false);
+  const [customText, setCustomText] = useState('');
+  const canSubmit = customMode ? customText.trim().length > 0 : selected.length > 0;
+
+  const submit = () => {
+    if (customMode) {
+      onAnswer({ selections: [], custom: customText.trim() });
+      return;
+    }
+    onAnswer({ selections: selected });
+  };
+
+  return (
+    <div className="pa-permission-floating" role="alertdialog">
+      <div className="pa-permission-card">
+        <div className="pa-permission-header">
+          <Avatar size={30} icon={<QuestionCircleOutlined />} />
+          <div>
+            <strong>
+              {taskTitle ? `「${taskTitle}」需要你的选择` : 'Agent 需要你的选择'}
+            </strong>
+            <span>{request.multiSelect ? '可多选（勾选多个选项）' : '请选择一个答案'}</span>
+          </div>
+        </div>
+        <div className="pa-question-body">
+          <p className="pa-question-text">{request.question}</p>
+          {request.multiSelect ? (
+            <Checkbox.Group
+              className="pa-question-options"
+              value={customMode ? [] : selected}
+              onChange={(values) => {
+                setSelected(values as string[]);
+                setCustomMode(false);
+              }}
+            >
+              {request.options.map((option) => (
+                <Checkbox key={option} value={option}>
+                  {option}
+                </Checkbox>
+              ))}
+              {request.allowCustom && (
+                <Checkbox
+                  value="__custom__"
+                  checked={customMode}
+                  onChange={(event) => {
+                    setCustomMode(event.target.checked);
+                    if (event.target.checked) setSelected([]);
+                  }}
+                >
+                  ✎ 自定义答案（以上都不选）
+                </Checkbox>
+              )}
+            </Checkbox.Group>
+          ) : (
+            <Radio.Group
+              className="pa-question-options"
+              value={customMode ? '__custom__' : selected[0]}
+              onChange={(event) => {
+                const value = event.target.value as string;
+                if (value === '__custom__') {
+                  setCustomMode(true);
+                  setSelected([]);
+                } else {
+                  setCustomMode(false);
+                  setSelected([value]);
+                }
+              }}
+            >
+              {request.options.map((option) => (
+                <Radio key={option} value={option}>
+                  {option}
+                </Radio>
+              ))}
+              {request.allowCustom && (
+                <Radio value="__custom__">✎ 自定义答案（以上都不选）</Radio>
+              )}
+            </Radio.Group>
+          )}
+          {customMode && (
+            <Input.TextArea
+              autoFocus
+              rows={2}
+              value={customText}
+              placeholder="请输入自定义答案…"
+              onChange={(event) => setCustomText(event.target.value)}
+            />
+          )}
+        </div>
+        <div className="pa-permission-actions">
+          <Space size={8}>
+            <Button onClick={() => onAnswer({ selections: [] })}>跳过</Button>
+            <Button
+              type="primary"
+              icon={<CheckCircleFilled />}
+              disabled={!canSubmit}
+              onClick={submit}
+            >
+              提交答案
+            </Button>
+          </Space>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function Composer({
   rootPath,
   prompt,
@@ -3465,6 +3906,8 @@ function Composer({
   permissionMode,
   pendingPermission,
   pendingTitle,
+  pendingQuestion,
+  pendingQuestionTitle,
   rememberPermission,
   runtime,
   runtimeModelValue,
@@ -3477,6 +3920,7 @@ function Composer({
   onSubmit,
   onStop,
   onAnswerPermission,
+  onAnswerQuestion,
   onRememberPermissionChange,
   onPlanModeChange,
   onCompressContext,
@@ -3496,6 +3940,8 @@ function Composer({
   permissionMode: PermissionMode;
   pendingPermission?: PermissionRequest;
   pendingTitle?: string;
+  pendingQuestion?: AskUserRequest;
+  pendingQuestionTitle?: string;
   rememberPermission: boolean;
   runtime?: RuntimeInfo;
   runtimeModelValue?: string;
@@ -3508,6 +3954,7 @@ function Composer({
   onSubmit: (prompt?: string) => void;
   onStop: () => void;
   onAnswerPermission: (approved: boolean) => void;
+  onAnswerQuestion: (answer: UserAnswer) => void;
   onRememberPermissionChange: (remember: boolean) => void;
   onPlanModeChange: (enabled: boolean) => void;
   onCompressContext: () => void;
@@ -3585,6 +4032,14 @@ function Composer({
           </div>
         </div>
       )}
+      {pendingQuestion && (
+        <AskUserCard
+          key={pendingQuestion.requestId}
+          request={pendingQuestion}
+          taskTitle={pendingQuestionTitle}
+          onAnswer={onAnswerQuestion}
+        />
+      )}
       <div className="pa-composer">
         <Tooltip title={rootPath} placement="topLeft">
           <div className="pa-composer-path">
@@ -3595,7 +4050,7 @@ function Composer({
         <TextArea
           id="prompt-input"
           value={prompt}
-          disabled={!enabled || creatingTask}
+          disabled={!enabled || creatingTask || Boolean(pendingQuestion)}
           autoSize={{ minRows: 2, maxRows: 8 }}
           placeholder={placeholder}
           onChange={(event) => onPromptChange(event.target.value)}
@@ -4761,6 +5216,52 @@ function DebugJsonPanel({ title, value }: { title: string; value: unknown }) {
   );
 }
 
+function PlanDocViewer({ doc }: { doc?: PlanDoc }) {
+  const { message: messageApi } = AntApp.useApp();
+
+  if (!doc) {
+    return (
+      <div className="pa-plan-doc-viewer">
+        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="文档不存在或已失效" />
+      </div>
+    );
+  }
+
+  const copyMarkdown = (): void => {
+    void copyTextToClipboard(doc.markdown)
+      .then(() => messageApi.success('Markdown 已复制'))
+      .catch(() => messageApi.error('复制失败，请手动选择文本'));
+  };
+
+  return (
+    <div className="pa-plan-doc-viewer">
+      <div className="pa-plan-doc-header">
+        <div className="pa-plan-doc-header-copy">
+          <strong title={doc.title}>{doc.title}</strong>
+          <span>
+            <Tag color={PLAN_STATUS_TAG_COLORS[doc.plan.status] ?? 'default'}>
+              {planStatusLabel(doc.plan.status)}
+            </Tag>
+            <small>
+              更新于{' '}
+              {new Date(doc.updatedAt).toLocaleTimeString('zh-CN', {
+                hour: '2-digit',
+                minute: '2-digit',
+              })}
+            </small>
+          </span>
+        </div>
+        <Button size="small" icon={<CopyOutlined />} onClick={copyMarkdown}>
+          复制 Markdown
+        </Button>
+      </div>
+      <div className="pa-plan-doc-body">
+        <MarkdownContent text={doc.markdown} />
+      </div>
+    </div>
+  );
+}
+
 function Inspector({
   state,
   activeProject,
@@ -4818,9 +5319,6 @@ function Inspector({
                   </Avatar>
                   <div className="pa-inspector-list-copy">
                     <div className="pa-inspector-list-title">{step.title}</div>
-                    {step.description && (
-                      <div className="pa-inspector-list-description">{step.description}</div>
-                    )}
                   </div>
                 </div>
               ))}
@@ -4922,6 +5420,49 @@ function useExecutionTimer(busy: boolean): string | undefined {
   }, [busy]);
 
   return label;
+}
+
+function planDocCardItem(doc: PlanDoc): PlanDocTimelineItem {
+  return {
+    id: `plan-doc-${doc.id}`,
+    kind: 'plan-doc',
+    docId: doc.id,
+    title: doc.title,
+    time: currentTime(),
+  };
+}
+
+/**
+ * 把 planDocs 中 taskId 匹配（或未绑定任务）且尚未出现在 items 里的计划文档
+ * 卡片追加到时间线末尾（按 docId 去重）。history 重放与 /api/plans 恢复共用。
+ */
+function appendPlanDocCards(
+  items: TimelineItem[],
+  docs: Record<string, PlanDoc>,
+  taskId?: string,
+): TimelineItem[] {
+  const result = [...items];
+  const existing = new Set(
+    result.filter((item): item is PlanDocTimelineItem => item.kind === 'plan-doc').map((item) => item.docId),
+  );
+  for (const doc of Object.values(docs)) {
+    if (doc.taskId && doc.taskId !== taskId) continue;
+    if (existing.has(doc.id)) continue;
+    result.push(planDocCardItem(doc));
+  }
+  return result;
+}
+
+/** 把服务端落盘文档 JSON 中的 Plan 元信息时间字符串还原为 Date。 */
+function normalizeStoredPlanDoc(doc: PlanDoc): PlanDoc {
+  const plan = { ...doc.plan, metadata: { ...doc.plan.metadata } };
+  const createdAt = plan.metadata.createdAt as unknown;
+  if (typeof createdAt === 'string') plan.metadata.createdAt = new Date(createdAt);
+  const approvedAt = plan.metadata.approvedAt as unknown;
+  if (typeof approvedAt === 'string') plan.metadata.approvedAt = new Date(approvedAt);
+  const completedAt = plan.metadata.completedAt as unknown;
+  if (typeof completedAt === 'string') plan.metadata.completedAt = new Date(completedAt);
+  return { ...doc, plan };
 }
 
 function updateAssistantTurn(
@@ -5296,17 +5837,6 @@ function relativeTime(value: string): string {
 
 function lastPathSegment(value: string): string | undefined {
   return value.split(/[\\/]/).filter(Boolean).at(-1);
-}
-
-function planStatusLabel(status: string): string {
-  return (
-    {
-      draft: '待批准',
-      approved: '已批准',
-      in_progress: '执行中',
-      completed: '已完成',
-    }[status] ?? status
-  );
 }
 
 function formatExecutionDuration(milliseconds: number): string {

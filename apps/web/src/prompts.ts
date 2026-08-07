@@ -201,7 +201,8 @@ Do not spawn further sub-agents. Focus on using the allowed tools to complete yo
     content: `## Plan Mode (READ-ONLY)
 
 Inspect the project with read-only tools, create a detailed plan, and call submit_plan.
-Do not execute changes until the user approves the plan in the Web UI.`,
+Do not execute changes until the user approves the plan in the Web UI.
+When you need the user to make a decision, call ask_user with the question and up to 4 recommended options (use multi_select when multiple answers fit). The UI renders the options as a selectable list with a custom answer option.`,
     location: 'apps/web/src/runtime.ts:1422',
   },
   {
@@ -269,7 +270,7 @@ You are currently in PLAN MODE. In this mode:
 3. You MUST call submit_plan with the final structured plan before finishing your response.
 4. Do not execute the plan until the user approves it with /exit-plan.
 5. The plan should be comprehensive — break the task into logical phases with clear dependencies.
-6. Do NOT ask the user questions — just output the best plan you can.
+6. When you need the user to make a decision, call ask_user with the question and up to 4 recommended options (use multi_select when multiple answers fit). The UI renders the options as a selectable list (single/multi select) with a custom answer option, so the user can always type their own answer.
 
 When the user is satisfied, they will use /exit-plan to leave plan mode. Then you can execute the plan step by step using the available tools.`,
     location: 'apps/cli/src/index.ts:657（/plan 命令重复注册于 :1225）',

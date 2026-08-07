@@ -25,6 +25,8 @@ export interface ProjectTask {
   sessionId?: string;
   /** 任务级模型覆盖（'provider:model'），刷新/重启后恢复任务模型用。 */
   model?: string;
+  /** 任务级计划模式开关，刷新/重启后恢复计划模式用。 */
+  planMode?: boolean;
   permissionMode: ProjectTaskPermissionMode;
   status: 'active' | 'archived';
   createdAt: Date;
@@ -75,6 +77,7 @@ export class ProjectManager {
           title: task.title,
           sessionId: task.sessionId,
           model: task.model || undefined,
+          planMode: task.planMode === true || undefined,
           permissionMode: normalizePermissionMode(task.permissionMode),
           status: task.status === 'archived' ? 'archived' : 'active',
           createdAt: new Date(task.createdAt),
@@ -178,6 +181,7 @@ export class ProjectManager {
     title: string;
     sessionId?: string;
     permissionMode?: ProjectTaskPermissionMode;
+    planMode?: boolean;
   }): Promise<ProjectTask> {
     const project = this.projects.get(input.projectId);
     if (!project) throw new Error(`项目不存在: ${input.projectId}`);
@@ -187,6 +191,7 @@ export class ProjectManager {
       projectId: project.id,
       title: validateText(input.title, '任务标题', 200),
       sessionId: input.sessionId,
+      planMode: input.planMode === true || undefined,
       permissionMode: normalizePermissionMode(input.permissionMode ?? 'ask'),
       status: 'active',
       createdAt: now,
@@ -239,6 +244,13 @@ export class ProjectManager {
   ): Promise<ProjectTask> {
     const task = this.requireTask(taskId);
     task.permissionMode = normalizePermissionMode(permissionMode);
+    await this.persist();
+    return cloneTask(task);
+  }
+
+  async setTaskPlanMode(taskId: string, planMode: boolean): Promise<ProjectTask> {
+    const task = this.requireTask(taskId);
+    task.planMode = planMode === true || undefined;
     await this.persist();
     return cloneTask(task);
   }

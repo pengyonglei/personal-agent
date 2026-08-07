@@ -15,6 +15,7 @@ function createInitialState(): AppState {
     turnCount: 0,
     statusText: '',
     plan: null,
+    pendingQuestion: null,
   };
 }
 
@@ -130,6 +131,12 @@ const appReducer: Reducer<AppState, AppAction> = (state, action) => {
 
     case 'SET_PLAN':
       return { ...state, plan: action.plan };
+
+    case 'SET_QUESTION':
+      return { ...state, pendingQuestion: action.question };
+
+    case 'CLEAR_QUESTION':
+      return { ...state, pendingQuestion: null };
 
     case 'TOGGLE_EXPAND': {
       const msgs = state.messages.map((m) => {

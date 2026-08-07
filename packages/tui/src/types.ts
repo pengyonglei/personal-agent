@@ -2,7 +2,9 @@
 // Shared types for the TUI layer
 // ---------------------------------------------------------------------------
 
-import type { ToolResult } from '@personal-agent/shared';
+import type { ToolResult, UserAnswer } from '@personal-agent/shared';
+
+export type { UserAnswer };
 
 /** A single chat message in the TUI */
 export interface ChatMessage {
@@ -12,6 +14,15 @@ export interface ChatMessage {
   timestamp: Date;
   /** Tool calls if this is an assistant message */
   toolCalls?: DisplayToolCall[];
+}
+
+/** A question awaiting an interactive answer in the TUI */
+export interface DisplayQuestion {
+  id: string;
+  question: string;
+  options: string[];
+  multiSelect: boolean;
+  allowCustom: boolean;
 }
 
 /** Display state for a tool call */
@@ -48,6 +59,8 @@ export interface AppState {
   turnCount: number;
   statusText: string;
   plan: DisplayPlan | null;
+  /** Question the user is currently answering (renders the QuestionCard). */
+  pendingQuestion: DisplayQuestion | null;
 }
 
 /** Actions that can be dispatched */
@@ -63,4 +76,6 @@ export type AppAction =
   | { type: 'SET_MODEL_INFO'; model: string; provider: string }
   | { type: 'ADD_SYSTEM_MESSAGE'; text: string }
   | { type: 'SET_PLAN'; plan: DisplayPlan | null }
+  | { type: 'SET_QUESTION'; question: DisplayQuestion }
+  | { type: 'CLEAR_QUESTION' }
   | { type: 'TOGGLE_EXPAND'; toolId: string };

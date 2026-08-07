@@ -2433,3 +2433,347 @@ select {
 .pa-task-running {
   flex-shrink: 0;
 }
+
+/* ---------------------------------------------------------------------------
+ * ask_user question card (rendered above the composer)
+ * ------------------------------------------------------------------------- */
+.pa-question-body {
+  display: flex;
+  min-height: 0;
+  padding: 0 14px 6px;
+  overflow: auto;
+  flex-direction: column;
+  gap: 10px;
+}
+.pa-question-text {
+  margin: 0;
+  color: var(--pa-text);
+  font-size: 13px;
+  white-space: pre-wrap;
+  line-height: 1.5;
+}
+.pa-question-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.pa-question-options .ant-checkbox-wrapper,
+.pa-question-options .ant-radio-wrapper {
+  align-items: flex-start;
+  white-space: normal;
+}
+
+/* ==========================================================================
+   右侧侧边栏（可拖拽调宽 + Tab 面板）
+   ========================================================================== */
+
+.pa-right-sidebar {
+  position: relative;
+  display: flex;
+  height: 100%;
+  min-width: 0;
+  overflow: hidden;
+  border-left: 1px solid var(--pa-border);
+  background: var(--pa-panel-glass);
+  backdrop-filter: blur(18px);
+  flex: 0 0 auto;
+}
+
+.pa-right-resizer {
+  position: absolute;
+  z-index: 3;
+  top: 0;
+  bottom: 0;
+  left: -3px;
+  width: 6px;
+  cursor: col-resize;
+  touch-action: none;
+  border-radius: 3px;
+  transition: background-color 0.15s ease;
+}
+
+.pa-right-resizer:hover,
+.pa-right-resizer:active {
+  background: var(--pa-accent-soft);
+}
+
+.pa-right-sidebar-panel {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.pa-right-sidebar-panel .ant-tabs {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.pa-right-sidebar-panel .ant-tabs-nav {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 8px 8px 0;
+}
+
+.pa-right-sidebar-panel .ant-tabs-nav::before {
+  border-bottom: 0;
+}
+
+/* antd v6 内容区结构：body-holder → body → content（即 tabpane 本身）。
+   固定三层高度链，超出内容在最后一层产生垂直滚动条。 */
+.pa-right-sidebar-panel .ant-tabs-body-holder {
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.pa-right-sidebar-panel .ant-tabs-body {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.pa-right-sidebar-panel .ant-tabs-content {
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 10px 12px 16px;
+}
+
+.pa-right-sidebar-panel .ant-tabs-tab {
+  max-width: 200px;
+}
+
+/* 让标签区收缩（min-width:0 + flex:1），长标题省略号截断时
+   删除按钮（×）始终留在 Tab 卡片内部，不被挤出。 */
+.pa-right-sidebar-panel .ant-tabs-tab .ant-tabs-tab-btn {
+  min-width: 0;
+  flex: 1;
+}
+
+.pa-doc-tab-label {
+  display: inline-flex;
+  width: 100%;
+  align-items: center;
+  gap: 5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pa-doc-tab-label > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 文档图标略大于正文字号，视觉上与标题匹配 */
+.pa-doc-tab-label .anticon {
+  flex: none;
+  font-size: 15px;
+}
+
+/* 计划文档卡片（对话时间线） */
+.pa-plan-doc-card {
+  display: flex;
+  width: 100%;
+  max-width: 620px;
+  margin: 10px 0 12px;
+  padding: 12px 14px;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid var(--pa-border);
+  border-radius: 10px;
+  color: var(--pa-text);
+  background: var(--pa-panel-soft);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    background-color 0.15s ease,
+    transform 0.15s ease;
+}
+
+.pa-plan-doc-card:hover {
+  border-color: var(--pa-accent);
+  background: var(--pa-accent-soft);
+  transform: translateY(-1px);
+}
+
+.pa-plan-doc-card-icon {
+  display: inline-flex;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  color: var(--pa-accent);
+  background: var(--pa-accent-soft);
+  font-size: 16px;
+}
+
+.pa-plan-doc-card-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.pa-plan-doc-card-copy strong {
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pa-plan-doc-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pa-plan-doc-card-meta time {
+  color: var(--pa-faint);
+  font-size: 10px;
+}
+
+.pa-plan-doc-card-meta .ant-tag {
+  margin: 0;
+}
+
+/* 计划文档查看器（侧边栏 Tab） */
+.pa-plan-doc-viewer {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.pa-plan-doc-viewer .ant-empty {
+  margin: auto;
+}
+
+.pa-plan-doc-header {
+  display: flex;
+  padding: 2px 0 12px;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom: 1px solid var(--pa-border);
+}
+
+.pa-plan-doc-header-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.pa-plan-doc-header-copy > strong {
+  overflow: hidden;
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pa-plan-doc-header-copy > span {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pa-plan-doc-header-copy .ant-tag {
+  margin: 0;
+}
+
+.pa-plan-doc-header-copy small {
+  color: var(--pa-faint);
+  font-size: 10px;
+}
+
+.pa-plan-doc-body {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px 2px 20px;
+  color: var(--pa-text);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.pa-plan-doc-body h1,
+.pa-plan-doc-body h2,
+.pa-plan-doc-body h3 {
+  line-height: 1.4;
+}
+
+.pa-plan-doc-body h1 {
+  font-size: 18px;
+}
+
+.pa-plan-doc-body h2 {
+  margin-top: 18px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--pa-border);
+  font-size: 15px;
+}
+
+.pa-plan-doc-body h3 {
+  font-size: 13px;
+}
+
+.pa-plan-doc-body ol,
+.pa-plan-doc-body ul {
+  padding-left: 20px;
+}
+
+.pa-plan-doc-body code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--pa-panel-soft);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.pa-plan-doc-body pre {
+  overflow-x: auto;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--pa-panel-soft);
+}
+
+.pa-plan-doc-body pre code {
+  padding: 0;
+  background: transparent;
+}
+
+.pa-inspector-drawer {
+  max-width: 92vw;
+}
+
+.pa-inspector-drawer .ant-drawer-body {
+  padding: 0;
+  overflow: hidden;
+  background: var(--pa-panel-soft);
+}
+
+.pa-inspector-drawer .pa-right-sidebar-panel {
+  height: 100%;
+}
+
+@media (max-width: 768px) {
+  .pa-plan-doc-card {
+    width: calc(100% - 40px);
+    margin-left: 40px;
+    max-width: none;
+  }
+}

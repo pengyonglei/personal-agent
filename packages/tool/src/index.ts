@@ -33,5 +33,11 @@ export {
   type ResolvedShell,
 } from './shell-resolver';
 export { GlobTool, GrepTool } from './tools/search';
-export { WebFetchTool, WebSearchTool, TodoWriteTool, AskUserTool } from './tools/web';
+export {
+  WebFetchTool,
+  WebSearchTool,
+  TodoWriteTool,
+  AskUserTool,
+  ASK_USER_MAX_OPTIONS,
+} from './tools/web';
 export { registerBuiltinTools } from './register';
