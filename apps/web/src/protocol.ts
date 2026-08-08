@@ -198,6 +198,14 @@ export type ServerMessage =
     }
   | { type: 'turn_end'; turnNumber: number; usage: UsageInfo | null; taskId?: string }
   | { type: 'done'; totalTurns: number; totalUsage: UsageInfo; taskId?: string }
+  | {
+      type: 'run_changes';
+      /** 本批次落盘 id（服务端生成，客户端据此做确定性 change id，刷新后可恢复）。 */
+      id?: string;
+      /** 本次任务执行（一次用户请求）中修改的文件及前后内容。 */
+      files: Array<{ path: string; oldContent: string; newContent: string }>;
+      taskId?: string;
+    }
   | { type: 'interrupted'; taskId?: string }
   | { type: 'permission_mode'; mode: PermissionMode; taskId?: string }
   | {
@@ -213,6 +221,20 @@ export type ServerMessage =
   | { type: 'notice'; message: string; taskId?: string }
   | { type: 'error'; message: string; code?: string; taskId?: string }
   | { type: 'pong' };
+
+/** 一次 run_changes 落盘批次（GET /api/file-changes 的返回项）。 */
+export interface StoredFileChangeBatch {
+  id: string;
+  taskId?: string;
+  time: string;
+  files: Array<{
+    path: string;
+    oldContent: string;
+    newContent: string;
+    /** 内容超过落盘上限行数时截断并标记（diff 可能不完整）。 */
+    truncated?: boolean;
+  }>;
+}
 
 export function parseClientMessage(raw: string): ClientMessage {
   let value: unknown;

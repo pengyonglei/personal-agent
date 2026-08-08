@@ -43,6 +43,7 @@ import type {
 } from '@personal-agent/shared';
 import { createLogger, ProviderFeature } from '@personal-agent/shared';
 import { existsSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import {
@@ -64,6 +65,7 @@ import type {
 } from './protocol';
 import { planToMarkdown, type PlanDoc } from './plan-doc';
 import { PlanStore } from './plan-store';
+import { FileChangeStore } from './file-change-store';
 
 const log = createLogger('web-runtime');
 /** Reserved output tokens used by TokenBudget (must stay in sync with its default). */
@@ -152,6 +154,8 @@ export class WebAgentRuntime {
   readonly statsStore: UsageStore | null;
   /** 计划文档落盘存储（~/.personal-agent/plans）。 */
   readonly planStore: PlanStore;
+  /** 修改文件记录批次落盘存储（~/.personal-agent/file-changes）。 */
+  readonly fileChangeStore: FileChangeStore;
 
   private constructor(
     config: AppConfig,
@@ -161,6 +165,7 @@ export class WebAgentRuntime {
     configPath?: string,
     sessionsDirectory?: string,
     plansDirectory?: string,
+    fileChangesDirectory?: string,
   ) {
     this.config = config;
     this.workingDirectory = workingDirectory;
@@ -169,6 +174,9 @@ export class WebAgentRuntime {
     this.sessionsDirectory = sessionsDirectory;
     this.planStore = new PlanStore(
       plansDirectory ?? resolve(homedir(), '.personal-agent', 'plans'),
+    );
+    this.fileChangeStore = new FileChangeStore(
+      fileChangesDirectory ?? resolve(homedir(), '.personal-agent', 'file-changes'),
     );
     this.projects = new ProjectManager(projectStoragePath);
 
@@ -212,6 +220,8 @@ export class WebAgentRuntime {
       statsDbPath?: string;
       /** 计划文档落盘目录（默认 ~/.personal-agent/plans）。 */
       plansDirectory?: string;
+      /** 修改文件记录批次落盘目录（默认 ~/.personal-agent/file-changes，测试用）。 */
+      fileChangesDirectory?: string;
     } = {},
   ): Promise<WebAgentRuntime> {
     const workingDirectory =
@@ -230,6 +240,7 @@ export class WebAgentRuntime {
       options.configPath,
       options.sessionsDirectory,
       options.plansDirectory,
+      options.fileChangesDirectory,
     );
     await runtime.initialize();
     return runtime;
@@ -238,6 +249,16 @@ export class WebAgentRuntime {
   /** 列出全部已落盘的计划文档（按 updatedAt 降序），供路由与测试使用。 */
   async listPlanDocs(): Promise<PlanDoc[]> {
     return this.planStore.list();
+  }
+
+  /** 列出全部已落盘的修改文件记录批次（按 time 降序），供路由与客户端恢复使用。 */
+  async listFileChangeBatches() {
+    return this.fileChangeStore.list();
+  }
+
+  /** 删除一个已落盘的修改文件记录批次，返回是否删除成功。 */
+  async deleteFileChangeBatch(batchId: string): Promise<boolean> {
+    return this.fileChangeStore.delete(batchId);
   }
 
   /**
@@ -953,6 +974,8 @@ export class WebAgentRuntime {
     input: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<ToolResult> {
+    // 文件修改捕获：执行前记录目标文件的旧内容（write_file / edit_file）
+    const captured = await this.captureFileBefore(name, input);
     await this.pluginLoader.dispatchHook('on_tool_execute', {
       sessionId: conversation.sessionId,
       toolName: name,
@@ -971,7 +994,27 @@ export class WebAgentRuntime {
       input,
       result,
     });
+    // 执行成功后读取新内容，与旧内容不同则记录到本次任务执行的修改清单
+    if (result.success && captured) {
+      const after = await readTextFileIfExists(captured.path);
+      if (after !== null && after !== captured.content) {
+        conversation.recordFileChange(captured.path, captured.content, after);
+      }
+    }
     return result;
+  }
+
+  /** write_file / edit_file 执行前读取目标文件内容（不存在视为空文件）。 */
+  private async captureFileBefore(
+    name: string,
+    input: Record<string, unknown>,
+  ): Promise<{ path: string; content: string } | null> {
+    if (name !== 'edit_file' && name !== 'write_file') return null;
+    const rawPath = input?.file_path;
+    if (typeof rawPath !== 'string' || !rawPath.trim()) return null;
+    const content = await readTextFileIfExists(rawPath.trim());
+    if (content === null) return null;
+    return { path: rawPath.trim(), content };
   }
 
   async requestToolPermission(
@@ -1250,6 +1293,12 @@ export class WebConversation {
   private emit: RuntimeEmitter;
   private busy = false;
   private closed = false;
+  /** 本次任务执行中修改的文件（执行结束后随 run_changes 消息推送给前端）。 */
+  private pendingFileChanges: Array<{
+    path: string;
+    oldContent: string;
+    newContent: string;
+  }> = [];
   private rememberedPermissions = new Map<string, boolean>();
   private permissionMode: PermissionMode = 'ask';
   private statsRecorder: ModelRequestRecorder | null = null;
@@ -1347,9 +1396,55 @@ export class WebConversation {
       } finally {
         this.busy = false;
         this.emit({ type: 'busy', busy: false });
+        this.emitRunChanges();
         this.publishPlan();
       }
     }
+  }
+
+  /** 记录本次任务执行中修改的文件（执行结束后随 run_changes 消息推送）。 */
+  recordFileChange(path: string, oldContent: string, newContent: string): void {
+    this.pendingFileChanges.push({ path, oldContent, newContent });
+  }
+
+  /** 把本次执行收集到的文件修改推送给前端（一次用户请求的修改清单）。
+   *  同一文件多次修改只保留一条记录（最初的旧内容 → 最终的新内容），避免重复文件名。
+   *  生成批次 id 并异步落盘（失败不阻断推送），刷新/重连后客户端可恢复。 */
+  private emitRunChanges(): void {
+    if (this.pendingFileChanges.length === 0) return;
+    const deduped = new Map<string, { oldContent: string; newContent: string }>();
+    for (const change of this.pendingFileChanges) {
+      const existing = deduped.get(change.path);
+      if (existing) {
+        // 同文件再次修改：保留首次的旧内容（任务前的状态）与最新的新内容（任务后的状态）
+        existing.newContent = change.newContent;
+      } else {
+        deduped.set(change.path, { oldContent: change.oldContent, newContent: change.newContent });
+      }
+    }
+    const files = [...deduped].map(([path, change]) => ({ path, ...change }));
+    const batchId = `fc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    this.emit({
+      type: 'run_changes',
+      id: batchId,
+      files,
+      taskId: this.taskId,
+    });
+    this.pendingFileChanges = [];
+    // 异步落盘：失败仅丢失该批次持久化，不影响已推送的实时内容
+    const conversation = this;
+    void Promise.resolve()
+      .then(() =>
+        conversation.runtime.fileChangeStore.save({
+          id: batchId,
+          taskId: conversation.taskId,
+          time: new Date().toISOString(),
+          files,
+        }),
+      )
+      .catch(() => {
+        // 落盘失败静默（磁盘满/权限等），不干扰会话流程
+      });
   }
 
   interrupt(): void {
@@ -1982,6 +2077,20 @@ function createRuntimeStatsStore(statsConfig: {
 
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** 文件修改捕获的最大内容长度（超出跳过捕获，避免大文件撑爆消息）。 */
+const MAX_CAPTURED_FILE_CHARS = 200_000;
+
+/** 读取文本文件内容：不存在 → ''；读取失败（二进制/权限等）→ null（跳过捕获）。 */
+async function readTextFileIfExists(filePath: string): Promise<string | null> {
+  try {
+    const content = await readFile(filePath, 'utf-8');
+    return content.length > MAX_CAPTURED_FILE_CHARS ? null : content;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return '';
+    return null;
+  }
 }
 
 function isSameWorkspace(left: string, right: string): boolean {

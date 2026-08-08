@@ -41,26 +41,36 @@ import type { TextAreaRef } from 'antd/es/input/TextArea';
 import {
   AppstoreOutlined,
   BarChartOutlined,
+  BoldOutlined,
   BugOutlined,
   BulbOutlined,
   CaretRightOutlined,
   CheckCircleFilled,
   CloseOutlined,
   CodeOutlined,
+  CommentOutlined,
   CompressOutlined,
   CopyOutlined,
   DashboardOutlined,
   DeleteOutlined,
+  DiffOutlined,
+  DownOutlined,
   EditOutlined,
   ExperimentOutlined,
+  EyeOutlined,
   FileTextOutlined,
+  FontSizeOutlined,
   FolderAddOutlined,
   FolderOpenOutlined,
   InfoCircleOutlined,
+  ItalicOutlined,
+  LinkOutlined,
   MenuOutlined,
   MenuUnfoldOutlined,
+  MinusOutlined,
   MoonOutlined,
   MoreOutlined,
+  OrderedListOutlined,
   PlusOutlined,
   QuestionCircleOutlined,
   ReloadOutlined,
@@ -69,7 +79,9 @@ import {
   SettingOutlined,
   StopOutlined,
   SunOutlined,
+  TableOutlined,
   ToolOutlined,
+  UnorderedListOutlined,
   UserOutlined,
 } from '@ant-design/icons';
 import {
@@ -92,11 +104,13 @@ import type {
   ProjectSummary,
   RuntimeInfo,
   ServerMessage,
+  StoredFileChangeBatch,
   TaskSummary,
 } from '../../src/protocol';
-import { assistantTurnId } from './timeline';
+import { assistantResponseId } from './timeline';
 import type { PlanDoc } from './plan-doc';
 import { planStatusLabel, planToMarkdown } from './plan-doc';
+import { MAX_DIFF_LINES, collapseDiffContext, computeLineDiff, toUnifiedDiffText } from './file-diff';
 
 const { Header, Content, Sider } = Layout;
 const { Text, Title } = Typography;
@@ -147,6 +161,16 @@ interface MessageTimelineItem {
   turnNumber?: number;
   thinking?: string;
   tools?: ToolTimelineItem[];
+  /** 一轮回复中每次 LLM 调用（turn）的分组内容：思考/文本/工具按调用分隔。 */
+  turns?: AssistantTurn[];
+}
+
+/** 一次 LLM 调用（turn）的内容分组。 */
+interface AssistantTurn {
+  turnNumber: number;
+  thinking: string;
+  text: string;
+  tools: ToolTimelineItem[];
 }
 
 interface ToolTimelineItem {
@@ -161,7 +185,7 @@ interface ToolTimelineItem {
   restored?: boolean;
 }
 
-type TimelineItem = MessageTimelineItem | ToolTimelineItem | PlanDocTimelineItem;
+type TimelineItem = MessageTimelineItem | ToolTimelineItem | PlanDocTimelineItem | RunChangesTimelineItem;
 
 /** 计划文档卡片：对话时间线中可点击打开侧边栏文档 Tab 的条目。 */
 interface PlanDocTimelineItem {
@@ -172,10 +196,31 @@ interface PlanDocTimelineItem {
   time: string;
 }
 
-/** 右侧侧边栏的 Tab：第一个「概要」固定不可删除，其余为可关闭的计划文档 Tab。 */
+/** 运行修改卡片：一次任务执行中修改的文件列表（点击文件打开侧边栏 diff Tab）。 */
+interface RunChangesTimelineItem {
+  id: string;
+  kind: 'run-changes';
+  changeIds: string[];
+  time: string;
+}
+
+/** 一次文件修改（执行前后内容，用于展示 git 风格 diff）。 */
+interface FileChange {
+  id: string;
+  taskId?: string;
+  path: string;
+  oldContent: string;
+  newContent: string;
+  time: string;
+  /** 服务端落盘时内容超过上限被截断（diff 可能不完整）。 */
+  truncated?: boolean;
+}
+
+/** 右侧侧边栏的 Tab：第一个「概要」固定不可删除，其余为可关闭的计划文档/文件差异 Tab。 */
 type InspectorTab =
   | { key: string; title: string; kind: 'overview' }
-  | { key: string; title: string; kind: 'plan-doc'; docId: string };
+  | { key: string; title: string; kind: 'plan-doc'; docId: string }
+  | { key: string; title: string; kind: 'file-diff'; changeId: string };
 
 /** 计划文档卡片/头部 Tag 的颜色映射（按计划状态）。 */
 const PLAN_STATUS_TAG_COLORS: Record<string, string> = {
@@ -492,9 +537,10 @@ export default function PersonalAgentApp() {
       },
       components: {
         Layout: {
-          headerBg: colorMode === 'dark' ? '#141814' : '#fbfcf8',
-          siderBg: colorMode === 'dark' ? '#111511' : '#ffffff',
-          bodyBg: colorMode === 'dark' ? '#0d100d' : '#f5f7f1',
+          // 顶部栏与中间对话区保持一致（白色面板），侧边栏/内容区使用统一灰色背景变量
+          headerBg: 'var(--pa-panel)',
+          siderBg: 'var(--pa-bg-gray)',
+          bodyBg: 'var(--pa-bg-gray)',
         },
         Button: {
           controlHeight: 34,
@@ -584,6 +630,12 @@ function AgentWorkspace({
   useEffect(() => {
     planDocsRef.current = planDocs;
   }, [planDocs]);
+  // 文件修改记录（全局 map：本次会话中任务执行修改的文件，供 diff Tab 查看）
+  const [fileChanges, setFileChanges] = useState<Record<string, FileChange>>({});
+  const fileChangesRef = useRef(fileChanges);
+  useEffect(() => {
+    fileChangesRef.current = fileChanges;
+  }, [fileChanges]);
 
   /** 从服务端拉取 starter-prompts 自定义内容并更新首页示例（保存后也会被调用） */
   const reloadStarterPrompts = useCallback(async () => {
@@ -836,6 +888,31 @@ function AgentWorkspace({
     [patchState],
   );
 
+  /** 打开（或激活）侧边栏中的文件差异 Tab，并展开侧边栏。 */
+  const openFileDiffTab = useCallback(
+    (changeId: string) => {
+      const change = fileChangesRef.current[changeId];
+      if (!change) return;
+      const existing = inspectorTabsRef.current.find(
+        (tab) => tab.kind === 'file-diff' && tab.changeId === changeId,
+      );
+      if (existing) {
+        setActiveInspectorTab(existing.key);
+      } else {
+        const tab: InspectorTab = {
+          key: `diff-${changeId}`,
+          title: lastPathSegment(change.path) ?? change.path,
+          kind: 'file-diff',
+          changeId,
+        };
+        setInspectorTabs((current) => [...current, tab]);
+        setActiveInspectorTab(tab.key);
+      }
+      patchState({ inspectorOpen: true });
+    },
+    [patchState],
+  );
+
   /** 关闭侧边栏 Tab（「概要」固定不可删除）；关闭激活 Tab 后切回「概要」。 */
   const removeInspectorTab = useCallback((key: string) => {
     setInspectorTabs((current) => current.filter((tab) => tab.key !== key));
@@ -888,6 +965,44 @@ function AgentWorkspace({
   useEffect(() => {
     void seedPlanDocs();
   }, [seedPlanDocs]);
+
+  /** 挂载时从服务端拉取已落盘的修改文件记录批次，填入 fileChanges map 并补齐时间线卡片。 */
+  const seedFileChanges = useCallback(async () => {
+    try {
+      const response = await apiFetch('/api/file-changes');
+      if (!response.ok) return;
+      const payload = (await response.json()) as { batches: StoredFileChangeBatch[] };
+      const changes: Record<string, FileChange> = {};
+      for (const batch of payload.batches) {
+        batch.files.forEach((file, index) => {
+          changes[`file-change-${batch.id}-${index}`] = {
+            id: `file-change-${batch.id}-${index}`,
+            taskId: batch.taskId,
+            path: file.path,
+            oldContent: file.oldContent,
+            newContent: file.newContent,
+            time: batch.time,
+            truncated: file.truncated,
+          };
+        });
+      }
+      fileChangesRef.current = changes;
+      setFileChanges(changes);
+      // 接口可能晚于 history 到达：主动补齐当前时间线与各任务快照缺失的卡片
+      updateTimeline((items) =>
+        appendRunChangesCards(items, payload.batches, stateRef.current.activeTaskId),
+      );
+      for (const [taskId, data] of Object.entries(taskDataRef.current)) {
+        data.timeline = appendRunChangesCards(data.timeline, payload.batches, taskId);
+      }
+    } catch {
+      // 服务端不可用时保持当前内存态（不阻断页面）
+    }
+  }, [updateTimeline]);
+
+  useEffect(() => {
+    void seedFileChanges();
+  }, [seedFileChanges]);
 
   const userTurns = useMemo(
     () =>
@@ -1007,6 +1122,10 @@ function AgentWorkspace({
           setSelectedModelCallId(undefined);
           let restored: TimelineItem[] = [];
           const restoredToolOwners = new Map<string, number>();
+          // 当前组（一次用户请求）：所有 assistant 消息合并为一条消息，
+          // 每个 assistant 消息（一次 LLM 调用）作为独立的 turn 分组。
+          let groupAssistantIndex = -1;
+          let groupTurnSeq = 0;
           for (const historyMessage of incoming.messages) {
             if (historyMessage.role === 'system') continue;
             const text = extractMessageText(historyMessage);
@@ -1019,36 +1138,58 @@ function AgentWorkspace({
                 text,
                 time: currentTime(),
               });
+              groupAssistantIndex = -1;
+              groupTurnSeq = 0;
             } else if (historyMessage.role === 'assistant') {
               const tools = extractAssistantTools(historyMessage);
               if (!text && !thinking && tools.length === 0) continue;
-              const itemIndex = restored.length;
-              restored.push({
-                id: nextId('history-assistant'),
-                kind: 'message',
-                role: 'assistant',
-                text,
-                thinking,
-                tools,
-                time: currentTime(),
-              });
-              for (const tool of tools) restoredToolOwners.set(tool.toolCallId, itemIndex);
+              if (groupAssistantIndex === -1) {
+                // 新一轮的第一个助手消息：创建合并消息并放入第一个 turn
+                const itemIndex = restored.length;
+                restored.push({
+                  id: nextId('history-assistant'),
+                  kind: 'message',
+                  role: 'assistant',
+                  text: '',
+                  turns: [
+                    { turnNumber: (groupTurnSeq += 1), thinking, text, tools },
+                  ],
+                  time: currentTime(),
+                });
+                groupAssistantIndex = itemIndex;
+              } else {
+                // 同一轮内的后续调用：追加为新的 turn 分组
+                const current = restored[groupAssistantIndex];
+                if (current.kind === 'message') {
+                  restored[groupAssistantIndex] = {
+                    ...current,
+                    turns: [
+                      ...(current.turns ?? []),
+                      { turnNumber: (groupTurnSeq += 1), thinking, text, tools },
+                    ],
+                  };
+                }
+              }
+              for (const tool of tools) {
+                restoredToolOwners.set(tool.toolCallId, groupAssistantIndex);
+              }
             } else if (historyMessage.role === 'tool') {
               const toolCallId = historyMessage.toolCallId ?? nextId('tool-call');
               const ownerIndex = restoredToolOwners.get(toolCallId);
               const owner = ownerIndex === undefined ? undefined : restored[ownerIndex];
               if (ownerIndex !== undefined && owner?.kind === 'message') {
+                const status = getRestoredToolStatus(text);
+                const output = text || '(无输出)';
                 restored[ownerIndex] = {
                   ...owner,
-                  tools: (owner.tools ?? []).map((tool) =>
-                    tool.toolCallId === toolCallId
-                      ? {
-                          ...tool,
-                          status: getRestoredToolStatus(text),
-                          output: text || '(无输出)',
-                        }
-                      : tool,
-                  ),
+                  turns: (owner.turns ?? []).map((turn) => ({
+                    ...turn,
+                    tools: turn.tools.map((tool) =>
+                      tool.toolCallId === toolCallId
+                        ? { ...tool, status, output }
+                        : tool,
+                    ),
+                  })),
                 };
               } else {
                 restored.push({
@@ -1239,10 +1380,9 @@ function AgentWorkspace({
               data.timeline,
               data.responseSeq,
               incoming.turnNumber,
-              (item) => ({
-                ...item,
-                thinking: `${item.thinking ?? ''}${incoming.thinking}`,
-                streaming: true,
+              (turn) => ({
+                ...turn,
+                thinking: `${turn.thinking}${incoming.thinking}`,
               }),
             );
             taskDataRef.current[eventTaskId] = data;
@@ -1253,10 +1393,9 @@ function AgentWorkspace({
               items,
               activeResponseSequenceRef.current,
               incoming.turnNumber,
-              (item) => ({
-                ...item,
-                thinking: `${item.thinking ?? ''}${incoming.thinking}`,
-                streaming: true,
+              (turn) => ({
+                ...turn,
+                thinking: `${turn.thinking}${incoming.thinking}`,
               }),
             ),
           );
@@ -1270,10 +1409,9 @@ function AgentWorkspace({
               data.timeline,
               data.responseSeq,
               incoming.turnNumber,
-              (item) => ({
-                ...item,
-                text: `${item.text}${incoming.text}`,
-                streaming: true,
+              (turn) => ({
+                ...turn,
+                text: `${turn.text}${incoming.text}`,
               }),
             );
             taskDataRef.current[eventTaskId] = data;
@@ -1284,10 +1422,9 @@ function AgentWorkspace({
               items,
               activeResponseSequenceRef.current,
               incoming.turnNumber,
-              (item) => ({
-                ...item,
-                text: `${item.text}${incoming.text}`,
-                streaming: true,
+              (turn) => ({
+                ...turn,
+                text: `${turn.text}${incoming.text}`,
               }),
             ),
           );
@@ -1301,10 +1438,9 @@ function AgentWorkspace({
               data.timeline,
               data.responseSeq,
               incoming.turnNumber,
-              (item) => ({
-                ...item,
-                streaming: true,
-                tools: upsertTurnTool(item.tools ?? [], {
+              (turn) => ({
+                ...turn,
+                tools: upsertTurnTool(turn.tools, {
                   id: `tool-${incoming.toolCallId}`,
                   kind: 'tool',
                   toolCallId: incoming.toolCallId,
@@ -1323,10 +1459,9 @@ function AgentWorkspace({
               items,
               activeResponseSequenceRef.current,
               incoming.turnNumber,
-              (item) => ({
-                ...item,
-                streaming: true,
-                tools: upsertTurnTool(item.tools ?? [], {
+              (turn) => ({
+                ...turn,
+                tools: upsertTurnTool(turn.tools, {
                   id: `tool-${incoming.toolCallId}`,
                   kind: 'tool',
                   toolCallId: incoming.toolCallId,
@@ -1348,9 +1483,9 @@ function AgentWorkspace({
               data.timeline,
               data.responseSeq,
               incoming.turnNumber,
-              (item) => ({
-                ...item,
-                tools: updateTurnTool(item.tools ?? [], incoming.toolCallId, (tool) => ({
+              (turn) => ({
+                ...turn,
+                tools: updateTurnTool(turn.tools, incoming.toolCallId, (tool) => ({
                   ...tool,
                   output: incoming.content,
                 })),
@@ -1364,9 +1499,9 @@ function AgentWorkspace({
               items,
               activeResponseSequenceRef.current,
               incoming.turnNumber,
-              (item) => ({
-                ...item,
-                tools: updateTurnTool(item.tools ?? [], incoming.toolCallId, (tool) => ({
+              (turn) => ({
+                ...turn,
+                tools: updateTurnTool(turn.tools, incoming.toolCallId, (tool) => ({
                   ...tool,
                   output: incoming.content,
                 })),
@@ -1383,9 +1518,9 @@ function AgentWorkspace({
               data.timeline,
               data.responseSeq,
               incoming.turnNumber,
-              (item) => ({
-                ...item,
-                tools: updateTurnTool(item.tools ?? [], incoming.toolCallId, (tool) => ({
+              (turn) => ({
+                ...turn,
+                tools: updateTurnTool(turn.tools, incoming.toolCallId, (tool) => ({
                   ...tool,
                   status: incoming.result.metadata?.interrupted
                     ? 'interrupted'
@@ -1407,9 +1542,9 @@ function AgentWorkspace({
               items,
               activeResponseSequenceRef.current,
               incoming.turnNumber,
-              (item) => ({
-                ...item,
-                tools: updateTurnTool(item.tools ?? [], incoming.toolCallId, (tool) => ({
+              (turn) => ({
+                ...turn,
+                tools: updateTurnTool(turn.tools, incoming.toolCallId, (tool) => ({
                   ...tool,
                   status: incoming.result.metadata?.interrupted
                     ? 'interrupted'
@@ -1454,8 +1589,7 @@ function AgentWorkspace({
           if (eventTaskId && eventTaskId !== stateRef.current.activeTaskId) {
             const data = taskDataRef.current[eventTaskId] ?? emptyTaskSnapshot();
             data.timeline = data.timeline.map((item) =>
-              item.id === assistantTurnId(data.responseSeq, incoming.turnNumber) &&
-              item.kind === 'message'
+              item.id === assistantResponseId(data.responseSeq) && item.kind === 'message'
                 ? { ...item, streaming: false }
                 : item,
             );
@@ -1464,7 +1598,7 @@ function AgentWorkspace({
           }
           updateTimeline((items) =>
             items.map((item) =>
-              item.id === assistantTurnId(activeResponseSequenceRef.current, incoming.turnNumber) &&
+              item.id === assistantResponseId(activeResponseSequenceRef.current) &&
               item.kind === 'message'
                 ? { ...item, streaming: false }
                 : item,
@@ -1489,6 +1623,54 @@ function AgentWorkspace({
           );
           break;
         }
+        case 'run_changes': {
+          const eventTaskId = incoming.taskId ?? stateRef.current.activeTaskId;
+          if (incoming.files.length === 0) break;
+          // 服务端批次 id：存在时用确定性 change/card id（刷新恢复后 diff Tab 可命中），
+          // 不存在（旧服务端）退回本地自增 id。
+          const batchId = incoming.id;
+          const changeIds: string[] = [];
+          const next = { ...fileChangesRef.current };
+          const seenPaths = new Set<string>();
+          let fileIndex = 0;
+          for (const file of incoming.files) {
+            // 同批次内按路径去重（服务端已去重，此处兜底兼容旧服务端）
+            if (seenPaths.has(file.path)) continue;
+            seenPaths.add(file.path);
+            const id = batchId ? `file-change-${batchId}-${fileIndex}` : nextId('file-change');
+            fileIndex += 1;
+            next[id] = {
+              id,
+              taskId: eventTaskId,
+              path: file.path,
+              oldContent: file.oldContent,
+              newContent: file.newContent,
+              time: currentTime(),
+            };
+            changeIds.push(id);
+          }
+          if (changeIds.length === 0) break;
+          fileChangesRef.current = next;
+          setFileChanges(next);
+          const card: RunChangesTimelineItem = {
+            id: batchId ? `run-changes-${batchId}` : nextId('run-changes'),
+            kind: 'run-changes',
+            changeIds,
+            time: currentTime(),
+          };
+          const appendCard = (items: TimelineItem[]): TimelineItem[] => {
+            if (items.some((item) => item.id === card.id)) return items;
+            return [...items, card];
+          };
+          if (eventTaskId && eventTaskId !== stateRef.current.activeTaskId) {
+            const data = taskDataRef.current[eventTaskId] ?? emptyTaskSnapshot();
+            data.timeline = appendCard(data.timeline);
+            taskDataRef.current[eventTaskId] = data;
+            break;
+          }
+          updateTimeline(appendCard);
+          break;
+        }
         case 'interrupted': {
           const eventTaskId = incoming.taskId ?? stateRef.current.activeTaskId;
           if (eventTaskId && eventTaskId !== stateRef.current.activeTaskId) {
@@ -1506,6 +1688,12 @@ function AgentWorkspace({
                   tools: item.tools?.map((tool) =>
                     tool.status === 'running' ? { ...tool, status: 'interrupted' } : tool,
                   ),
+                  turns: item.turns?.map((turn) => ({
+                    ...turn,
+                    tools: turn.tools.map((tool) =>
+                      tool.status === 'running' ? { ...tool, status: 'interrupted' } : tool,
+                    ),
+                  })),
                 };
               }
               return item;
@@ -1527,6 +1715,12 @@ function AgentWorkspace({
                   tools: item.tools?.map((tool) =>
                     tool.status === 'running' ? { ...tool, status: 'interrupted' } : tool,
                   ),
+                  turns: item.turns?.map((turn) => ({
+                    ...turn,
+                    tools: turn.tools.map((tool) =>
+                      tool.status === 'running' ? { ...tool, status: 'interrupted' } : tool,
+                    ),
+                  })),
                 };
               }
               return item;
@@ -2305,7 +2499,7 @@ function AgentWorkspace({
               '概要'
             ) : (
               <span className="pa-doc-tab-label" title={tab.title}>
-                <FileTextOutlined />
+                {tab.kind === 'plan-doc' ? <FileTextOutlined /> : <DiffOutlined />}
                 <span>{tab.title}</span>
               </span>
             ),
@@ -2320,8 +2514,10 @@ function AgentWorkspace({
                   send({ type: 'approve_plan', taskId: stateRef.current.activeTaskId })
                 }
               />
-            ) : (
+            ) : tab.kind === 'plan-doc' ? (
               <PlanDocViewer doc={planDocs[tab.docId]} />
+            ) : (
+              <FileDiffViewer change={fileChanges[tab.changeId]} />
             ),
         }))}
       />
@@ -2473,8 +2669,10 @@ function AgentWorkspace({
                     key={item.id}
                     item={item}
                     planDocs={planDocs}
+                    fileChanges={fileChanges}
                     onMessageElement={registerMessageElement}
                     onOpenPlanDoc={openPlanDocTab}
+                    onOpenFileDiff={openFileDiffTab}
                   />
                 ))
               )}
@@ -3502,18 +3700,88 @@ function TurnNavigation({
   );
 }
 
+/**
+ * 任务完成 · 修改文件卡片：超过 3 个文件时自动折叠，底部居中浮动「展开全部」按钮。
+ */
+function RunChangesCard({
+  changes,
+  time,
+  onOpenFileDiff,
+}: {
+  changes: FileChange[];
+  time: string;
+  onOpenFileDiff?: (changeId: string) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const collapsible = changes.length > 3;
+  const collapsed = collapsible && !expanded;
+  const visible = collapsed ? changes.slice(0, 3) : changes;
+
+  return (
+    <div className={`pa-run-changes-card${collapsed ? ' collapsed' : ''}`}>
+      <div className="pa-run-changes-head">
+        <span className="pa-run-changes-icon" aria-hidden="true">
+          <DiffOutlined />
+        </span>
+        <span className="pa-run-changes-copy">
+          <strong>任务完成 · 修改 {changes.length} 个文件</strong>
+          <time>{time}</time>
+        </span>
+      </div>
+      {changes.length > 0 && (
+        <ul className={`pa-run-changes-files${collapsed ? ' collapsed' : ''}`}>
+          {visible.map((change) => (
+            <li key={change.id}>
+              <button
+                type="button"
+                title={change.path}
+                onClick={() => onOpenFileDiff?.(change.id)}
+              >
+                <FileTextOutlined />
+                <span>{lastPathSegment(change.path) ?? change.path}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {collapsible && (
+        <button
+          type="button"
+          className="pa-run-changes-expand"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((current) => !current)}
+        >
+          <DownOutlined style={{ transform: expanded ? 'rotate(180deg)' : undefined }} />
+          {expanded ? '收起' : `展开全部 ${changes.length} 个文件`}
+        </button>
+      )}
+    </div>
+  );
+}
+
 function TimelineEntry({
   item,
   planDocs,
+  fileChanges,
   onMessageElement,
   onOpenPlanDoc,
+  onOpenFileDiff,
 }: {
   item: TimelineItem;
   planDocs?: Record<string, PlanDoc>;
+  fileChanges?: Record<string, FileChange>;
   onMessageElement?: (id: string, element: HTMLElement | null) => void;
   onOpenPlanDoc?: (docId: string) => void;
+  onOpenFileDiff?: (changeId: string) => void;
 }) {
   const { message: messageApi } = AntApp.useApp();
+
+  if (item.kind === 'run-changes') {
+    const changes = item.changeIds
+      .map((id) => fileChanges?.[id])
+      .filter((change): change is FileChange => Boolean(change));
+    return <RunChangesCard changes={changes} time={item.time} onOpenFileDiff={onOpenFileDiff} />;
+  }
 
   if (item.kind === 'plan-doc') {
     const status = planDocs?.[item.docId]?.plan.status;
@@ -3589,7 +3857,10 @@ function TimelineEntry({
 
   const user = item.role === 'user';
   const system = item.role === 'system';
-  const showThinking = !user && !system && (Boolean(item.thinking) || Boolean(item.tools?.length));
+  // 一轮回复的文本：多次调用的文本按序拼接（调用之间空行分隔）
+  const messageText = turnsText(item.turns);
+  const showThinking =
+    !user && !system && (Boolean(item.turns?.length) || Boolean(item.thinking) || Boolean(item.tools?.length));
   const copyUserMessage = (): void => {
     void copyTextToClipboard(item.text)
       .then(() => messageApi.success('用户输入已复制'))
@@ -3609,14 +3880,17 @@ function TimelineEntry({
       </div>
       {showThinking && (
         <ThinkingBlock
+          turns={item.turns ?? []}
           thinking={item.thinking ?? ''}
           tools={item.tools ?? []}
           streaming={Boolean(item.streaming)}
         />
       )}
-      {(item.text || user || system) && (
-        <div className={`pa-message-content${item.streaming && item.text ? ' streaming' : ''}`}>
-          {system ? item.text : <MarkdownContent text={item.text} />}
+      {(messageText || item.text || user || system) && (
+        <div
+          className={`pa-message-content${item.streaming && (messageText || item.text) ? ' streaming' : ''}`}
+        >
+          {system ? item.text : <MarkdownContent text={messageText || item.text} />}
         </div>
       )}
       {user && (
@@ -3657,25 +3931,33 @@ function TimelineEntry({
 }
 
 function ThinkingBlock({
+  turns,
   thinking,
   tools,
   streaming,
 }: {
+  turns: AssistantTurn[];
   thinking: string;
   tools: ToolTimelineItem[];
   streaming: boolean;
 }) {
-  const runningTools = tools.filter((tool) => tool.status === 'running').length;
-  const failedTools = tools.filter((tool) => tool.status === 'failed').length;
-  const interruptedTools = tools.filter((tool) => tool.status === 'interrupted').length;
+  // 兼容无 turns 的旧消息：用顶层 thinking/tools 组装单个分组
+  const groups: AssistantTurn[] =
+    turns.length > 0
+      ? turns
+      : [{ turnNumber: 1, thinking: thinking ?? '', text: '', tools: tools ?? [] }];
+  const allTools = groups.flatMap((group) => group.tools);
+  const runningTools = allTools.filter((tool) => tool.status === 'running').length;
+  const failedTools = allTools.filter((tool) => tool.status === 'failed').length;
+  const interruptedTools = allTools.filter((tool) => tool.status === 'interrupted').length;
   const summary = runningTools
     ? `${runningTools} 个工具执行中`
     : failedTools
-      ? `${tools.length} 个工具 · ${failedTools} 个失败`
+      ? `${allTools.length} 个工具 · ${failedTools} 个失败`
       : interruptedTools
-        ? `${tools.length} 个工具 · ${interruptedTools} 个已停止`
-        : tools.length
-          ? `${tools.length} 个工具`
+        ? `${allTools.length} 个工具 · ${interruptedTools} 个已停止`
+        : allTools.length
+          ? `${allTools.length} 个工具`
           : streaming
             ? '思考中'
             : '思考完成';
@@ -3696,23 +3978,110 @@ function ThinkingBlock({
             ),
             children: (
               <div className="pa-thinking-details">
-                {thinking && (
-                  <div className="pa-thinking-content">
-                    <MarkdownContent text={thinking} />
-                  </div>
-                )}
-                {tools.length > 0 && (
-                  <div className="pa-thinking-tools">
-                    {tools.map((tool) => (
-                      <ThinkingTool key={tool.toolCallId} tool={tool} />
-                    ))}
-                  </div>
-                )}
+                {groups.map((group, index) => (
+                  <ThinkingTurnGroup
+                    key={group.turnNumber}
+                    group={group}
+                    showHeading={groups.length > 1}
+                    headingIndex={index + 1}
+                    streaming={streaming}
+                  />
+                ))}
               </div>
             ),
           },
         ]}
       />
+    </div>
+  );
+}
+
+/**
+ * 一轮回复中一次 LLM 调用（turn）的分组：
+ * 多次调用时显示「第 N 次调用」标题，组内思考内容/工具调用各自默认折叠。
+ */
+function ThinkingTurnGroup({
+  group,
+  showHeading,
+  headingIndex,
+  streaming,
+}: {
+  group: AssistantTurn;
+  showHeading: boolean;
+  headingIndex: number;
+  streaming: boolean;
+}) {
+  const toolNames = [...new Set(group.tools.map((tool) => tool.name))].join(' · ');
+  const runningTools = group.tools.filter((tool) => tool.status === 'running').length;
+  const failedTools = group.tools.filter((tool) => tool.status === 'failed').length;
+  const headSummary = runningTools
+    ? `${runningTools} 个工具执行中`
+    : failedTools
+      ? `${group.tools.length} 个工具 · ${failedTools} 个失败`
+      : group.tools.length
+        ? `${group.tools.length} 个工具`
+        : streaming
+          ? '思考中'
+          : '思考完成';
+
+  return (
+    <div className="pa-thinking-turn">
+      {showHeading && (
+        <div className="pa-thinking-turn-head">
+          <strong>第 {headingIndex} 次调用</strong>
+          <span>{headSummary}</span>
+        </div>
+      )}
+      {group.thinking && (
+        <Collapse
+          size="small"
+          className="pa-thinking-sub-collapse"
+          items={[
+            {
+              key: 'thinking-content',
+              label: (
+                <div className="pa-thinking-sub-label">
+                  <BulbOutlined />
+                  <strong>思考内容</strong>
+                </div>
+              ),
+              children: (
+                <div className="pa-thinking-content">
+                  <MarkdownContent text={group.thinking} />
+                </div>
+              ),
+            },
+          ]}
+        />
+      )}
+      {group.tools.length > 0 && (
+        <Collapse
+          size="small"
+          className="pa-thinking-sub-collapse"
+          items={[
+            {
+              key: 'tools',
+              label: (
+                <div className="pa-thinking-sub-label">
+                  <ToolOutlined />
+                  <strong>工具调用</strong>
+                  <span className="pa-thinking-sub-names" title={toolNames}>
+                    {toolNames}
+                  </span>
+                  <span>{group.tools.length} 个</span>
+                </div>
+              ),
+              children: (
+                <div className="pa-thinking-tools">
+                  {group.tools.map((tool) => (
+                    <ThinkingTool key={tool.toolCallId} tool={tool} />
+                  ))}
+                </div>
+              ),
+            },
+          ]}
+        />
+      )}
     </div>
   );
 }
@@ -3963,6 +4332,77 @@ function Composer({
   onTaskModelChange: (value: string) => void;
   onReasoningChange: (effort: ReasoningEffort) => void;
 }) {
+  const textAreaRef = useRef<TextAreaRef | null>(null);
+  /** Markdown 工具栏是否展开（默认收起）。 */
+  const [toolbarOpen, setToolbarOpen] = useState(false);
+  /** 预览/编辑模式切换（预览复用 MarkdownContent 渲染）。 */
+  const [previewMode, setPreviewMode] = useState(false);
+
+  /** 取 TextArea 原生元素（用于读写光标/选区）。 */
+  const textareaElement = (): HTMLTextAreaElement | null =>
+    textAreaRef.current?.resizableTextArea?.textArea ??
+    (textAreaRef.current?.nativeElement as HTMLTextAreaElement | null) ??
+    null;
+
+  /** 包裹/插入行内语法：选中文本被 prefix/suffix 包裹，无选中时插入占位文本，并恢复光标与选区。 */
+  const applyInline = (prefix: string, suffix: string, placeholder: string): void => {
+    const textarea = textareaElement();
+    if (!textarea) return;
+    const start = textarea.selectionStart ?? prompt.length;
+    const end = textarea.selectionEnd ?? start;
+    const selected = prompt.slice(start, end);
+    const insert = selected || placeholder;
+    const next = `${prompt.slice(0, start)}${prefix}${insert}${suffix}${prompt.slice(end)}`;
+    onPromptChange(next);
+    requestAnimationFrame(() => {
+      textarea.focus();
+      textarea.setSelectionRange(start + prefix.length, start + prefix.length + insert.length);
+    });
+  };
+
+  /** 行首插入前缀（标题/列表/引用）：作用于选中区域（多行逐行加前缀）或光标所在行。 */
+  const applyLinePrefix = (prefix: string, placeholder: string): void => {
+    const textarea = textareaElement();
+    if (!textarea) return;
+    const start = textarea.selectionStart ?? prompt.length;
+    const end = textarea.selectionEnd ?? start;
+    const lineStart = prompt.lastIndexOf('\n', start - 1) + 1;
+    const lineEnd = prompt.indexOf('\n', end) === -1 ? prompt.length : prompt.indexOf('\n', end) + 1;
+    const block = prompt.slice(lineStart, lineEnd);
+    const content =
+      block.trim() === ''
+        ? `${prefix}${placeholder}\n`
+        : block
+            .replace(/\n$/, '')
+            .split('\n')
+            .map((line) => prefix + line)
+            .join('\n') + (block.endsWith('\n') ? '\n' : '');
+    const next = `${prompt.slice(0, lineStart)}${content}${prompt.slice(lineEnd)}`;
+    onPromptChange(next);
+    requestAnimationFrame(() => {
+      textarea.focus();
+      textarea.setSelectionRange(lineStart + content.length, lineStart + content.length);
+    });
+  };
+
+  /** 代码块：包裹选中文本（无选中插入占位）。 */
+  const applyCodeBlock = (): void => {
+    applyInline('\n```\n', '\n```\n', '代码');
+  };
+
+  /** 在光标处插入固定模板（表格/分隔线）。 */
+  const insertSnippet = (template: string): void => {
+    const textarea = textareaElement();
+    if (!textarea) return;
+    const start = textarea.selectionStart ?? prompt.length;
+    const next = `${prompt.slice(0, start)}${template}${prompt.slice(start)}`;
+    onPromptChange(next);
+    requestAnimationFrame(() => {
+      textarea.focus();
+      textarea.setSelectionRange(start + template.length, start + template.length);
+    });
+  };
+
   const placeholder = !enabled
     ? '配置 Provider 后即可开始对话'
     : busy
@@ -4047,20 +4487,95 @@ function Composer({
             <span>{rootPath}</span>
           </div>
         </Tooltip>
-        <TextArea
-          id="prompt-input"
-          value={prompt}
-          disabled={!enabled || creatingTask || Boolean(pendingQuestion)}
-          autoSize={{ minRows: 2, maxRows: 8 }}
-          placeholder={placeholder}
-          onChange={(event) => onPromptChange(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
-              event.preventDefault();
-              onSubmit();
-            }
-          }}
-        />
+        <div className="pa-md-toolbar">
+          <div className="pa-md-toolbar-left">
+            <Button
+              type="text"
+              size="small"
+              className="pa-md-toolbar-toggle"
+              disabled={!enabled || creatingTask || Boolean(pendingQuestion)}
+              onClick={() => setToolbarOpen((open) => !open)}
+            >
+              Markdown 工具栏
+              <DownOutlined style={{ fontSize: 9, transition: 'transform 0.2s ease', transform: toolbarOpen ? 'rotate(180deg)' : undefined }} />
+            </Button>
+            <span className="pa-md-hint">支持 Markdown</span>
+          </div>
+          <div className="pa-md-toolbar-right">
+            <Button
+              type="text"
+              size="small"
+              disabled={!enabled || creatingTask || Boolean(pendingQuestion)}
+              icon={previewMode ? <EditOutlined /> : <EyeOutlined />}
+              onClick={() => setPreviewMode((mode) => !mode)}
+            >
+              {previewMode ? '编辑' : '预览'}
+            </Button>
+          </div>
+        </div>
+        {toolbarOpen && (
+          <div className="pa-md-toolbar-actions">
+            <Tooltip title="加粗">
+              <Button type="text" size="small" icon={<BoldOutlined />} disabled={!enabled} onClick={() => applyInline('**', '**', '加粗文本')} />
+            </Tooltip>
+            <Tooltip title="斜体">
+              <Button type="text" size="small" icon={<ItalicOutlined />} disabled={!enabled} onClick={() => applyInline('*', '*', '斜体文本')} />
+            </Tooltip>
+            <Tooltip title="行内代码">
+              <Button type="text" size="small" icon={<CodeOutlined />} disabled={!enabled} onClick={() => applyInline('`', '`', '代码')} />
+            </Tooltip>
+            <Tooltip title="链接">
+              <Button type="text" size="small" icon={<LinkOutlined />} disabled={!enabled} onClick={() => applyInline('[', '](https://)', '链接文字')} />
+            </Tooltip>
+            <span className="pa-md-toolbar-sep" aria-hidden="true" />
+            <Tooltip title="标题">
+              <Button type="text" size="small" icon={<FontSizeOutlined />} disabled={!enabled} onClick={() => applyLinePrefix('## ', '标题')} />
+            </Tooltip>
+            <Tooltip title="无序列表">
+              <Button type="text" size="small" icon={<UnorderedListOutlined />} disabled={!enabled} onClick={() => applyLinePrefix('- ', '列表项')} />
+            </Tooltip>
+            <Tooltip title="有序列表">
+              <Button type="text" size="small" icon={<OrderedListOutlined />} disabled={!enabled} onClick={() => applyLinePrefix('1. ', '列表项')} />
+            </Tooltip>
+            <Tooltip title="引用">
+              <Button type="text" size="small" icon={<CommentOutlined />} disabled={!enabled} onClick={() => applyLinePrefix('> ', '引用内容')} />
+            </Tooltip>
+            <Tooltip title="代码块">
+              <Button type="text" size="small" icon={<CodeOutlined />} disabled={!enabled} onClick={applyCodeBlock} />
+            </Tooltip>
+            <Tooltip title="表格">
+              <Button type="text" size="small" icon={<TableOutlined />} disabled={!enabled} onClick={() => insertSnippet('\n| 列1 | 列2 |\n| --- | --- |\n| 内容 | 内容 |\n')} />
+            </Tooltip>
+            <Tooltip title="分隔线">
+              <Button type="text" size="small" icon={<MinusOutlined />} disabled={!enabled} onClick={() => insertSnippet('\n---\n')} />
+            </Tooltip>
+          </div>
+        )}
+        {previewMode ? (
+          <div className="pa-composer-preview pa-message-content">
+            {prompt.trim() ? (
+              <MarkdownContent text={prompt} />
+            ) : (
+              <span className="pa-composer-preview-empty">暂无内容</span>
+            )}
+          </div>
+        ) : (
+          <TextArea
+            ref={textAreaRef}
+            id="prompt-input"
+            value={prompt}
+            disabled={!enabled || creatingTask || Boolean(pendingQuestion)}
+            autoSize={{ minRows: 2, maxRows: 8 }}
+            placeholder={placeholder}
+            onChange={(event) => onPromptChange(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+                event.preventDefault();
+                onSubmit();
+              }
+            }}
+          />
+        )}
         <div className="pa-composer-bottom">
           <div className="pa-composer-left">
             <Select
@@ -4099,7 +4614,6 @@ function Composer({
                 />
               }
               placement="top"
-              color="#ffffff"
               classNames={{ root: 'pa-context-tip-overlay' }}
             >
               <Button
@@ -5216,6 +5730,83 @@ function DebugJsonPanel({ title, value }: { title: string; value: unknown }) {
   );
 }
 
+function FileDiffViewer({ change }: { change?: FileChange }) {
+  const { message: messageApi } = AntApp.useApp();
+  const diff = useMemo(
+    () => (change ? computeLineDiff(change.oldContent, change.newContent) : null),
+    [change],
+  );
+  // 只展示被修改区域：大段未修改的上下文折叠为省略行
+  const displayLines = useMemo(
+    () => (diff ? collapseDiffContext(diff.lines) : null),
+    [diff],
+  );
+
+  if (!change || !diff || !displayLines) {
+    return (
+      <div className="pa-file-diff-viewer">
+        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="修改记录不存在或已失效" />
+      </div>
+    );
+  }
+
+  const added = diff.lines.filter((line) => line.kind === 'add').length;
+  const removed = diff.lines.filter((line) => line.kind === 'remove').length;
+  const copyDiff = (): void => {
+    void copyTextToClipboard(
+      toUnifiedDiffText(change.path, change.oldContent, change.newContent),
+    )
+      .then(() => messageApi.success('Unified Diff 已复制'))
+      .catch(() => messageApi.error('复制失败，请手动选择文本'));
+  };
+
+  return (
+    <div className="pa-file-diff-viewer">
+      <div className="pa-file-diff-header">
+        <div className="pa-file-diff-header-copy">
+          <strong title={change.path}>{lastPathSegment(change.path) ?? change.path}</strong>
+          <span>
+            <Tag color="success">+{added}</Tag>
+            <Tag color="error">-{removed}</Tag>
+            <small title={change.path}>{change.path}</small>
+          </span>
+        </div>
+        <Button size="small" icon={<CopyOutlined />} onClick={copyDiff}>
+          复制 Diff
+        </Button>
+      </div>
+      <div className="pa-file-diff-body">
+        {displayLines.map((line, index) =>
+          line.kind === 'gap' ? (
+            <div key={`gap-${index}`} className="pa-diff-gap" role="separator">
+              <span>⋯ 省略 {line.skipped} 行未修改内容 ⋯</span>
+            </div>
+          ) : (
+            <div key={index} className={`pa-diff-line ${line.kind}`}>
+              <span className="pa-diff-ln pa-diff-ln-old">{line.oldLineNo ?? ''}</span>
+              <span className="pa-diff-ln pa-diff-ln-new">{line.newLineNo ?? ''}</span>
+              <span className="pa-diff-marker">
+                {line.kind === 'add' ? '+' : line.kind === 'remove' ? '-' : ' '}
+              </span>
+              <pre className="pa-diff-text">{line.text || ' '}</pre>
+            </div>
+          ),
+        )}
+        {diff.truncated && (
+          <div className="pa-diff-truncated">
+            文件超过 {MAX_DIFF_LINES} 行，仅展示前 {MAX_DIFF_LINES} 行
+          </div>
+        )}
+        {change.truncated && (
+          <div className="pa-diff-truncated">
+            该修改记录保存时内容超过上限已截断，diff 可能不完整
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function PlanDocViewer({ doc }: { doc?: PlanDoc }) {
   const { message: messageApi } = AntApp.useApp();
 
@@ -5465,13 +6056,53 @@ function normalizeStoredPlanDoc(doc: PlanDoc): PlanDoc {
   return { ...doc, plan };
 }
 
+/**
+ * 把已落盘的修改文件记录批次重放为时间线 run-changes 卡片（按卡片 id 去重）。
+ * history 重放之后调用，保证刷新/重连后任务修改清单仍可见；changeIds 用与
+ * seedFileChanges 一致的确定性 id（file-change-<batchId>-<index>）。
+ */
+function appendRunChangesCards(
+  items: TimelineItem[],
+  batches: StoredFileChangeBatch[],
+  taskId?: string,
+): TimelineItem[] {
+  const result = [...items];
+  const existing = new Set(
+    result
+      .filter((item): item is RunChangesTimelineItem => item.kind === 'run-changes')
+      .map((item) => item.id),
+  );
+  for (const batch of batches) {
+    if (batch.taskId && batch.taskId !== taskId) continue;
+    const cardId = `run-changes-${batch.id}`;
+    if (existing.has(cardId)) continue;
+    const changeIds = batch.files.map((_, index) => `file-change-${batch.id}-${index}`);
+    if (changeIds.length === 0) continue;
+    result.push({
+      id: cardId,
+      kind: 'run-changes',
+      changeIds,
+      time: new Date(batch.time).toLocaleTimeString('zh-CN', {
+        hour: '2-digit',
+        minute: '2-digit',
+      }),
+    });
+  }
+  return result;
+}
+
+/**
+ * 定位/创建当前用户请求（responseSequence）的助手消息并应用更新。
+ * 一轮回复中的多次 LLM 调用（turn）合并到同一条助手消息下，但按 turn 分组
+ * 存储（turns 数组）：每次调用的思考/文本/工具独立维护，展示时分组可见。
+ */
 function updateAssistantTurn(
   items: TimelineItem[],
   responseSequence: number,
   turnNumber: number,
-  updater: (item: MessageTimelineItem) => MessageTimelineItem,
+  updater: (turn: AssistantTurn) => AssistantTurn,
 ): TimelineItem[] {
-  const id = assistantTurnId(responseSequence, turnNumber);
+  const id = assistantResponseId(responseSequence);
   const index = items.findIndex((item) => item.id === id);
   const current: MessageTimelineItem =
     index >= 0 && items[index]?.kind === 'message'
@@ -5481,15 +6112,34 @@ function updateAssistantTurn(
           kind: 'message',
           role: 'assistant',
           text: '',
-          thinking: '',
-          tools: [],
+          turns: [],
           turnNumber,
           time: currentTime(),
           streaming: true,
         };
-  const updated = updater(current);
+  const turns = current.turns ?? [];
+  const turnIndex = turns.findIndex((turn) => turn.turnNumber === turnNumber);
+  const turn: AssistantTurn =
+    turnIndex >= 0
+      ? turns[turnIndex]
+      : { turnNumber, thinking: '', text: '', tools: [] };
+  const updatedTurn = updater(turn);
+  const nextTurns =
+    turnIndex >= 0
+      ? turns.map((item, itemIndex) => (itemIndex === turnIndex ? updatedTurn : item))
+      : [...turns, updatedTurn];
+  const updated = { ...current, turns: nextTurns, streaming: true };
   if (index === -1) return [...items, updated];
   return items.map((item, itemIndex) => (itemIndex === index ? updated : item));
+}
+
+/** 合并消息的文本：各次调用的文本按顺序拼接（调用之间空行分隔）。 */
+function turnsText(turns: AssistantTurn[] | undefined): string {
+  if (!turns || turns.length === 0) return '';
+  return turns
+    .map((turn) => turn.text)
+    .filter(Boolean)
+    .join('\n\n');
 }
 
 function upsertTurnTool(tools: ToolTimelineItem[], value: ToolTimelineItem): ToolTimelineItem[] {

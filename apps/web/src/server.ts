@@ -68,6 +68,8 @@ export interface WebServerOptions {
   statsDbPath?: string;
   /** 计划文档落盘目录。Defaults to ~/.personal-agent/plans */
   plansDirectory?: string;
+  /** 修改文件记录批次落盘目录。Defaults to ~/.personal-agent/file-changes */
+  fileChangesDirectory?: string;
   viteDev?: boolean;
 }
 
@@ -98,6 +100,7 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
     sessionsDirectory: options.sessionsDirectory ?? process.env.PERSONAL_AGENT_SESSIONS_PATH,
     statsDbPath: options.statsDbPath,
     plansDirectory: options.plansDirectory,
+    fileChangesDirectory: options.fileChangesDirectory,
   });
   // Model request stats (SQLite) — graceful degradation when node:sqlite is
   // unavailable on the runtime (Node < 22.13). Never blocks server startup.
@@ -155,6 +158,32 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
     try {
       const plans = await runtime.listPlanDocs();
       res.json({ plans });
+    } catch (error) {
+      res.status(500).json({ error: formatError(error) });
+    }
+  });
+
+  app.get('/api/file-changes', async (req, res) => {
+    if (!isAuthorized(req.headers.authorization, req.query.token, authToken)) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    try {
+      const batches = await runtime.listFileChangeBatches();
+      res.json({ batches });
+    } catch (error) {
+      res.status(500).json({ error: formatError(error) });
+    }
+  });
+
+  app.delete('/api/file-changes/:id', async (req, res) => {
+    if (!isAuthorized(req.headers.authorization, req.query.token, authToken)) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    try {
+      const deleted = await runtime.deleteFileChangeBatch(req.params.id);
+      res.json({ deleted });
     } catch (error) {
       res.status(500).json({ error: formatError(error) });
     }
@@ -742,10 +771,9 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
           if (routedTaskId) {
             const task = runtime.projects.getTask(routedTaskId);
             if (task?.title === UNTITLED_TASK_TITLE) {
-              const renamed = await runtime.projects.renameTask(
-                routedTaskId,
-                deriveTaskTitle(message.text),
-              );
+              // 先用截断标题立即重命名（不阻塞首条消息），再用 LLM 意图总结精炼。
+              const fallbackTitle = deriveTaskTitle(message.text);
+              const renamed = await runtime.projects.renameTask(routedTaskId, fallbackTitle);
               // 必须带上 running/model：客户端用 task_renamed 覆盖任务条目，
               // 缺 model 会导致任务模型选择回退为全局默认（deepseek-v4-flash）。
               send({
@@ -755,6 +783,12 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
                   model: `${conversation.providerInstance.providerId}:${conversation.providerInstance.getModel()}`,
                 }),
               });
+              void refineTaskTitleWithLlm(
+                conversation,
+                routedTaskId,
+                fallbackTitle,
+                message.text,
+              );
             }
           }
           // Run the agent loop WITHOUT blocking the message queue: while a task
@@ -949,6 +983,67 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
               : undefined,
           }),
         });
+      }
+    }
+
+    /**
+     * 用大模型对用户第一个问题做意图总结，生成不超过 20 字的任务标题。
+     * 调用失败或结果为空时回退到 deriveTaskTitle（纯文本截断）。
+     */
+    async function summarizeTaskTitle(
+      conversation: WebConversation,
+      input: string,
+    ): Promise<string> {
+      try {
+        const response = await conversation.providerInstance.chat(
+          [
+            {
+              role: 'system',
+              content:
+                '你是任务命名助手。用不超过 20 个字总结用户第一句话的意图，作为任务标题。只输出标题本身，不要引号、标点或任何解释。',
+            },
+            { role: 'user', content: input },
+          ],
+          [],
+          { temperature: 0.2, maxTokens: 60, reasoningEffort: 'off' },
+        );
+        const text = response.content
+          .filter((block) => block.type === 'text')
+          .map((block) => block.text)
+          .join(' ')
+          .trim();
+        return text ? truncateTaskTitle(text) : deriveTaskTitle(input);
+      } catch {
+        // LLM 调用失败不阻断首条消息：回退到纯文本截断标题
+        return deriveTaskTitle(input);
+      }
+    }
+
+    /**
+     * 异步用 LLM 精炼任务标题：先用截断标题立即重命名（不阻塞首条消息），
+     * LLM 返回后若任务仍未被手动重命名，则替换为意图总结标题。
+     */
+    async function refineTaskTitleWithLlm(
+      conversation: WebConversation,
+      taskId: string,
+      fallbackTitle: string,
+      input: string,
+    ): Promise<void> {
+      try {
+        const title = await summarizeTaskTitle(conversation, input);
+        if (!title || title === fallbackTitle) return;
+        const current = runtime.projects.getTask(taskId);
+        if (!current || current.title !== fallbackTitle) return; // 已被手动重命名
+        const renamed = await runtime.projects.renameTask(taskId, title);
+        send({
+          type: 'task_renamed',
+          task: serializeTask(renamed, {
+            running: conversation.isBusy,
+            model: `${conversation.providerInstance.providerId}:${conversation.providerInstance.getModel()}`,
+          }),
+        });
+      } catch {
+        // 保持当前标题，不阻断任何流程
       }
     }
 
@@ -1327,11 +1422,16 @@ function serializeTask(
   };
 }
 
+/** 自动生成任务标题（回退/兜底路径）：归一化空白后截断到 20 字以内。 */
 export function deriveTaskTitle(intent: string): string {
-  const normalized = intent.replace(/\s+/g, ' ').trim();
-  const characters = Array.from(normalized);
-  if (characters.length <= 200) return normalized;
-  return `${characters.slice(0, 199).join('')}…`;
+  return truncateTaskTitle(intent.replace(/\s+/g, ' ').trim());
+}
+
+/** 把任意文本截断到不超过 20 个字符（超长时以省略号结尾，总长 20）。 */
+export function truncateTaskTitle(text: string): string {
+  const characters = Array.from(text.trim());
+  if (characters.length <= 20) return characters.join('');
+  return `${characters.slice(0, 19).join('')}…`;
 }
 
 function isAuthorized(

@@ -5,13 +5,20 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { ProjectManager, SessionManager } from '@personal-agent/core';
 import { WebSocket } from 'ws';
-import { createWebServer, deriveTaskTitle } from '../src/server';
+import { createWebServer, deriveTaskTitle, truncateTaskTitle } from '../src/server';
 
 test('task titles use the normalized first intent and respect the storage limit', () => {
   assert.equal(deriveTaskTitle('  修复构建\n并补充测试  '), '修复构建 并补充测试');
   const title = deriveTaskTitle('任务'.repeat(150));
-  assert.equal(Array.from(title).length, 200);
+  assert.equal(Array.from(title).length, 20);
   assert.equal(title.endsWith('…'), true);
+});
+
+test('truncateTaskTitle keeps any text within 20 characters', () => {
+  assert.equal(truncateTaskTitle('  修复构建错误  '), '修复构建错误');
+  assert.equal(truncateTaskTitle('修复'.repeat(30)), '修复'.repeat(9) + '修…');
+  assert.equal(Array.from(truncateTaskTitle('a'.repeat(100))).length, 20);
+  assert.equal(truncateTaskTitle('a'.repeat(100)).endsWith('…'), true);
 });
 
 test('web server exposes health and websocket readiness without a configured provider', async () => {
