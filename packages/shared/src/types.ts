@@ -12,6 +12,8 @@ export interface UnifiedMessage {
   name?: string; // for tool-role messages: which tool produced this
   toolCallId?: string; // for tool-role messages: which tool_call is this the result for
   toolCalls?: UnifiedToolCall[]; // for assistant messages: tool calls the assistant requested
+  /** 该条 assistant 回复的总耗时（ms）。由 AgentLoop 在任务结束时写入，随会话持久化；前端刷新后从 history 恢复展示。 */
+  durationMs?: number;
 }
 
 // ---------------------------------------------------------------------------

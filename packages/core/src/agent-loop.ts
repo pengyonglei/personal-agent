@@ -144,6 +144,10 @@ export class AgentLoop {
     // 都挂载它的 signal，外部调用 interrupt() 即可随时中断整个循环
     this.controller = new AbortController();
 
+    // 本次任务开始时间：结束时（finally）把总耗时写到本次回复的 assistant 消息上，
+    // 随会话 checkpoint 落盘持久化，前端刷新后仍可展示「耗时：X」。
+    const runStartedAt = Date.now();
+
     // ---- 2. 将用户消息写入对话历史 ----
     // 该消息会在后续的上下文组装中被一起发送给模型
     this.config.contextAssembler.addMessage({ role: 'user', content: userInput });
@@ -606,6 +610,23 @@ export class AgentLoop {
       const leftover = this.config.drainPendingUserMessages?.() ?? [];
       for (const text of leftover) {
         this.config.contextAssembler.addMessage({ role: 'user', content: text });
+      }
+      // 任务结束（正常完成/中断/异常）时把本次任务总耗时写到最后一条
+      // assistant 消息，随会话持久化；前端刷新后从 history 恢复展示。
+      this.stampAssistantDuration(runStartedAt);
+    }
+  }
+
+  /** 把本次任务总耗时写到最后一条 assistant 消息（即本次回复），供持久化展示。 */
+  private stampAssistantDuration(runStartedAt: number): void {
+    const durationMs = Date.now() - runStartedAt;
+    // getHistory() 返回浅拷贝数组，但消息对象是共享引用，直接改字段即生效；
+    // 从未尾向前找，最后一条 assistant 消息即本次任务的最新回复。
+    const history = this.config.contextAssembler.getHistory();
+    for (let i = history.length - 1; i >= 0; i--) {
+      if (history[i].role === 'assistant') {
+        history[i].durationMs = durationMs;
+        break;
       }
     }
   }

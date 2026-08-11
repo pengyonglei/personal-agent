@@ -856,6 +856,16 @@ select {
   line-height: 1.72;
 }
 
+/* 任务完成后显示在消息内容底部的耗时 */
+.pa-message-duration {
+  margin-top: 0.72em;
+  padding-top: 0.6em;
+  border-top: 1px dashed var(--pa-border);
+  color: var(--pa-faint);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 /* Markdown 排版：对话内容与计划文档（方案文件）共用同一套样式，保证展示一致 */
 .pa-message-content > :first-child,
 .pa-plan-doc-body > :first-child {

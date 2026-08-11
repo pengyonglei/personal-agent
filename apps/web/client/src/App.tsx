@@ -182,6 +182,10 @@ interface MessageTimelineItem {
   tools?: ToolTimelineItem[];
   /** 一轮回复中每次 LLM 调用（turn）的分组内容：思考/文本/工具按调用分隔。 */
   turns?: AssistantTurn[];
+  /** 本轮回复首次创建消息的时间戳（ms），用于任务完成后计算耗时。 */
+  startedAt?: number;
+  /** 任务完成/中断时计算的总耗时（ms），存在则展示在消息内容底部。 */
+  durationMs?: number;
 }
 
 /** 一次 LLM 调用（turn）的内容分组。 */
@@ -1354,6 +1358,8 @@ function AgentWorkspace({
                   text: '',
                   turns: [{ turnNumber: (groupTurnSeq += 1), thinking, text, tools }],
                   time: currentTime(),
+                  // 服务端持久化的本次任务耗时（刷新后恢复展示）
+                  durationMs: historyMessage.durationMs,
                 });
                 groupAssistantIndex = itemIndex;
               } else {
@@ -1832,15 +1838,30 @@ function AgentWorkspace({
           const eventTaskId = incoming.taskId ?? stateRef.current.activeTaskId;
           if (eventTaskId && eventTaskId !== stateRef.current.activeTaskId) {
             const data = taskDataRef.current[eventTaskId] ?? emptyTaskSnapshot();
+            // 按消息 id 定位当前回复：turn_end 已把 streaming 置 false，
+            // 不能依赖 streaming 判断（否则耗时永远写不进去）。
             data.timeline = data.timeline.map((item) =>
-              item.kind === 'message' && item.streaming ? { ...item, streaming: false } : item,
+              item.kind === 'message' && item.id === assistantResponseId(data.responseSeq)
+                ? {
+                    ...item,
+                    streaming: false,
+                    durationMs: completedDurationMs(item) ?? item.durationMs,
+                  }
+                : item,
             );
             taskDataRef.current[eventTaskId] = data;
             break;
           }
           updateTimeline((items) =>
             items.map((item) =>
-              item.kind === 'message' && item.streaming ? { ...item, streaming: false } : item,
+              item.kind === 'message' &&
+              item.id === assistantResponseId(activeResponseSequenceRef.current)
+                ? {
+                    ...item,
+                    streaming: false,
+                    durationMs: completedDurationMs(item) ?? item.durationMs,
+                  }
+                : item,
             ),
           );
           break;
@@ -1913,6 +1934,7 @@ function AgentWorkspace({
                 return {
                   ...item,
                   streaming: false,
+                  durationMs: completedDurationMs(item) ?? item.durationMs,
                   tools: item.tools?.map((tool) =>
                     tool.status === 'running' ? { ...tool, status: 'interrupted' } : tool,
                   ),
@@ -1940,6 +1962,7 @@ function AgentWorkspace({
                 return {
                   ...item,
                   streaming: false,
+                  durationMs: completedDurationMs(item) ?? item.durationMs,
                   tools: item.tools?.map((tool) =>
                     tool.status === 'running' ? { ...tool, status: 'interrupted' } : tool,
                   ),
@@ -4156,7 +4179,8 @@ function TimelineEntry({
           streaming={Boolean(item.streaming)}
         />
       )}
-      {(messageText || item.text || user || system || (cards && cards.length > 0)) && (
+      {(messageText || item.text || user || system || (cards && cards.length > 0) ||
+        (!user && !system && typeof item.durationMs === 'number')) && (
         <div
           className={`pa-message-content${item.streaming && (messageText || item.text) ? ' streaming' : ''}`}
         >
@@ -4206,6 +4230,12 @@ function TimelineEntry({
               })}
             </div>
           )}
+          {!user &&
+            !system &&
+            !item.streaming &&
+            typeof item.durationMs === 'number' && (
+              <div className="pa-message-duration">耗时：{formatElapsedChinese(item.durationMs)}</div>
+            )}
         </div>
       )}
       {user && (
@@ -7067,6 +7097,7 @@ function updateAssistantTurn(
           turnNumber,
           time: currentTime(),
           streaming: true,
+          startedAt: Date.now(),
         };
   const turns = current.turns ?? [];
   const turnIndex = turns.findIndex((turn) => turn.turnNumber === turnNumber);
@@ -7302,13 +7333,13 @@ function formatTokens(value: number): string {
 }
 
 /**
- * 缓存命中 token 占上下文窗口的百分比（与「占用」行同一口径）。
- * 命中占比通常较小，<10% 时保留 1 位小数，避免显示成 0%。
+ * 缓存命中 token 占已使用 token 的百分比（分母为「已使用」= 最后一次模型调用的输入 token）。
+ * 统一保留两位小数。
  */
-function cacheHitPercentage(cacheHitTokens: number, totalTokens: number): string {
-  if (totalTokens <= 0) return '0%';
-  const percentage = (cacheHitTokens / totalTokens) * 100;
-  return `${percentage >= 10 ? percentage.toFixed(0) : percentage.toFixed(1)}%`;
+function cacheHitPercentage(cacheHitTokens: number, usedTokens: number): string {
+  if (usedTokens <= 0) return '0%';
+  const percentage = (cacheHitTokens / usedTokens) * 100;
+  return `${percentage.toFixed(2)}%`;
 }
 
 function ContextUsagePanel({ usage, footer }: { usage?: ContextUsage; footer?: ReactNode }) {
@@ -7340,7 +7371,7 @@ function ContextUsagePanel({ usage, footer }: { usage?: ContextUsage; footer?: R
       {typeof usage.cacheHitTokens === 'number' && usage.cacheHitTokens > 0 && (
         <div className="pa-context-tip-row">
           <span>缓存命中</span>
-          <b>{cacheHitPercentage(usage.cacheHitTokens, usage.totalTokens)}</b>
+          <b>{cacheHitPercentage(usage.cacheHitTokens, usage.usedTokens)}</b>
         </div>
       )}
       <div className="pa-context-tip-hint">
@@ -7484,6 +7515,25 @@ function formatExecutionDuration(milliseconds: number): string {
     ? `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
     : `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
   return `${clock}.${tenths}`;
+}
+
+/** 任务完成时计算总耗时（ms）：从消息创建时间戳起算；缺时间戳（如历史恢复的消息）返回 undefined。 */
+function completedDurationMs(item: MessageTimelineItem): number | undefined {
+  return item.startedAt === undefined ? undefined : Date.now() - item.startedAt;
+}
+
+/**
+ * 中文耗时格式：35秒 / 2分43秒 / 2小时20分49秒。
+ */
+function formatElapsedChinese(milliseconds: number): string {
+  const totalSeconds = Math.max(0, Math.round(milliseconds / 1000));
+  const seconds = totalSeconds % 60;
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  const minutes = totalMinutes % 60;
+  const hours = Math.floor(totalMinutes / 60);
+  if (hours > 0) return `${hours}小时${minutes}分${seconds}秒`;
+  if (totalMinutes > 0) return `${minutes}分${seconds}秒`;
+  return `${seconds}秒`;
 }
 
 function modelCallStatusLabel(status: ModelCallTrace['status']): string {
