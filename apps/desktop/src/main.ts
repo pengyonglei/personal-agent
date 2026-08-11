@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { existsSync, statSync } from 'node:fs';
-import { mkdir } from 'node:fs/promises';
+import { cp, mkdir, rename, rm } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
@@ -10,6 +10,7 @@ import { createWebServer } from '@personal-agent/web';
 const APP_USER_MODEL_ID = 'com.squirrel.PersonalAgent.PersonalAgent';
 const SELECT_DIRECTORY_CHANNEL = 'desktop:select-directory';
 const TOGGLE_DEVTOOLS_CHANNEL = 'desktop:toggle-devtools';
+const OPEN_PATH_CHANNEL = 'desktop:open-path';
 const mainDirectory = dirname(fileURLToPath(import.meta.url));
 
 // Preload 脚本缺失会导致 window.personalAgentDesktop 不可用
@@ -78,6 +79,16 @@ function startDesktopApplication(): void {
     }
   });
 
+  ipcMain.handle(OPEN_PATH_CHANNEL, async (event, targetPath?: unknown) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents) return 'Unauthorized';
+    if (typeof targetPath !== 'string' || targetPath.length === 0) {
+      return '无效的目录路径';
+    }
+    // shell.openPath 返回空字符串表示成功，否则返回错误信息
+    const errorMessage = await shell.openPath(targetPath);
+    return errorMessage || null;
+  });
+
   app.on('before-quit', (event) => {
     if (!closeWebServer || shutdownStarted) return;
     event.preventDefault();
@@ -106,8 +117,12 @@ function startDesktopApplication(): void {
 async function createDesktopWindow(): Promise<void> {
   if (mainWindow) return;
 
-  const dataDirectory = join(app.getPath('userData'), 'agent-data');
+  // desktop shares ~/.personal-agent/ with CLI/web: config.yaml, projects.json,
+  // sessions and everything else live under the same root directory.
+  const dataDirectory = join(app.getPath('home'), '.personal-agent');
   await mkdir(dataDirectory, { recursive: true });
+  // One-time migration from the legacy Electron userData/agent-data directory.
+  await migrateLegacyDataDirectory(join(app.getPath('userData'), 'agent-data'), dataDirectory);
 
   const clientBuildDirectory = app.isPackaged
     ? join(process.resourcesPath, 'client')
@@ -181,6 +196,41 @@ async function createDesktopWindow(): Promise<void> {
   const pageUrl = new URL(applicationOrigin);
   pageUrl.searchParams.set('token', authToken);
   await window.loadURL(pageUrl.toString());
+}
+
+/**
+ * Migrates config files from the legacy Electron userData/agent-data directory
+ * to ~/.personal-agent/ in one shot. Only moves entries that do not already
+ * exist at the target so fresh data is never overwritten.
+ */
+async function migrateLegacyDataDirectory(
+  oldDirectory: string,
+  newDirectory: string,
+): Promise<void> {
+  if (oldDirectory === newDirectory) return;
+  const legacyEntries = [
+    { name: 'config.yaml', recursive: false },
+    { name: 'projects.json', recursive: false },
+    { name: 'sessions', recursive: true },
+  ] as const;
+  for (const entry of legacyEntries) {
+    const oldPath = join(oldDirectory, entry.name);
+    const newPath = join(newDirectory, entry.name);
+    if (!existsSync(oldPath) || existsSync(newPath)) continue;
+    try {
+      await rename(oldPath, newPath);
+      console.log(`[desktop] migrated ${oldPath} -> ${newPath}`);
+    } catch (error) {
+      // Cross-device (EXDEV) failures fall back to copy + delete.
+      try {
+        await cp(oldPath, newPath, { recursive: entry.recursive });
+        await rm(oldPath, { recursive: entry.recursive, force: true });
+        console.log(`[desktop] migrated (copy) ${oldPath} -> ${newPath}`);
+      } catch (copyError) {
+        console.warn(`[desktop] failed to migrate ${oldPath}:`, copyError);
+      }
+    }
+  }
 }
 
 function resolveDirectoryPickerDefaultPath(value: unknown): string {

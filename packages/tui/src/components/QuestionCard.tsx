@@ -94,7 +94,8 @@ export function QuestionCard({ question, onAnswer }: QuestionCardProps) {
               : '( )';
           return (
             <Text key={option} color={focused ? colors.accent : colors.text} bold={focused}>
-              {marker} {option}
+              {marker} {i === 0 && <Text color={colors.warning}>[推荐] </Text>}
+              {option}
             </Text>
           );
         })}

@@ -146,6 +146,12 @@ export const appConfigSchema = z.object({
       disabled: z.array(z.string()).default([]),
     })
     .default({}),
+  skills: z
+    .object({
+      enabled: z.boolean().default(true),
+      paths: z.array(z.string()).default([]),
+    })
+    .default({}),
 });
 
 export type AppConfig = z.infer<typeof appConfigSchema>;

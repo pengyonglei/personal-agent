@@ -98,6 +98,7 @@ export interface RuntimeInfo {
   workingDirectory: string;
   toolCount: number;
   plugins: Array<{ name: string; version: string; skills: number; tools: number }>;
+  standaloneSkills: number;
   mcpServers: Array<{ name: string; connected: boolean; toolCount: number }>;
   memoryEnabled: boolean;
 }

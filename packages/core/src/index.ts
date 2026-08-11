@@ -27,6 +27,14 @@ export {
   type CreatePlanInput,
 } from './plan-mode';
 export {
+  createPlanTools,
+  createMemoryTools,
+  formatPlan,
+  type PlanToolHost,
+  type MemoryToolHost,
+  type MemoryStoreLike,
+} from './tool-factories';
+export {
   ProjectManager,
   type Project,
   type ProjectTask,

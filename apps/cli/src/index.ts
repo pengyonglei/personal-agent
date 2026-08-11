@@ -10,7 +10,9 @@ import {
   SessionManager,
   SubAgentManager,
   PlanModeEngine,
-  type Plan,
+  createPlanTools,
+  createMemoryTools,
+  formatPlan,
 } from '@personal-agent/core';
 import {
   BaseTool,
@@ -43,7 +45,7 @@ import {
   type PricingMap,
 } from '@personal-agent/stats';
 import { MCPClientManager } from '@personal-agent/mcp';
-import { PluginLoader } from '@personal-agent/plugin';
+import { PluginLoader, parseSkillReferences } from '@personal-agent/plugin';
 import * as readline from 'node:readline';
 
 const log = createLogger('cli');
@@ -205,6 +207,9 @@ program
     if (mergedConfig.plugins.enabled) {
       await pluginLoader.loadAll();
     }
+    if (mergedConfig.skills.enabled) {
+      await pluginLoader.loadStandaloneSkills(mergedConfig.skills.paths);
+    }
 
     // Create context assembler
     const contextAssembler = new ContextAssembler(
@@ -227,17 +232,20 @@ program
 
     /**
      * Search memory and inject relevant context before each turn.
+     * Returns the user input with explicit skill references (`#skill-name`) removed.
      */
-    async function injectMemoryContext(userInput: string): Promise<void> {
+    async function injectMemoryContext(userInput: string): Promise<string> {
       contextAssembler.removeSection('automatic-memory-context');
       contextAssembler.removeSection('active-plugin-skills');
+      // 显式技能引用（#skill-name）：精确命中并强制注入
+      const refs = parseSkillReferences(userInput, (name) => pluginLoader.getSkill(name));
       await pluginLoader.dispatchHook('on_user_input', {
         sessionId: session.getSessionId(),
         input: userInput,
       });
       if (memoryStore) {
         try {
-          const context = await memoryStore.getRelevantContext(userInput, 2000);
+          const context = await memoryStore.getRelevantContext(refs.cleaned, 2000);
           if (context) {
             contextAssembler.addSection({
               name: 'automatic-memory-context',
@@ -253,7 +261,13 @@ program
           // Memory injection is best-effort — don't fail the turn
         }
       }
-      const skills = pluginLoader.findSkills(userInput);
+      // 显式引用技能 + 剩余输入模糊匹配（按名称去重）
+      const skills = [
+        ...refs.skills,
+        ...pluginLoader
+          .findSkills(refs.cleaned)
+          .filter((skill) => !refs.skills.some((ref) => ref.name === skill.name)),
+      ];
       if (skills.length > 0) {
         contextAssembler.addSection({
           name: 'active-plugin-skills',
@@ -268,72 +282,17 @@ program
             .join('\n\n'),
         });
       }
+      return refs.cleaned;
     }
 
     // Add read_memory and write_memory tools when persistent memory is enabled
     if (memoryStore) {
-      const readMemoryTool = new (class extends BaseTool {
-        readonly name = 'read_memory';
-        readonly description =
-          'Query the persistent memory store for relevant facts and preferences.';
-        readonly inputSchema = {
-          type: 'object',
-          properties: { query: { type: 'string', description: 'Search query' } },
-          required: ['query'],
-        };
-        readonly category = 'memory';
-        async execute(p: Record<string, unknown>, _c: ToolContext): Promise<ToolResult> {
-          const results = await memoryStore.search(p.query as string, { maxResults: 5 });
-          const text = results
-            .map(
-              (r: { entry: { type: string; content: string } }) =>
-                `[${r.entry.type}] ${r.entry.content}`,
-            )
-            .join('\n');
-          return { success: true, content: text || '(no relevant memories found)' };
-        }
-      })();
-      toolRegistry.register(readMemoryTool);
-
-      const writeMemoryTool = new (class extends BaseTool {
-        readonly name = 'write_memory';
-        readonly description = 'Write a fact or preference to persistent memory.';
-        readonly inputSchema = {
-          type: 'object',
-          properties: {
-            content: { type: 'string', description: 'Content to remember' },
-            type: {
-              type: 'string',
-              enum: ['fact', 'preference', 'decision'],
-              description: 'Memory type',
-            },
-            importance: {
-              type: 'number',
-              description: 'Importance level (1=critical, 2=important, 3=info)',
-            },
-          },
-          required: ['content'],
-        };
-        readonly category = 'memory';
-        readonly requiresPermission = true;
-        async execute(p: Record<string, unknown>, _c: ToolContext): Promise<ToolResult> {
-          const importance = Number(p.importance ?? 2);
-          if (![1, 2, 3].includes(importance)) {
-            return { success: false, content: '', error: 'importance must be 1, 2, or 3' };
-          }
-          const entry = await memoryStore.create({
-            type: (p.type as any) ?? 'fact',
-            content: p.content as string,
-            tags: [],
-            metadata: {
-              importance: importance as 1 | 2 | 3,
-              sourceSessionId: session.getSessionId(),
-            },
-          });
-          return { success: true, content: `Memory saved: ${entry.id}` };
-        }
-      })();
-      toolRegistry.register(writeMemoryTool);
+      for (const tool of createMemoryTools({
+        getStore: () => memoryStore,
+        getSessionId: () => session.getSessionId(),
+      })) {
+        toolRegistry.register(tool);
+      }
     }
 
     // Initialize MCP client and connect to configured servers
@@ -417,124 +376,12 @@ program
       ? new ModelRequestRecorder(statsStore, () => session.getSessionId())
       : null;
 
-    const submitPlanTool = new (class extends BaseTool {
-      readonly name = 'submit_plan';
-      readonly description =
-        'Submit a structured implementation plan for user approval. Use stable step ids such as step-1 and reference those ids from dependencies.';
-      readonly category = 'plan';
-      readonly inputSchema = {
-        type: 'object',
-        properties: {
-          title: { type: 'string', description: 'Short plan title' },
-          description: { type: 'string', description: 'Plan overview' },
-          risks: { type: 'array', items: { type: 'string' } },
-          estimated_tokens: { type: 'number' },
-          steps: {
-            type: 'array',
-            items: {
-              type: 'object',
-              properties: {
-                id: { type: 'string' },
-                title: { type: 'string' },
-                description: { type: 'string' },
-                tool_calls: { type: 'array', items: { type: 'string' } },
-                dependencies: { type: 'array', items: { type: 'string' } },
-              },
-              required: ['title', 'description'],
-            },
-          },
-        },
-        required: ['title', 'steps'],
-      } as any;
-
-      async execute(params: Record<string, unknown>): Promise<ToolResult> {
-        if (!planModeState.active) {
-          return {
-            success: false,
-            content: '',
-            error: 'submit_plan is only available in plan mode',
-          };
-        }
-        const rawSteps = Array.isArray(params.steps) ? params.steps : [];
-        const plan = planEngine.createPlan({
-          title: String(params.title ?? ''),
-          description: String(params.description ?? ''),
-          risks: Array.isArray(params.risks) ? params.risks.map(String) : [],
-          estimatedTokens: Number(params.estimated_tokens ?? 0),
-          steps: rawSteps.map((raw, index) => {
-            const step = raw as Record<string, unknown>;
-            return {
-              id: String(step.id ?? `step-${index + 1}`),
-              title: String(step.title ?? ''),
-              description: String(step.description ?? ''),
-              toolCalls: Array.isArray(step.tool_calls) ? step.tool_calls.map(String) : [],
-              dependencies: Array.isArray(step.dependencies) ? step.dependencies.map(String) : [],
-            };
-          }),
-        });
-        return { success: true, content: formatPlan(plan) };
-      }
-    })();
-    toolRegistry.register(submitPlanTool);
-
-    const getPlanTool = new (class extends BaseTool {
-      readonly name = 'get_plan';
-      readonly description = 'Get the current structured plan and its execution progress.';
-      readonly category = 'plan';
-      readonly inputSchema = { type: 'object', properties: {} } as const;
-
-      async execute(): Promise<ToolResult> {
-        const plan = planEngine.getPlan();
-        return { success: true, content: plan ? formatPlan(plan) : 'No active plan.' };
-      }
-    })();
-    toolRegistry.register(getPlanTool);
-
-    const updatePlanStepTool = new (class extends BaseTool {
-      readonly name = 'update_plan_step';
-      readonly description = 'Update a step in the approved plan as execution progresses.';
-      readonly category = 'plan';
-      readonly inputSchema = {
-        type: 'object',
-        properties: {
-          step_id: { type: 'string' },
-          status: {
-            type: 'string',
-            enum: ['in_progress', 'completed', 'failed', 'skipped'],
-          },
-          output: { type: 'string' },
-        },
-        required: ['step_id', 'status'],
-      } as any;
-
-      async execute(params: Record<string, unknown>): Promise<ToolResult> {
-        const stepId = String(params.step_id);
-        const status = String(params.status);
-        const output = params.output === undefined ? undefined : String(params.output);
-        const step =
-          status === 'in_progress'
-            ? await planEngine.startStep(stepId)
-            : status === 'completed'
-              ? await planEngine.completeStep(stepId, output)
-              : status === 'failed'
-                ? await planEngine.failStep(stepId, output)
-                : status === 'skipped'
-                  ? await planEngine.skipStep(stepId)
-                  : null;
-        if (!step) {
-          return {
-            success: false,
-            content: '',
-            error: `Unknown step or status: ${stepId}/${status}`,
-          };
-        }
-        return {
-          success: true,
-          content: `Step ${step.id} is ${step.status}. Plan progress: ${planEngine.getProgress().percentage}%`,
-        };
-      }
-    })();
-    toolRegistry.register(updatePlanStepTool);
+    for (const tool of createPlanTools({
+      isPlanModeActive: () => planModeState.active,
+      getPlanEngine: () => planEngine,
+    })) {
+      toolRegistry.register(tool);
+    }
     pluginLoader.registerTools(toolRegistry);
 
     const planModeToolNames = new Set([
@@ -694,7 +541,7 @@ You are currently in PLAN MODE. In this mode:
 3. You MUST call submit_plan with the final structured plan before finishing your response.
 4. Do not execute the plan until the user approves it with /exit-plan.
 5. The plan should be comprehensive — break the task into logical phases with clear dependencies.
-6. When you need the user to make a decision, call ask_user with the question and up to 4 recommended options (use multi_select when multiple answers fit). The UI renders the options as a selectable list (single/multi select) with a custom answer option, so the user can always type their own answer.
+6. When you need the user to make a decision, call ask_user with the question and up to 4 recommended options (use multi_select when multiple answers fit). Always put your most recommended option FIRST — the UI marks it with a "推荐" badge. The UI renders the options as a selectable list (single/multi select) with a custom answer option, so the user can always type their own answer.
 
 When the user is satisfied, they will use /exit-plan to leave plan mode. Then you can execute the plan step by step using the available tools.`,
     });
@@ -702,7 +549,7 @@ When the user is satisfied, they will use /exit-plan to leave plan mode. Then yo
     // Single prompt mode
     if (prompt) {
       console.log(`\x1b[2m> ${prompt}\x1b[0m\n`);
-      await runSinglePrompt(agentLoop, prompt, session, contextAssembler);
+      await runSinglePrompt(agentLoop, prompt, session, contextAssembler, injectMemoryContext);
       statsStore?.close();
       await pluginLoader.dispatchHook('on_session_end', {
         sessionId: session.getSessionId(),
@@ -724,6 +571,7 @@ When the user is satisfied, they will use /exit-plan to leave plan mode. Then yo
         autoApprove,
         planEngine,
         injectMemoryContext,
+        pluginLoader,
         statsStore,
         planModeState,
         promptOverrides,
@@ -763,42 +611,47 @@ When the user is satisfied, they will use /exit-plan to leave plan mode. Then yo
       }
 
       if (input.startsWith('/')) {
-        const result = await handleSlashCommand(input, {
-          rl,
-          contextAssembler,
-          provider,
-          permissionManager,
-          session,
-          autoApprove,
-          statsStore,
-          planEngine,
-          planModeState,
-          promptOverrides,
-        });
-        if (result.status === 'exit') {
-          syncSessionMessages(session, contextAssembler);
-          await session.save();
-          await pluginLoader.dispatchHook('on_session_end', {
-            sessionId: session.getSessionId(),
+        // /技能名：完整匹配已加载技能时视为技能引用消息，不走 slash 命令
+        const skillMatch = input.match(/^\/([a-zA-Z0-9][a-zA-Z0-9._-]*)$/);
+        const isSkillRef = skillMatch ? pluginLoader.getSkill(skillMatch[1]) !== undefined : false;
+        if (!isSkillRef) {
+          const result = await handleSlashCommand(input, {
+            rl,
+            contextAssembler,
+            provider,
+            permissionManager,
+            session,
+            autoApprove,
+            statsStore,
+            planEngine,
+            planModeState,
+            promptOverrides,
           });
-          await subAgentManager.cancelAll();
-          await mcpManager.disconnectAll();
-          await provider.dispose();
-          rl.close();
-          statsStore?.close();
-          process.exit(0);
-          process.exit(0);
+          if (result.status === 'exit') {
+            syncSessionMessages(session, contextAssembler);
+            await session.save();
+            await pluginLoader.dispatchHook('on_session_end', {
+              sessionId: session.getSessionId(),
+            });
+            await subAgentManager.cancelAll();
+            await mcpManager.disconnectAll();
+            await provider.dispose();
+            rl.close();
+            statsStore?.close();
+            process.exit(0);
+            process.exit(0);
+          }
+          if (result.output) {
+            console.log(`\n${result.output}`);
+          }
+          rl.prompt();
+          return;
         }
-        if (result.output) {
-          console.log(`\n${result.output}`);
-        }
-        rl.prompt();
-        return;
       }
 
       try {
-        await injectMemoryContext(input);
-        for await (const event of agentLoop.run(input)) {
+        const cleanedInput = await injectMemoryContext(input);
+        for await (const event of agentLoop.run(cleanedInput)) {
           renderEvent(event);
         }
         recordCompletedTurn(session, contextAssembler, agentLoop);
@@ -856,7 +709,9 @@ interface TuiModeOptions {
   autoApprove: boolean;
   statsStore: UsageStore | null;
   planEngine?: PlanModeEngine;
-  injectMemoryContext?: (userInput: string) => Promise<void>;
+  injectMemoryContext?: (userInput: string) => Promise<string>;
+  /** 技能/插件加载器（用于 /技能名 引用）。 */
+  pluginLoader: PluginLoader;
   /** 用户自定义提示词覆盖（key → 内容） */
   promptOverrides: Record<string, string>;
   planModeState: PlanModeState;
@@ -933,10 +788,10 @@ async function runTuiMode(opts: TuiModeOptions) {
       },
       onUserInput: async (text: string) => {
         try {
-          if (opts.injectMemoryContext) {
-            await opts.injectMemoryContext(text);
-          }
-          for await (const event of opts.agentLoop.run(text)) {
+          const cleanedInput = opts.injectMemoryContext
+            ? await opts.injectMemoryContext(text)
+            : text;
+          for await (const event of opts.agentLoop.run(cleanedInput)) {
             handleTuiEvent(event, tuiDispatch);
           }
           recordCompletedTurn(opts.session, opts.contextAssembler, opts.agentLoop);
@@ -951,6 +806,21 @@ async function runTuiMode(opts: TuiModeOptions) {
       },
       onSlashCommand: async (input: string): Promise<string | void> => {
         try {
+          // /技能名：完整匹配已加载技能时视为技能引用消息，直接执行对话流程
+          const skillMatch = input.match(/^\/([a-zA-Z0-9][a-zA-Z0-9._-]*)$/);
+          const skill = skillMatch ? opts.pluginLoader.getSkill(skillMatch[1]) : undefined;
+          if (skill) {
+            const cleanedInput = opts.injectMemoryContext
+              ? await opts.injectMemoryContext(input)
+              : input;
+            for await (const event of opts.agentLoop.run(cleanedInput)) {
+              handleTuiEvent(event, tuiDispatch);
+            }
+            recordCompletedTurn(opts.session, opts.contextAssembler, opts.agentLoop);
+            syncTuiPlan();
+            await opts.session.save();
+            return undefined;
+          }
           const ctx: CommandContext = {
             rl: null,
             contextAssembler: opts.contextAssembler,
@@ -1071,9 +941,11 @@ async function runSinglePrompt(
   prompt: string,
   session: SessionManager,
   contextAssembler: ContextAssembler,
+  injectMemoryContext?: (userInput: string) => Promise<string>,
 ): Promise<void> {
   try {
-    for await (const event of agentLoop.run(prompt)) {
+    const cleanedInput = injectMemoryContext ? await injectMemoryContext(prompt) : prompt;
+    for await (const event of agentLoop.run(cleanedInput)) {
       renderEvent(event);
     }
     recordCompletedTurn(session, contextAssembler, agentLoop);
@@ -1159,7 +1031,8 @@ function buildReadlineAskUser(): NonNullable<ToolContext['askUser']> {
 
       console.log(`\n\x1b[1;36m❓ ${question.question}\x1b[0m`);
       question.options.forEach((option, i) => {
-        console.log(`  \x1b[33m${i + 1}.\x1b[0m ${option}`);
+        const recommended = i === 0 ? '\x1b[1;33m[推荐]\x1b[0m ' : '';
+        console.log(`  \x1b[33m${i + 1}.\x1b[0m ${recommended}${option}`);
       });
       if (question.allowCustom) {
         console.log(`  \x1b[33m${total}.\x1b[0m ✎ 自定义答案（以上都不选）`);
@@ -1390,7 +1263,7 @@ You are currently in PLAN MODE. In this mode:
 3. You MUST call submit_plan with the final structured plan before finishing your response.
 4. Do not execute the plan until the user approves it with /exit-plan.
 5. The plan should be comprehensive — break the task into logical phases with clear dependencies.
-6. When you need the user to make a decision, call ask_user with the question and up to 4 recommended options (use multi_select when multiple answers fit). The UI renders the options as a selectable list (single/multi select) with a custom answer option, so the user can always type their own answer.
+6. When you need the user to make a decision, call ask_user with the question and up to 4 recommended options (use multi_select when multiple answers fit). Always put your most recommended option FIRST — the UI marks it with a "推荐" badge. The UI renders the options as a selectable list (single/multi select) with a custom answer option, so the user can always type their own answer.
 
 When the user is satisfied with the plan, they will use /exit-plan to leave plan mode, then you can execute it step by step using the available tools.`,
       });
@@ -1523,40 +1396,6 @@ Execute this plan in dependency order. Call update_plan_step before starting eac
   }
 
   return { status: 'ok' };
-}
-
-function formatPlan(plan: Plan): string {
-  const progressCounts = {
-    completed: plan.steps.filter((step) => step.status === 'completed').length,
-    settled: plan.steps.filter((step) => ['completed', 'failed', 'skipped'].includes(step.status))
-      .length,
-  };
-  const percentage =
-    plan.steps.length === 0 ? 100 : Math.round((progressCounts.settled / plan.steps.length) * 100);
-  const lines = [
-    `${plan.title} [${plan.status}]`,
-    plan.description,
-    `Progress: ${progressCounts.completed}/${plan.steps.length} completed (${percentage}% settled)`,
-  ].filter(Boolean);
-  for (const step of plan.steps) {
-    const marker =
-      step.status === 'completed'
-        ? 'x'
-        : step.status === 'in_progress'
-          ? '>'
-          : step.status === 'failed'
-            ? '!'
-            : step.status === 'skipped'
-              ? '-'
-              : ' ';
-    const dependencies =
-      step.dependencies.length > 0 ? ` (after: ${step.dependencies.join(', ')})` : '';
-    lines.push(`[${marker}] ${step.id}: ${step.title}${dependencies}`);
-  }
-  if (plan.metadata.risks.length > 0) {
-    lines.push(`Risks: ${plan.metadata.risks.join('; ')}`);
-  }
-  return lines.join('\n');
 }
 
 function resolveCliContextWindow(provider: LLMProvider): number {

@@ -70,3 +70,4 @@ releases
 
 # Qoder test
 .tmp*-verify
+.tmp*

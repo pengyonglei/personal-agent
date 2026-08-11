@@ -100,8 +100,18 @@ const PLUGIN_SEARCH_PATHS = [
   resolve(process.cwd(), '.personal-agent', 'plugins'),
 ];
 
+/**
+ * personal-agent 技能目录（Claude Code / Codex 兼容的 SKILL.md 格式）。
+ * 默认仅扫描 `~/.personal-agent/skills`，可通过 `skills.paths` 配置扩展。
+ * 每个目录包含 `<skill-name>/SKILL.md` 文件。
+ */
+const STANDARD_SKILL_SEARCH_PATHS = [
+  resolve(homedir(), '.personal-agent', 'skills'),
+];
+
 export class PluginLoader {
   private loadedPlugins: LoadedPlugin[] = [];
+  private standaloneSkills: Skill[] = [];
   private customPaths: string[] = [];
   private disabled = new Set<string>();
   private discoveredSources = new Map<string, string>();
@@ -227,6 +237,77 @@ export class PluginLoader {
     return this.loadedPlugins;
   }
 
+  // -------------------------------------------------------------------
+  // Standard skills (Claude Code / Codex compatible SKILL.md)
+  // -------------------------------------------------------------------
+
+  /**
+   * Load skills from standard Claude Code / Codex skill directories:
+   * `<base>/<skill-name>/SKILL.md` with `name` / `description` frontmatter.
+   * Custom paths are searched before the standard `~/.claude/skills`,
+   * `~/.codex/skills`, `<cwd>/.claude/skills` and `<cwd>/.codex/skills`.
+   */
+  async loadStandaloneSkills(
+    customPaths: string[] = [],
+    options: { includeStandardPaths?: boolean } = {},
+  ): Promise<Skill[]> {
+    this.standaloneSkills = [];
+    const searchPaths =
+      options.includeStandardPaths === false
+        ? [...customPaths]
+        : [...new Set([...customPaths, ...STANDARD_SKILL_SEARCH_PATHS])];
+
+    for (const basePath of searchPaths) {
+      if (!existsSync(basePath)) continue;
+      try {
+        const entries = readdirSync(basePath);
+        for (const entry of entries) {
+          if (entry.startsWith('.')) continue; // skip hidden dirs (e.g. Codex .system)
+          const skillDir = join(basePath, entry);
+          if (!statSync(skillDir).isDirectory()) continue;
+          const skillPath = join(skillDir, 'SKILL.md');
+          if (!existsSync(skillPath)) continue;
+          try {
+            const parsed = parseSkillFile(readFileSync(skillPath, 'utf-8'));
+            const name = parsed.name ?? entry;
+            const description = parsed.description ?? parsed.name ?? entry;
+            if (this.standaloneSkills.some((s) => s.name === name)) {
+              log.warn(`Skipping duplicate skill '${name}' at ${skillPath}`);
+              continue;
+            }
+            if (!parsed.name || !parsed.description) {
+              log.warn(
+                `Skill '${name}' at ${skillPath} is missing name/description frontmatter; ` +
+                  `falling back to directory name`,
+              );
+            }
+            this.standaloneSkills.push({
+              name,
+              description,
+              content: parsed.content,
+              triggers: parsed.triggers,
+              sourcePath: skillPath,
+            });
+          } catch (err) {
+            log.warn(`Failed to load skill from ${skillPath}: ${(err as Error).message}`);
+          }
+        }
+      } catch (err) {
+        log.debug(`Skipping path ${basePath}: ${(err as Error).message}`);
+      }
+    }
+
+    log.info(`Loaded ${this.standaloneSkills.length} standard skills (Claude Code / Codex format)`);
+    return this.standaloneSkills;
+  }
+
+  /**
+   * Get all standalone skills loaded from standard skill directories.
+   */
+  getStandaloneSkills(): Skill[] {
+    return [...this.standaloneSkills];
+  }
+
   /**
    * Register every tool exported by loaded plugins.
    */
@@ -286,14 +367,14 @@ export class PluginLoader {
         }
 
         const content = readFileSync(skillPath, 'utf-8');
-        // Extract frontmatter if present (YAML between --- markers)
-        const frontmatter = extractFrontmatter(content);
+        // Standard frontmatter (name/description) or legacy triggers-only frontmatter
+        const parsed = parseSkillFile(content);
 
         skills.push({
           name: skillDef.name,
           description: skillDef.description,
-          content: frontmatter.content,
-          triggers: skillDef.triggers ?? frontmatter.triggers,
+          content: parsed.content,
+          triggers: skillDef.triggers ?? parsed.triggers,
           sourcePath: skillPath,
         });
       } catch (err) {
@@ -311,20 +392,22 @@ export class PluginLoader {
     const skills: Skill[] = [];
     const q = query.toLowerCase();
 
+    const matches = (skill: Skill): boolean => {
+      // Check triggers
+      if (skill.triggers) {
+        const matched = skill.triggers.some((t) => q.includes(t.toLowerCase()));
+        if (matched) return true;
+      }
+      // Check name/description
+      return skill.name.toLowerCase().includes(q) || skill.description.toLowerCase().includes(q);
+    };
+
+    for (const skill of this.standaloneSkills) {
+      if (matches(skill)) skills.push(skill);
+    }
     for (const plugin of this.loadedPlugins) {
       for (const skill of plugin.skills) {
-        // Check triggers
-        if (skill.triggers) {
-          const matched = skill.triggers.some((t) => q.includes(t.toLowerCase()));
-          if (matched) {
-            skills.push(skill);
-            continue;
-          }
-        }
-        // Check name/description
-        if (skill.name.toLowerCase().includes(q) || skill.description.toLowerCase().includes(q)) {
-          skills.push(skill);
-        }
+        if (matches(skill)) skills.push(skill);
       }
     }
 
@@ -335,6 +418,8 @@ export class PluginLoader {
    * Get a skill by name.
    */
   getSkill(name: string): Skill | undefined {
+    const standalone = this.standaloneSkills.find((s) => s.name === name);
+    if (standalone) return standalone;
     for (const plugin of this.loadedPlugins) {
       const skill = plugin.skills.find((s) => s.name === name);
       if (skill) return skill;
@@ -346,7 +431,7 @@ export class PluginLoader {
    * Get all loaded skills across all plugins.
    */
   getAllSkills(): Skill[] {
-    return this.loadedPlugins.flatMap((p) => p.skills);
+    return [...this.standaloneSkills, ...this.loadedPlugins.flatMap((p) => p.skills)];
   }
 
   // -------------------------------------------------------------------
@@ -477,9 +562,33 @@ export class PluginLoader {
 // Helpers
 // ---------------------------------------------------------------------------
 
-interface FrontmatterResult {
-  content: string;
+interface ParsedSkillFile {
+  name?: string;
+  description?: string;
   triggers?: string[];
+  content: string;
+}
+
+/**
+ * 解析输入中的显式技能引用（`/skill-name`，兼容 `#skill-name`）。
+ * 返回命中的技能列表与移除引用标记后的输入；未命中已加载技能的标记原样保留
+ * （避免破坏普通文本中的路径，如 /tmp/foo、issue #123）。
+ */
+export function parseSkillReferences(
+  input: string,
+  getSkill: (name: string) => Skill | undefined,
+): { skills: Skill[]; cleaned: string } {
+  const skills: Skill[] = [];
+  const cleaned = input.replace(
+    /([#/])([a-zA-Z0-9][a-zA-Z0-9._-]*)/g,
+    (match, _marker: string, name: string) => {
+      const skill = getSkill(name);
+      if (!skill) return match; // 未命中已加载技能：保留原文（路径、issue 编号等不受影响）
+      if (!skills.some((s) => s.name === skill.name)) skills.push(skill);
+      return '';
+    },
+  );
+  return { skills, cleaned: cleaned.replace(/\s+/g, ' ').trim() };
 }
 
 type PluginHookHandler = (context: Record<string, unknown>) => unknown | Promise<unknown>;
@@ -553,25 +662,41 @@ function validateToolParams(
   return { valid: errors.length === 0, errors };
 }
 
-function extractFrontmatter(raw: string): FrontmatterResult {
+/**
+ * Parse a skill markdown file. Supports the standard Claude Code / Codex
+ * frontmatter (`name`, `description`, delimiters on their own lines) plus an
+ * optional `triggers` extension used by this project for auto-triggering.
+ */
+function parseSkillFile(raw: string): ParsedSkillFile {
   const trimmed = raw.trim();
   if (!trimmed.startsWith('---')) {
     return { content: trimmed };
   }
 
-  const endIdx = trimmed.indexOf('---', 3);
+  const lines = trimmed.split(/\r?\n/);
+  let endIdx = -1;
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i].trim() === '---') {
+      endIdx = i;
+      break;
+    }
+  }
   if (endIdx === -1) {
     return { content: trimmed };
   }
 
-  try {
-    const yamlBlock = trimmed.slice(3, endIdx).trim();
-    const parsed = parseYaml(yamlBlock) as Record<string, unknown>;
-    const content = trimmed.slice(endIdx + 3).trim();
+  const yamlBlock = lines.slice(1, endIdx).join('\n');
+  const content = lines.slice(endIdx + 1).join('\n').trim();
 
+  try {
+    const parsed = parseYaml(yamlBlock) as Record<string, unknown>;
     return {
+      name: typeof parsed.name === 'string' ? parsed.name : undefined,
+      description: typeof parsed.description === 'string' ? parsed.description : undefined,
+      triggers: Array.isArray(parsed.triggers)
+        ? parsed.triggers.filter((t): t is string => typeof t === 'string')
+        : undefined,
       content,
-      triggers: parsed.triggers as string[] | undefined,
     };
   } catch {
     // If YAML parse fails, return everything as content

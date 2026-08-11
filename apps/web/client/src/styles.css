@@ -1410,7 +1410,8 @@ select {
   padding: 10px 14px 8px;
   border: 0;
   border-radius: 0;
-  background: var(--pa-panel);
+  /* 透明背景：下方的影子高亮层提供技能 chip 底色 */
+  background: transparent;
   box-shadow: none;
   color: var(--pa-text);
   font-size: 13px;
@@ -1720,6 +1721,99 @@ select {
 
 .pa-settings-content::-webkit-scrollbar-track {
   background: transparent;
+}
+
+/* 技能上传区：宽度占满、高度由 Dragger 的 height prop 控制（72px），图标与文字同行 */
+.pa-skill-upload-dragger .ant-upload-drag-icon,
+.pa-skill-upload-dragger .ant-upload-text {
+  display: inline-block;
+  vertical-align: middle;
+  margin: 0 !important;
+}
+.pa-skill-upload-dragger .ant-upload-drag-icon {
+  margin-right: 8px !important;
+  font-size: 20px;
+  line-height: 1;
+}
+.pa-skill-upload-dragger .ant-upload-drag-icon .anticon {
+  font-size: 20px;
+  line-height: 1;
+}
+.pa-skill-upload-dragger .ant-upload-text {
+  font-size: 14px;
+}
+
+/* 输入框 / 技能选择菜单（挂在 footer 层，避免被 .pa-composer 的 overflow 裁剪） */
+.pa-composer-input-wrap {
+  position: relative;
+}
+
+/* 影子高亮层：与 TextArea 完全重叠，仅提供技能 chip 底色，不拦截交互 */
+.pa-composer-highlight {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 10px 14px 8px; /* 与 .pa-composer .ant-input 一致 */
+  overflow: hidden;
+  pointer-events: none;
+  color: transparent;
+  font-size: 13px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+/* 技能引用整体块（/skill-name、#skill-name）：仅背景与圆角，不改布局避免文字错位 */
+.pa-skill-chip {
+  background: color-mix(in srgb, var(--pa-accent), transparent 82%);
+  border-radius: 4px;
+}
+
+.pa-skill-menu {
+  position: absolute;
+  right: max(18px, calc((100% - 860px) / 2));
+  bottom: calc(100% + 10px);
+  left: max(18px, calc((100% - 860px) / 2));
+  z-index: 12;
+  max-height: 240px;
+  overflow-y: auto;
+  border: 1px solid color-mix(in srgb, var(--pa-muted), transparent 55%);
+  border-radius: 8px;
+  background: var(--pa-panel);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+  padding: 4px;
+}
+.pa-skill-menu-item {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  text-align: left;
+  cursor: pointer;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  color: inherit;
+  font: inherit;
+}
+.pa-skill-menu-item:hover,
+.pa-skill-menu-item:focus-visible {
+  background: color-mix(in srgb, var(--pa-accent, #1677ff), transparent 88%);
+  outline: none;
+}
+.pa-skill-menu-name {
+  flex-shrink: 0;
+  font-weight: 600;
+}
+.pa-skill-menu-desc {
+  font-size: 12px;
+  color: var(--pa-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .pa-settings-heading {
@@ -3224,5 +3318,15 @@ select {
     width: calc(100% - 40px);
     margin-left: 40px;
     max-width: none;
+  }
+}
+
+/* 对话内容与左侧轮次导航分离：视口 ≥768px 时导航显示，内容区宽度不足 900px 时
+   消息会向左延伸到导航线条（起点 30px + 最宽 38px）区域造成重叠。
+   这里让左侧内边距随内容区宽度自动增大到 84px（导航占位 + 安全间距），
+   宽度充足时保持原有 20px 居中布局不变，保证任何宽度下两者都不重叠。 */
+@media (min-width: 768px) {
+  .pa-transcript-inner {
+    padding-left: clamp(20px, calc(20px + (1028px - 100%) * 0.5), 84px);
   }
 }

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { StoredFileChangeBatch } from '../src/protocol';
-import { FileChangeStore, MAX_STORED_DIFF_LINES } from '../src/file-change-store';
+import { FileChangeStore, MAX_STORED_DIFF_LINES, isTemporaryFilePath } from '../src/file-change-store';
 import { createWebServer } from '../src/server';
 
 function createBatch(id: string, time: string, fileCount = 1): StoredFileChangeBatch {
@@ -110,6 +110,48 @@ test('FileChangeStore delete removes a batch', async () => {
   assert.equal(await store.delete('fc-del'), true);
   assert.equal(await store.delete('fc-del'), false); // 已删除
   assert.equal((await store.list()).length, 0);
+});
+
+test('isTemporaryFilePath identifies one-off temporary files', () => {
+  assert.equal(isTemporaryFilePath('.tmp-e2e.mjs'), true);
+  assert.equal(isTemporaryFilePath('D:/repo/.tmp-skill-edit.ps1'), true);
+  assert.equal(isTemporaryFilePath('D:\\repo\\.tmp-test-out.txt'), true);
+  assert.equal(isTemporaryFilePath('tmp-check.mjs'), true);
+  assert.equal(isTemporaryFilePath('foo.tmp'), true);
+  assert.equal(isTemporaryFilePath('foo.ts~'), true);
+  assert.equal(isTemporaryFilePath('.tmp-shell-verify/out.txt'), true);
+  assert.equal(isTemporaryFilePath('src/App.tsx'), false);
+  assert.equal(isTemporaryFilePath('README.md'), false);
+  assert.equal(isTemporaryFilePath('packages/plugin/src/index.ts'), false);
+});
+
+test('FileChangeStore excludes temporary files from saved and listed batches', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'pa-file-changes-tmp-'));
+  const store = new FileChangeStore(directory);
+
+  const batch = createBatch('fc-tmp', '2026-08-08T10:00:00.000Z');
+  batch.files = [
+    { path: 'src/real.ts', oldContent: 'a', newContent: 'b' },
+    { path: '.tmp-e2e.mjs', oldContent: '', newContent: 'console.log(1)' },
+    { path: 'scripts/tmp-check.txt', oldContent: '', newContent: 'x' },
+    { path: 'notes/readme.md~', oldContent: '', newContent: 'x' },
+  ];
+  await store.save(batch);
+
+  const [stored] = await store.list();
+  assert.ok(stored);
+  assert.deepEqual(
+    stored.files.map((file) => file.path),
+    ['src/real.ts'],
+  );
+
+  // 全部为临时文件的批次：不落盘、不展示
+  const onlyTmp = createBatch('fc-only-tmp', '2026-08-08T11:00:00.000Z');
+  onlyTmp.files = [{ path: '.tmp-debug.mjs', oldContent: '', newContent: 'x' }];
+  await store.save(onlyTmp);
+  const batches = await store.list();
+  assert.equal(batches.length, 1);
+  assert.equal(batches[0]?.id, 'fc-tmp');
 });
 
 test('GET /api/file-changes returns persisted batches', async () => {

@@ -17,12 +17,15 @@ import {
   SessionManager,
   TokenBudget,
   createLlmContextSummarizer,
+  createMemoryTools,
+  createPlanTools,
+  formatPlan,
   type Plan,
 } from '@personal-agent/core';
 import { MCPClientManager } from '@personal-agent/mcp';
 import { ModelRequestRecorder, UsageStore } from '@personal-agent/stats';
 import { FileSystemMemoryStore } from '@personal-agent/memory';
-import { PluginLoader } from '@personal-agent/plugin';
+import { PluginLoader, parseSkillReferences, type Skill } from '@personal-agent/plugin';
 import {
   AnthropicProvider,
   DeepSeekProvider,
@@ -47,7 +50,6 @@ import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import {
-  BaseTool,
   describeShell,
   registerBuiltinTools,
   setDefaultShellPreference,
@@ -156,6 +158,8 @@ export class WebAgentRuntime {
   readonly planStore: PlanStore;
   /** 修改文件记录批次落盘存储（~/.personal-agent/file-changes）。 */
   readonly fileChangeStore: FileChangeStore;
+  /** 标准技能上传目录（~/.personal-agent/skills，与插件等配置同根）。 */
+  private readonly skillsDirectory: string;
 
   private constructor(
     config: AppConfig,
@@ -166,12 +170,14 @@ export class WebAgentRuntime {
     sessionsDirectory?: string,
     plansDirectory?: string,
     fileChangesDirectory?: string,
+    skillsDirectory?: string,
   ) {
     this.config = config;
     this.workingDirectory = workingDirectory;
     this.promptOverrides = promptOverrides;
     this.configPath = configPath;
     this.sessionsDirectory = sessionsDirectory;
+    this.skillsDirectory = skillsDirectory ?? resolve(homedir(), '.personal-agent', 'skills');
     this.planStore = new PlanStore(
       plansDirectory ?? resolve(homedir(), '.personal-agent', 'plans'),
     );
@@ -222,6 +228,8 @@ export class WebAgentRuntime {
       plansDirectory?: string;
       /** 修改文件记录批次落盘目录（默认 ~/.personal-agent/file-changes，测试用）。 */
       fileChangesDirectory?: string;
+      /** 标准技能上传目录（默认 ~/.personal-agent/skills，测试用）。 */
+      skillsDirectory?: string;
     } = {},
   ): Promise<WebAgentRuntime> {
     const workingDirectory =
@@ -241,6 +249,7 @@ export class WebAgentRuntime {
       options.sessionsDirectory,
       options.plansDirectory,
       options.fileChangesDirectory,
+      options.skillsDirectory,
     );
     await runtime.initialize();
     return runtime;
@@ -314,6 +323,12 @@ export class WebAgentRuntime {
 
     if (this.config.plugins.enabled) {
       await this.pluginLoader.loadAll();
+    }
+    if (this.config.skills.enabled) {
+      await this.pluginLoader.loadStandaloneSkills([
+        ...this.config.skills.paths,
+        this.getSkillsDirectory(),
+      ]);
     }
 
     this.registerPlanTools();
@@ -438,6 +453,7 @@ export class WebAgentRuntime {
         skills: plugin.skills.length,
         tools: plugin.tools.length,
       })),
+      standaloneSkills: this.pluginLoader.getStandaloneSkills().length,
       mcpServers: this.mcpManager.listServers(),
       memoryEnabled: this.memoryStore !== null,
     };
@@ -931,13 +947,19 @@ export class WebAgentRuntime {
     }));
   }
 
-  async injectPromptContext(conversation: WebConversation, userInput: string): Promise<void> {
+  async injectPromptContext(
+    conversation: WebConversation,
+    userInput: string,
+  ): Promise<string> {
     conversation.context.removeSection('automatic-memory-context');
     conversation.context.removeSection('active-plugin-skills');
 
+    // 显式技能引用（#skill-name）：精确命中并强制注入
+    const refs = parseSkillReferences(userInput, (name) => this.pluginLoader.getSkill(name));
+
     if (this.memoryStore) {
       try {
-        const memory = await this.memoryStore.getRelevantContext(userInput, 2000);
+        const memory = await this.memoryStore.getRelevantContext(refs.cleaned, 2000);
         if (memory) {
           conversation.context.addSection({
             name: 'automatic-memory-context',
@@ -951,7 +973,13 @@ export class WebAgentRuntime {
       }
     }
 
-    const skills = this.pluginLoader.findSkills(userInput);
+    // 显式引用技能 + 剩余输入模糊匹配（按名称去重）
+    const skills = [
+      ...refs.skills,
+      ...this.pluginLoader
+        .findSkills(refs.cleaned)
+        .filter((skill) => !refs.skills.some((ref) => ref.name === skill.name)),
+    ];
     if (skills.length > 0) {
       conversation.context.addSection({
         name: 'active-plugin-skills',
@@ -966,6 +994,7 @@ export class WebAgentRuntime {
           .join('\n\n'),
       });
     }
+    return refs.cleaned;
   }
 
   async executeTool(
@@ -1071,6 +1100,30 @@ export class WebAgentRuntime {
     return this.toolRegistry.listDefinitions();
   }
 
+  /**
+   * 获取当前已加载的标准技能（Claude Code / Codex 格式）。
+   */
+  getStandaloneSkills(): Skill[] {
+    return this.pluginLoader.getStandaloneSkills();
+  }
+
+  /**
+   * 标准技能的存放目录（默认 ~/.personal-agent/skills）。
+   */
+  getSkillsDirectory(): string {
+    return this.skillsDirectory;
+  }
+
+  /**
+   * 重新扫描标准技能目录（上传或删除技能后调用）。
+   */
+  async reloadStandaloneSkills(): Promise<Skill[]> {
+    return this.pluginLoader.loadStandaloneSkills([
+      ...this.config.skills.paths,
+      this.getSkillsDirectory(),
+    ]);
+  }
+
   async dispose(): Promise<void> {
     for (const conversation of [...this.conversations.values()]) {
       await conversation.close();
@@ -1088,197 +1141,23 @@ export class WebAgentRuntime {
   private registerMemoryTools(): void {
     const store = this.memoryStore;
     if (!store) return;
-
-    this.toolRegistry.register(
-      new (class extends BaseTool {
-        readonly name = 'read_memory';
-        readonly description = 'Search persistent memory for relevant facts and preferences.';
-        readonly category = 'memory' as const;
-        readonly inputSchema = {
-          type: 'object',
-          properties: { query: { type: 'string', description: 'Search query' } },
-          required: ['query'],
-        };
-
-        async execute(params: Record<string, unknown>): Promise<ToolResult> {
-          const results = await store.search(String(params.query), { maxResults: 5 });
-          return {
-            success: true,
-            content:
-              results.map(({ entry }) => `[${entry.type}] ${entry.content}`).join('\n') ||
-              '(no relevant memories found)',
-          };
-        }
-      })(),
-    );
-
-    this.toolRegistry.register(
-      new (class extends BaseTool {
-        readonly name = 'write_memory';
-        readonly description = 'Persist a fact, preference, or decision for later conversations.';
-        readonly category = 'memory' as const;
-        readonly requiresPermission = true;
-        readonly inputSchema = {
-          type: 'object',
-          properties: {
-            content: { type: 'string', description: 'Content to remember' },
-            type: {
-              type: 'string',
-              enum: ['fact', 'preference', 'decision'],
-              description: 'Memory type',
-            },
-            importance: { type: 'number', description: '1=critical, 2=important, 3=info' },
-          },
-          required: ['content'],
-        };
-
-        async execute(params: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
-          const importance = Number(params.importance ?? 2);
-          if (![1, 2, 3].includes(importance)) {
-            return { success: false, content: '', error: 'importance must be 1, 2, or 3' };
-          }
-          const entry = await store.create({
-            type: (params.type as 'fact' | 'preference' | 'decision') ?? 'fact',
-            content: String(params.content),
-            tags: [],
-            metadata: {
-              importance: importance as 1 | 2 | 3,
-              sourceSessionId: context.sessionId,
-            },
-          });
-          return { success: true, content: `Memory saved: ${entry.id}` };
-        }
-      })(),
-    );
+    for (const tool of createMemoryTools({
+      getStore: () => store,
+      getSessionId: (context) => context.sessionId,
+    })) {
+      this.toolRegistry.register(tool);
+    }
   }
 
   private registerPlanTools(): void {
-    const findConversation = (context: ToolContext): WebConversation | null =>
-      this.conversations.get(context.sessionId) ?? null;
-
-    this.toolRegistry.register(
-      new (class extends BaseTool {
-        readonly name = 'submit_plan';
-        readonly description =
-          'Submit a structured implementation plan for user approval, including dependencies and risks.';
-        readonly category = 'plan' as const;
-        readonly inputSchema = {
-          type: 'object',
-          properties: {
-            title: { type: 'string' },
-            description: { type: 'string' },
-            risks: { type: 'array', items: { type: 'string' } },
-            estimated_tokens: { type: 'number' },
-            steps: {
-              type: 'array',
-              items: {
-                type: 'object',
-                properties: {
-                  id: { type: 'string' },
-                  title: { type: 'string' },
-                  description: { type: 'string' },
-                  tool_calls: { type: 'array', items: { type: 'string' } },
-                  dependencies: { type: 'array', items: { type: 'string' } },
-                },
-                required: ['title', 'description'],
-              },
-            },
-          },
-          required: ['title', 'steps'],
-        };
-
-        async execute(params: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
-          const conversation = findConversation(context);
-          if (!conversation?.planModeActive) {
-            return {
-              success: false,
-              content: '',
-              error: 'submit_plan is only available in plan mode',
-            };
-          }
-          const rawSteps = Array.isArray(params.steps) ? params.steps : [];
-          const plan = conversation.planEngine.createPlan({
-            title: String(params.title ?? ''),
-            description: String(params.description ?? ''),
-            risks: Array.isArray(params.risks) ? params.risks.map(String) : [],
-            estimatedTokens: Number(params.estimated_tokens ?? 0),
-            steps: rawSteps.map((raw, index) => {
-              const step = raw as Record<string, unknown>;
-              return {
-                id: String(step.id ?? `step-${index + 1}`),
-                title: String(step.title ?? ''),
-                description: String(step.description ?? ''),
-                toolCalls: Array.isArray(step.tool_calls) ? step.tool_calls.map(String) : [],
-                dependencies: Array.isArray(step.dependencies) ? step.dependencies.map(String) : [],
-              };
-            }),
-          });
-          conversation.publishPlan();
-          return { success: true, content: formatPlan(plan) };
-        }
-      })(),
-    );
-
-    this.toolRegistry.register(
-      new (class extends BaseTool {
-        readonly name = 'get_plan';
-        readonly description = 'Get the current structured plan and progress.';
-        readonly category = 'plan' as const;
-        readonly inputSchema = { type: 'object', properties: {} };
-
-        async execute(_params: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
-          const plan = findConversation(context)?.planEngine.getPlan();
-          return { success: true, content: plan ? formatPlan(plan) : 'No active plan.' };
-        }
-      })(),
-    );
-
-    this.toolRegistry.register(
-      new (class extends BaseTool {
-        readonly name = 'update_plan_step';
-        readonly description = 'Update an approved plan step as execution progresses.';
-        readonly category = 'plan' as const;
-        readonly inputSchema = {
-          type: 'object',
-          properties: {
-            step_id: { type: 'string' },
-            status: {
-              type: 'string',
-              enum: ['in_progress', 'completed', 'failed', 'skipped'],
-            },
-            output: { type: 'string' },
-          },
-          required: ['step_id', 'status'],
-        };
-
-        async execute(params: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
-          const conversation = findConversation(context);
-          if (!conversation) {
-            return { success: false, content: '', error: 'Conversation not found' };
-          }
-          const stepId = String(params.step_id);
-          const status = String(params.status);
-          const output = params.output === undefined ? undefined : String(params.output);
-          const step =
-            status === 'in_progress'
-              ? await conversation.planEngine.startStep(stepId)
-              : status === 'completed'
-                ? await conversation.planEngine.completeStep(stepId, output)
-                : status === 'failed'
-                  ? await conversation.planEngine.failStep(stepId, output)
-                  : status === 'skipped'
-                    ? await conversation.planEngine.skipStep(stepId)
-                    : null;
-          conversation.publishPlan();
-          return step
-            ? {
-                success: true,
-                content: `Step ${step.id} is ${step.status}. Progress: ${conversation.planEngine.getProgress().percentage}%`,
-              }
-            : { success: false, content: '', error: `Unknown step/status: ${stepId}/${status}` };
-        }
-      })(),
-    );
+    for (const tool of createPlanTools({
+      isPlanModeActive: (context) =>
+        this.conversations.get(context.sessionId)?.planModeActive ?? false,
+      getPlanEngine: (context) => this.conversations.get(context.sessionId)?.planEngine ?? null,
+      publishPlan: (context) => this.conversations.get(context.sessionId)?.publishPlan(),
+    })) {
+      this.toolRegistry.register(tool);
+    }
   }
 }
 
@@ -1372,8 +1251,8 @@ export class WebConversation {
     this.emit({ type: 'busy', busy: true });
     try {
       await this.runtime.dispatchUserInput(this, input);
-      await this.runtime.injectPromptContext(this, input);
-      for await (const event of this.agentLoop.run(input)) {
+      const cleanedInput = await this.runtime.injectPromptContext(this, input);
+      for await (const event of this.agentLoop.run(cleanedInput)) {
         this.forwardAgentEvent(event);
       }
       this.session.replaceMessages(this.context.getHistory());
@@ -1585,7 +1464,7 @@ export class WebConversation {
 
 Inspect the project with read-only tools, create a detailed plan, and call submit_plan.
 Do not execute changes until the user approves the plan in the Web UI.
-When you need the user to make a decision, call ask_user with the question and up to 4 recommended options (use multi_select when multiple answers fit). The UI renders the options as a selectable list with a custom answer option.`,
+When you need the user to make a decision, call ask_user with the question and up to 4 recommended options (use multi_select when multiple answers fit). Always put your most recommended option FIRST — the UI marks it with a "推荐" badge. The UI renders the options as a selectable list with a custom answer option.`,
       });
     } else {
       const approved = this.planEngine.approvePlan();
@@ -2042,18 +1921,6 @@ function resolveContextWindow(provider: LLMProvider): number {
     provider.getModelList().find((model) => model.id === provider.getModel())?.contextWindow ??
     128_000
   );
-}
-
-function formatPlan(plan: Plan): string {
-  const steps = plan.steps
-    .map(
-      (step) =>
-        `${step.order}. [${step.status}] ${step.title}\n   ${step.description}${
-          step.dependencies.length > 0 ? `\n   Dependencies: ${step.dependencies.join(', ')}` : ''
-        }`,
-    )
-    .join('\n');
-  return `${plan.title}\n${plan.description}\n\n${steps}`;
 }
 
 function createRuntimeStatsStore(statsConfig: {

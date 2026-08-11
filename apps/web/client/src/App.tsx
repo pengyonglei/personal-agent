@@ -10,6 +10,7 @@ import {
   Collapse,
   ColorPicker,
   ConfigProvider,
+  Divider,
   Drawer,
   Dropdown,
   Empty,
@@ -18,6 +19,7 @@ import {
   Input,
   InputNumber,
   Layout,
+  List,
   Menu,
   Modal,
   Progress,
@@ -34,6 +36,7 @@ import {
   Tooltip,
   Tree,
   Typography,
+  Upload,
   theme as antdTheme,
 } from 'antd';
 import zhCN from 'antd/es/locale/zh_CN';
@@ -62,6 +65,7 @@ import {
   FontSizeOutlined,
   FolderAddOutlined,
   FolderOpenOutlined,
+  InboxOutlined,
   InfoCircleOutlined,
   ItalicOutlined,
   LinkOutlined,
@@ -655,6 +659,21 @@ function AgentWorkspace({
   useEffect(() => {
     void reloadStarterPrompts();
   }, [reloadStarterPrompts]);
+  const [availableSkills, setAvailableSkills] = useState<SkillInfo[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    apiFetch('/api/skills')
+      .then((response) => (response.ok ? response.json() : null))
+      .then((payload: { skills: SkillInfo[] } | null) => {
+        if (!cancelled && payload) setAvailableSkills(payload.skills);
+      })
+      .catch(() => {
+        // 技能列表加载失败不影响主流程
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [draftTaskProjectId, setDraftTaskProjectId] = useState<string>();
   const pendingTaskDraftRef = useRef<{
     projectId: string;
@@ -669,7 +688,9 @@ function AgentWorkspace({
   const [directoryTreeData, setDirectoryTreeData] = useState<DirectoryTreeNode[]>([]);
   const [selectedDirectory, setSelectedDirectory] = useState<string>();
   const [providerModalOpen, setProviderModalOpen] = useState(false);
-  const [settingsTab, setSettingsTab] = useState<'providers' | 'general' | 'prompts'>('general');
+  const [settingsTab, setSettingsTab] = useState<'providers' | 'general' | 'prompts' | 'skills'>(
+    'general',
+  );
   const [providerView, setProviderView] = useState<'list' | 'form'>('list');
   const [providerLoading, setProviderLoading] = useState(false);
   const [providerSaving, setProviderSaving] = useState(false);
@@ -2689,6 +2710,7 @@ function AgentWorkspace({
             rootPath={rootPath}
             prompt={prompt}
             enabled={composerEnabled}
+            skills={availableSkills}
             busy={state.busy}
             creatingTask={state.creatingTask}
             planActive={state.planActive}
@@ -2933,13 +2955,20 @@ function AgentWorkspace({
           <nav className="pa-settings-nav" aria-label="设置菜单">
             <Menu
               mode="inline"
-              onClick={({ key }) => setSettingsTab(key as 'providers' | 'general' | 'prompts')}
+              onClick={({ key }) =>
+                setSettingsTab(key as 'providers' | 'general' | 'prompts' | 'skills')
+              }
               selectedKeys={[settingsTab]}
               items={[
                 {
                   key: 'general',
                   icon: <SettingOutlined />,
                   label: '通用',
+                },
+                {
+                  key: 'skills',
+                  icon: <BulbOutlined />,
+                  label: '技能',
                 },
                 {
                   key: 'prompts',
@@ -2964,6 +2993,11 @@ function AgentWorkspace({
                   onAccentColorsChange={onAccentColorsChange}
                   onResetAccent={onResetAccent}
                 />
+              </section>
+            )}
+            {settingsTab === 'skills' && (
+              <section className="pa-settings-content">
+                <SkillsPanel />
               </section>
             )}
             {settingsTab === 'prompts' && (
@@ -4161,6 +4195,18 @@ function AskUserCard({
   const [customText, setCustomText] = useState('');
   const canSubmit = customMode ? customText.trim().length > 0 : selected.length > 0;
 
+  /** 第一个选项是模型最推荐的，用「推荐」标签标识。 */
+  const renderOptionLabel = (option: string, index: number) => (
+    <>
+      {index === 0 && (
+        <Tag color="gold" style={{ marginRight: 6 }}>
+          推荐
+        </Tag>
+      )}
+      {option}
+    </>
+  );
+
   const submit = () => {
     if (customMode) {
       onAnswer({ selections: [], custom: customText.trim() });
@@ -4192,9 +4238,9 @@ function AskUserCard({
                 setCustomMode(false);
               }}
             >
-              {request.options.map((option) => (
+              {request.options.map((option, i) => (
                 <Checkbox key={option} value={option}>
-                  {option}
+                  {renderOptionLabel(option, i)}
                 </Checkbox>
               ))}
               {request.allowCustom && (
@@ -4225,9 +4271,9 @@ function AskUserCard({
                 }
               }}
             >
-              {request.options.map((option) => (
+              {request.options.map((option, i) => (
                 <Radio key={option} value={option}>
-                  {option}
+                  {renderOptionLabel(option, i)}
                 </Radio>
               ))}
               {request.allowCustom && (
@@ -4267,6 +4313,7 @@ function Composer({
   rootPath,
   prompt,
   enabled,
+  skills,
   busy,
   creatingTask,
   planActive,
@@ -4301,6 +4348,7 @@ function Composer({
   rootPath: string;
   prompt: string;
   enabled: boolean;
+  skills: SkillInfo[];
   busy: boolean;
   creatingTask: boolean;
   planActive: boolean;
@@ -4333,10 +4381,14 @@ function Composer({
   onReasoningChange: (effort: ReasoningEffort) => void;
 }) {
   const textAreaRef = useRef<TextAreaRef | null>(null);
+  /** 影子高亮层（与 TextArea 重叠，滚动同步）。 */
+  const highlightRef = useRef<HTMLDivElement | null>(null);
   /** Markdown 工具栏是否展开（默认收起）。 */
   const [toolbarOpen, setToolbarOpen] = useState(false);
   /** 预览/编辑模式切换（预览复用 MarkdownContent 渲染）。 */
   const [previewMode, setPreviewMode] = useState(false);
+  /** `/` 技能选择菜单是否打开。 */
+  const [skillMenuOpen, setSkillMenuOpen] = useState(false);
 
   /** 取 TextArea 原生元素（用于读写光标/选区）。 */
   const textareaElement = (): HTMLTextAreaElement | null =>
@@ -4407,7 +4459,45 @@ function Composer({
     ? '配置 Provider 后即可开始对话'
     : busy
       ? 'Agent 正在处理…'
-      : '给 personal-agent 发送消息…（Enter 发送，Shift+Enter 换行）';
+      : '给 personal-agent 发送消息…（输入 / 选择技能，Enter 发送，Shift+Enter 换行）';
+
+  /** 取光标之前最近的 `/技能名前缀`（/ 前需为行首或空白，避免误匹配 URL 等），无则返回 null。 */
+  const getSkillPrefix = (): string | null => {
+    const textarea = textareaElement();
+    const caret = textarea?.selectionStart ?? prompt.length;
+    const before = prompt.slice(0, caret);
+    const match = before.match(/(^|\s)\/([a-zA-Z0-9._-]*)$/);
+    return match ? match[2] : null;
+  };
+
+  const skillPrefix = getSkillPrefix();
+  const matchedSkills =
+    skillPrefix !== null
+      ? skills.filter((skill) => skill.name.toLowerCase().startsWith(skillPrefix.toLowerCase()))
+      : [];
+  const showSkillMenu = skillMenuOpen && skillPrefix !== null && matchedSkills.length > 0;
+
+  /** 选中技能：把光标前的 `/前缀` 替换为 `/技能名 `（保留前后文字），并聚焦回输入框。 */
+  function chooseSkill(name: string) {
+    const textarea = textareaElement();
+    const caret = textarea?.selectionStart ?? prompt.length;
+    const before = prompt.slice(0, caret);
+    const match = before.match(/(^|\s)\/([a-zA-Z0-9._-]*)$/);
+    if (match) {
+      const slashStart = caret - match[2].length - 1;
+      const next = `${prompt.slice(0, slashStart)}/${name} ${prompt.slice(caret)}`;
+      onPromptChange(next);
+      requestAnimationFrame(() => {
+        textarea?.focus();
+        const pos = slashStart + name.length + 2;
+        textarea?.setSelectionRange(pos, pos);
+      });
+    } else {
+      onPromptChange(`/${name} `);
+      requestAnimationFrame(() => textareaElement()?.focus());
+    }
+    setSkillMenuOpen(false);
+  }
   const activeModel = findRuntimeModel(runtime, runtime?.provider, runtime?.model);
   // The select's displayed value: per-task model override, else the global
   // default. The title/width must follow the *selected* model — using the
@@ -4479,6 +4569,22 @@ function Composer({
           taskTitle={pendingQuestionTitle}
           onAnswer={onAnswerQuestion}
         />
+      )}
+      {showSkillMenu && (
+        <div className="pa-skill-menu" role="listbox" aria-label="技能列表">
+          {matchedSkills.map((skill) => (
+            <button
+              key={skill.name}
+              type="button"
+              role="option"
+              className="pa-skill-menu-item"
+              onClick={() => chooseSkill(skill.name)}
+            >
+              <span className="pa-skill-menu-name">/{skill.name}</span>
+              <span className="pa-skill-menu-desc">{skill.description}</span>
+            </button>
+          ))}
+        </div>
       )}
       <div className="pa-composer">
         <Tooltip title={rootPath} placement="topLeft">
@@ -4560,21 +4666,37 @@ function Composer({
             )}
           </div>
         ) : (
-          <TextArea
-            ref={textAreaRef}
-            id="prompt-input"
-            value={prompt}
-            disabled={!enabled || creatingTask || Boolean(pendingQuestion)}
-            autoSize={{ minRows: 2, maxRows: 8 }}
-            placeholder={placeholder}
-            onChange={(event) => onPromptChange(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
-                event.preventDefault();
-                onSubmit();
-              }
-            }}
-          />
+          <div className="pa-composer-input-wrap">
+            <div ref={highlightRef} className="pa-composer-highlight" aria-hidden="true">
+              {renderHighlightedPrompt(prompt, skills)}
+            </div>
+            <TextArea
+              ref={textAreaRef}
+              id="prompt-input"
+              value={prompt}
+              disabled={!enabled || creatingTask || Boolean(pendingQuestion)}
+              autoSize={{ minRows: 2, maxRows: 8 }}
+              placeholder={placeholder}
+              onChange={(event) => {
+                onPromptChange(event.target.value);
+                // 输入任意位置出现 / 前缀即尝试打开技能菜单（渲染时按光标位置过滤）
+                setSkillMenuOpen(event.target.value.includes('/'));
+              }}
+              onScroll={(event) => {
+                if (highlightRef.current) {
+                  highlightRef.current.scrollTop = event.currentTarget.scrollTop;
+                }
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+                  event.preventDefault();
+                  setSkillMenuOpen(false);
+                  onSubmit();
+                }
+                if (event.key === 'Escape') setSkillMenuOpen(false);
+              }}
+            />
+          </div>
         )}
         <div className="pa-composer-bottom">
           <div className="pa-composer-left">
@@ -5430,6 +5552,188 @@ interface BuiltinPromptItem {
   customized: boolean;
 }
 
+interface SkillInfo {
+  name: string;
+  description: string;
+  triggers: string[];
+  sourcePath: string;
+}
+
+/**
+ * 渲染输入框的"影子高亮层"：把已加载技能引用（/skill-name 或 #skill-name）
+ * 包成 chip 背景块，其余文本透明，叠在 TextArea 下方形成整体高亮效果。
+ */
+function renderHighlightedPrompt(prompt: string, skills: SkillInfo[]): ReactNode {
+  const skillNames = new Set(skills.map((skill) => skill.name));
+  const parts: ReactNode[] = [];
+  const regex = /([#/])([a-zA-Z0-9][a-zA-Z0-9._-]*)/g;
+  let last = 0;
+  let key = 0;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(prompt)) !== null) {
+    if (match.index > last) parts.push(prompt.slice(last, match.index));
+    const name = match[2];
+    if (skillNames.has(name)) {
+      parts.push(
+        <span key={key} className="pa-skill-chip">
+          {match[0]}
+        </span>,
+      );
+      key += 1;
+    } else {
+      parts.push(match[0]);
+    }
+    last = match.index + match[0].length;
+  }
+  if (last < prompt.length) parts.push(prompt.slice(last));
+  return parts.length > 0 ? parts : '\u200b';
+}
+
+function SkillsPanel() {
+  const { message: messageApi } = AntApp.useApp();
+  const [skills, setSkills] = useState<SkillInfo[] | null>(null);
+  const [directory, setDirectory] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [uploading, setUploading] = useState(false);
+
+  const loadSkills = useCallback(async () => {
+    setLoading(true);
+    try {
+      const response = await apiFetch('/api/skills');
+      if (!response.ok) throw new Error(`读取技能列表失败 (${response.status})`);
+      const payload = (await response.json()) as {
+        directory: string;
+        skills: SkillInfo[];
+      };
+      setDirectory(payload.directory);
+      setSkills(payload.skills);
+    } catch (err: unknown) {
+      messageApi.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
+  }, [messageApi]);
+
+  useEffect(() => {
+    void loadSkills();
+  }, [loadSkills]);
+
+  async function handleUpload(file: File) {
+    if (!/\.zip$/i.test(file.name)) {
+      messageApi.error('只支持 .zip 压缩包');
+      return;
+    }
+    setUploading(true);
+    try {
+      const buffer = await file.arrayBuffer();
+      const response = await apiFetch(
+        `/api/skills/upload?name=${encodeURIComponent(file.name)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/zip' },
+          body: buffer,
+        },
+      );
+      const payload = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        skill?: { name: string; path: string; fileCount: number };
+      };
+      if (!response.ok) throw new Error(payload.error ?? `上传失败 (${response.status})`);
+      messageApi.success(`技能「${payload.skill?.name ?? file.name}」已安装并生效`);
+      await loadSkills();
+    } catch (err: unknown) {
+      messageApi.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  async function openSkillFolder(skill: SkillInfo) {
+    const directory = skill.sourcePath.replace(/[\\/]SKILL\.md$/i, '');
+    const desktopApi = window.personalAgentDesktop;
+    if (desktopApi?.openPath) {
+      const error = await desktopApi.openPath(directory);
+      if (error) messageApi.error(`打开目录失败：${error}`);
+      return;
+    }
+    // 普通浏览器无法打开本地目录，回退为复制路径
+    try {
+      await navigator.clipboard.writeText(directory);
+      messageApi.success(`已复制目录路径：${directory}`);
+    } catch {
+      messageApi.info(`技能目录：${directory}`);
+    }
+  }
+
+  return (
+    <>
+      <div className="pa-settings-heading">
+        <div>
+          <Title level={4}>技能</Title>
+          <Text type="secondary">
+            上传 Claude Code / Codex 标准格式的技能压缩包（zip：单个技能根目录 + SKILL.md）。
+            仅 {directory || '~/.personal-agent/skills/'} 内的技能会生效，上传后立即生效、无需重启。
+          </Text>
+        </div>
+      </div>
+
+      <Upload.Dragger
+        className="pa-skill-upload-dragger"
+        height={150}
+        accept=".zip,application/zip"
+        multiple={false}
+        showUploadList={false}
+        disabled={uploading}
+        beforeUpload={(file) => {
+          void handleUpload(file as unknown as File);
+          return false;
+        }}
+      >
+        <p className="ant-upload-drag-icon">
+          <InboxOutlined />
+        </p>
+        <p className="ant-upload-text">
+          {uploading ? '正在上传…' : '点击或拖拽技能 zip 压缩包到此处'}
+        </p>
+      </Upload.Dragger>
+
+      <Divider />
+
+      <Title level={5}>已安装技能（{skills?.length ?? 0}）</Title>
+      <Spin spinning={loading}>
+        {skills && skills.length > 0 ? (
+          <List
+            dataSource={skills}
+            renderItem={(skill) => (
+              <List.Item
+                extra={
+                  <Button
+                    size="small"
+                    icon={<FolderOpenOutlined />}
+                    onClick={() => void openSkillFolder(skill)}
+                  >
+                    打开目录
+                  </Button>
+                }
+              >
+                <List.Item.Meta
+                  title={<Text strong>{skill.name}</Text>}
+                  description={skill.description}
+                />
+              </List.Item>
+            )}
+          />
+        ) : (
+          <Empty
+            image={Empty.PRESENTED_IMAGE_SIMPLE}
+            description={loading ? '加载中…' : '还没有安装标准技能，上传一个 zip 试试'}
+          />
+        )}
+      </Spin>
+    </>
+  );
+}
+
 function PromptsPanel({ onStarterPromptsChange }: { onStarterPromptsChange: () => void }) {
   const { message: messageApi, modal } = AntApp.useApp();
   const [prompts, setPrompts] = useState<BuiltinPromptItem[] | null>(null);
@@ -5941,9 +6245,10 @@ function Inspector({
             {
               icon: <AppstoreOutlined />,
               name: 'Plugins',
-              value: state.runtime?.plugins.length
-                ? `${state.runtime.plugins.length} 个已加载`
-                : '未加载插件',
+              value:
+                state.runtime?.plugins.length || state.runtime?.standaloneSkills
+                  ? `${state.runtime.plugins.length} 个插件 · ${state.runtime.standaloneSkills} 个 Skill`
+                  : '未加载插件',
             },
           ].map((item) => (
             <div className="pa-inspector-list-item" key={item.name}>
@@ -6281,8 +6586,26 @@ function rememberActiveTask(taskId?: string) {
   if (taskId) localStorage.setItem('personal-agent-active-task', taskId);
 }
 
+/**
+ * 页面加载最早阶段从 URL 提取认证 token 存入 sessionStorage。
+ * 桌面端通过 ?token= 携带认证，若等 WebSocket 连接时才存储，
+ * 挂载时发起的 /api/skills 等请求会因缺少 Authorization 而 401，
+ * 导致技能列表为空、输入框 / 无法弹出技能菜单。
+ */
+function bootstrapAuthToken(): void {
+  const pageParams = new URLSearchParams(location.search);
+  const token =
+    pageParams.get('token') ?? sessionStorage.getItem('personal-agent-token') ?? undefined;
+  if (token) sessionStorage.setItem('personal-agent-token', token);
+}
+
+bootstrapAuthToken();
+
 function apiFetch(path: string, options: RequestInit = {}) {
-  const token = sessionStorage.getItem('personal-agent-token');
+  const token =
+    sessionStorage.getItem('personal-agent-token') ??
+    new URLSearchParams(location.search).get('token') ??
+    undefined;
   const headers = new Headers(options.headers);
   if (token) headers.set('Authorization', `Bearer ${token}`);
   return fetch(path, { ...options, headers });

@@ -30,6 +30,7 @@ import {
   type TaskSummary,
 } from './protocol';
 import { BUILTIN_PROMPTS, PROMPT_KEYS } from './prompts';
+import { installSkillFromZip, SkillUploadError } from './skill-upload';
 
 const UNTITLED_TASK_TITLE = '新任务';
 /** 批准计划后自动触发执行的内部提示（作为 user 消息写入历史，驱动模型开始执行已批准的计划）。 */
@@ -70,6 +71,8 @@ export interface WebServerOptions {
   plansDirectory?: string;
   /** 修改文件记录批次落盘目录。Defaults to ~/.personal-agent/file-changes */
   fileChangesDirectory?: string;
+  /** 标准技能上传目录。Defaults to ~/.personal-agent/skills */
+  skillsDirectory?: string;
   viteDev?: boolean;
 }
 
@@ -101,6 +104,7 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
     statsDbPath: options.statsDbPath,
     plansDirectory: options.plansDirectory,
     fileChangesDirectory: options.fileChangesDirectory,
+    skillsDirectory: options.skillsDirectory,
   });
   // Model request stats (SQLite) — graceful degradation when node:sqlite is
   // unavailable on the runtime (Node < 22.13). Never blocks server startup.
@@ -225,6 +229,57 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
     }
     res.json(runtime.getRuntimeInfo());
   });
+
+  app.get('/api/skills', (req, res) => {
+    if (!isAuthorized(req.headers.authorization, req.query.token, authToken)) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    res.json({
+      directory: runtime.getSkillsDirectory(),
+      skills: runtime.getStandaloneSkills().map((skill) => ({
+        name: skill.name,
+        description: skill.description,
+        triggers: skill.triggers ?? [],
+        sourcePath: skill.sourcePath,
+      })),
+    });
+  });
+
+  app.post(
+    '/api/skills/upload',
+    express.raw({ type: ['application/zip', 'application/octet-stream'], limit: '12mb' }),
+    async (req, res) => {
+      if (!isAuthorized(req.headers.authorization, req.query.token, authToken)) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+      try {
+        const body = req.body;
+        if (!Buffer.isBuffer(body) || body.length === 0) {
+          res.status(400).json({ error: '请求体必须是 zip 文件内容' });
+          return;
+        }
+        // 技能目录名 = zip 文件名（去 .zip），由前端通过 ?name= 传入
+        const zipName =
+          typeof req.query.name === 'string' ? req.query.name.replace(/\.zip$/i, '') : '';
+        const installed = await installSkillFromZip(
+          body,
+          runtime.getSkillsDirectory(),
+          zipName,
+        );
+        await runtime.reloadStandaloneSkills();
+        res.status(201).json({ skill: installed });
+      } catch (error) {
+        if (error instanceof SkillUploadError) {
+          const status = error.code === 'exists' ? 409 : 400;
+          res.status(status).json({ error: error.message, code: error.code });
+          return;
+        }
+        res.status(500).json({ error: formatError(error) });
+      }
+    },
+  );
 
   app.get('/api/provider-settings', (req, res) => {
     if (!isAuthorized(req.headers.authorization, req.query.token, authToken)) {

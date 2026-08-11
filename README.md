@@ -368,6 +368,13 @@ plugins:
   paths:
     - /absolute/path/to/plugins
   disabled: []
+
+skills:
+  enabled: true
+  # 额外的 Skill 目录（标准 SKILL.md 格式，见下文），默认仅生效：
+  # ~/.personal-agent/skills（Web 端上传技能的目标目录）
+  paths:
+    - /absolute/path/to/skills
 ```
 
 ### 配置项一览
@@ -407,6 +414,8 @@ plugins:
 | `plugins.enabled` | boolean | `true` | 是否加载插件 |
 | `plugins.paths` | string[] | `[]` | 插件目录列表 |
 | `plugins.disabled` | string[] | `[]` | 禁用的插件名列表 |
+| `skills.enabled` | boolean | `true` | 是否加载标准 Skill 目录（Claude Code / Codex 格式） |
+| `skills.paths` | string[] | `[]` | 额外的标准 Skill 目录列表 |
 
 注意：
 
@@ -417,6 +426,42 @@ plugins:
 - `agent.maxTurns` 可在 Web UI「设置 -> 通用」中修改（允许范围 50-500，低于 50 会被拒绝），保存后写入配置文件，对新建任务立即生效；CLI 与配置文件仍使用 schema 允许的 1-500 完整范围。
 - 当前运行时默认使用文件系统 Memory Store（`memory.store: filesystem`），也可切换为 `sqlite`。
 - `-y, --yes` 会自动批准全部工具，只应在可信工作区和受控环境中使用。
+
+### 标准 Skill（Claude Code / Codex 兼容格式）
+
+项目直接兼容 Claude Code 与 OpenAI Codex 的标准 Skill 目录格式，两者约定一致：
+
+```text
+<skill目录>/
+└── <skill-name>/
+    ├── SKILL.md          # 必需：frontmatter（name/description）+ Markdown 指令正文
+    ├── agents/           # 可选
+    ├── scripts/          # 可选
+    ├── references/       # 可选
+    └── assets/           # 可选
+```
+
+`SKILL.md` 示例：
+
+```markdown
+---
+name: code-review
+description: Use when reviewing code, pull requests, or merge requests
+---
+
+# Code Review
+
+严格按照以下步骤执行代码审查：...
+```
+
+- **生效范围**：仅 `~/.personal-agent/skills` 内的技能生效（Web 端上传的目标目录）；`skills.paths` 配置的目录为可选扩展。每个目录包含 `<skill-name>/SKILL.md`，隐藏目录（如 Codex 的 `.system`）会被跳过。
+- **frontmatter**：`name` 与 `description` 为标准必填字段；`triggers` 是本项目的可选扩展字段（关键词自动触发），Claude Code / Codex 会忽略它，不影响文件在其它工具中的兼容性。缺少 frontmatter 时回退使用目录名。
+- **使用方式**：
+  - **显式指定**（推荐）：输入 `/skill-name` 强制使用该技能（兼容 `#skill-name`），引用标记会自动从发给模型的输入中移除。例如「请用 **/code-review** 审查这段代码」。Web 输入框输入 `/` 会弹出技能选择列表，点击或输入前缀即可选择；CLI 中输入完整的 `/技能名` 也会直接触发该技能。
+  - **自动匹配**：输入命中技能的 `triggers` 关键词、技能名或描述（子串匹配）时自动注入，无需显式指定。
+  - 命中一个或多个技能时，其内容以 `## Skill: <name>` 注入系统提示词；与 `plugin.json` 声明的技能走同一套匹配/注入流程，可同时使用。
+- **Web 上传**：Web UI「设置 -> 技能」支持上传技能 zip 压缩包（单技能根目录 + `SKILL.md`，可附带 scripts/references/assets），**技能目录名取自 zip 文件名**（去掉 `.zip` 后缀），安装到 `~/.personal-agent/skills`（与插件、配置等同一根目录）后立即生效，无需重启。上传会校验结构（单个 SKILL.md）、拒绝路径穿越（zip-slip）与超大文件。
+- 插件内的技能（`plugin.json` 的 `skills` 字段）格式保持不变，仍然兼容。
 
 ### 配置优先级
 
@@ -534,7 +579,7 @@ Web UI 支持：
 
 ### Windows 桌面版
 
-桌面版使用 Electron 承载现有 Web UI，并在 Electron 主进程内启动仅监听本机随机端口的 Express/WebSocket 服务。用户配置、项目索引和会话保存在 Windows 用户数据目录；创建项目时通过 Windows 系统目录选择框选择本地根目录。普通 Web 版仍使用页面内的目录树选择器。
+桌面版使用 Electron 承载现有 Web UI，并在 Electron 主进程内启动仅监听本机随机端口的 Express/WebSocket 服务。用户配置、项目索引和会话与 CLI/Web 版统一保存在 `~/.personal-agent/` 目录下（首次启动会自动从旧版 Windows 用户数据目录迁移）；创建项目时通过 Windows 系统目录选择框选择本地根目录。普通 Web 版仍使用页面内的目录树选择器。
 
 开发启动：
 
@@ -743,6 +788,7 @@ http://<host>:5678/?token=<long-random-token>
 | `~/.personal-agent/stats/model-requests.db` | 模型请求统计 SQLite 数据库（token/入参出参/耗时等） |
 | `~/.personal-agent/plugins/`              | 用户级插件                             |
 | `<workspace>/.personal-agent/plugins/`    | 工作区插件                             |
+| `~/.personal-agent/skills/`               | 标准技能（唯一默认生效目录，Web 上传目标） |
 
 备份或迁移时，停止正在写入数据的 Agent 进程后复制 `~/.personal-agent` 即可。Web 的项目和会话位置如果通过环境变量改写，应一并备份对应路径。
 

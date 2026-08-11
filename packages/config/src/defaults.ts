@@ -50,4 +50,8 @@ export const DEFAULT_CONFIG: AppConfig = {
     paths: [],
     disabled: [],
   },
+  skills: {
+    enabled: true,
+    paths: [],
+  },
 };

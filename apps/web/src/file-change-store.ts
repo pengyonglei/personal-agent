@@ -1,5 +1,5 @@
 import { mkdir, readdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import type { StoredFileChangeBatch } from './protocol';
 
 /** 单侧内容参与落盘的最大行数（与前端 MAX_DIFF_LINES 对齐，超出截断并标记）。 */
@@ -7,6 +7,20 @@ export const MAX_STORED_DIFF_LINES = 2000;
 
 /** 修改记录批次落盘目录中最多保留的文件数（超出后按 mtime 删除最旧）。 */
 const MAX_FILE_CHANGE_BATCHES = 200;
+
+/**
+ * 判定路径是否为一次性临时/测试脚本文件（不进入修改记录展示）。
+ * 覆盖：`.tmp-*` 前缀（如 .tmp-e2e.mjs、.tmp-test-out.txt）、`tmp-`/`tmp_` 前缀、
+ * `foo.tmp`/`foo.temp` 后缀、`~` 结尾的编辑器备份文件。
+ */
+export function isTemporaryFilePath(filePath: string): boolean {
+  const segments = filePath.split(/[\\/]/);
+  if (segments.some((segment) => /^(\.tmp-|tmp-|tmp_)/i.test(segment))) return true;
+  const base = basename(filePath);
+  if (/\.(tmp|temp)$/i.test(base)) return true;
+  if (base.endsWith('~')) return true;
+  return false;
+}
 
 /** 批次 id → 安全文件名（仅保留 \w . -，防止路径穿越）。 */
 function sanitizeBatchId(batchId: string): string {
@@ -52,11 +66,14 @@ export class FileChangeStore {
   constructor(readonly directory: string) {}
 
   async save(batch: StoredFileChangeBatch): Promise<void> {
+    // 一次性临时/测试脚本文件不进入修改记录
+    const files = batch.files.filter((file) => !isTemporaryFilePath(file.path));
+    if (files.length === 0) return;
     await mkdir(this.directory, { recursive: true });
     const filePath = join(this.directory, `${sanitizeBatchId(batch.id)}.json`);
     const payload: StoredFileChangeBatch = {
       ...batch,
-      files: batch.files.map((file) => {
+      files: files.map((file) => {
         const oldTruncated = truncateContent(file.oldContent, MAX_STORED_DIFF_LINES);
         const newTruncated = truncateContent(file.newContent, MAX_STORED_DIFF_LINES);
         return {
@@ -101,7 +118,10 @@ export class FileChangeStore {
         const raw = await readFile(join(this.directory, file), 'utf-8');
         const batch = JSON.parse(raw) as unknown;
         if (!isValidBatch(batch)) continue;
-        batches.push(batch);
+        // 展示时同样过滤历史批次中的临时文件；全部为临时文件的批次直接跳过
+        const filteredFiles = batch.files.filter((entry) => !isTemporaryFilePath(entry.path));
+        if (filteredFiles.length === 0) continue;
+        batches.push({ ...batch, files: filteredFiles });
       } catch {
         // 单个文件损坏/解析失败：跳过，不阻断其余批次
       }

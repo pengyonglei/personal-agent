@@ -190,6 +190,7 @@ export class AskUserTool extends BaseTool {
   readonly description = `Ask the user a question to resolve ambiguity or get a decision.
 Use this when you're blocked on something only the user can decide.
 - Provide at most ${ASK_USER_MAX_OPTIONS} recommended options; the UI renders them as a selectable list (single or multi select).
+- Always put your most recommended option FIRST — the UI marks it with a "推荐" (recommended) badge.
 - A "custom answer" option is automatically appended, so users who dislike all options can type their own answer.
 - Set multi_select=true when multiple options can be chosen at once.`;
   readonly category = 'utility' as const;
