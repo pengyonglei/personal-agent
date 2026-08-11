@@ -773,3 +773,114 @@ test('agent-config API reads and persists the bash tool shell preference', async
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test('web-config API reads defaults, persists theme to config.yaml and restores after restart', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'personal-agent-web-theme-'));
+  const configPath = join(directory, 'config.yaml');
+  await writeFile(
+    configPath,
+    ['memory:', '  enabled: false', 'plugins:', '  enabled: false', 'mcp:', '  servers: []'].join(
+      '\n',
+    ),
+    'utf-8',
+  );
+  const browsableRoot = join(directory, 'browse-root');
+  const clientBuildDirectory = join(directory, 'client');
+  await mkdir(browsableRoot);
+  await mkdir(clientBuildDirectory);
+  await writeFile(join(clientBuildDirectory, 'index.html'), '<h1>test client</h1>', 'utf8');
+
+  const serverOptions = {
+    host: '127.0.0.1',
+    port: 0,
+    workingDirectory: directory,
+    configPath,
+    projectStoragePath: join(directory, 'projects.json'),
+    clientBuildDirectory,
+  };
+  const instance = await createWebServer(serverOptions);
+
+  const baseUrl = `http://127.0.0.1:${instance.port}`;
+
+  try {
+    // 未配置时读取默认值
+    const initial = await fetch(`${baseUrl}/api/web-config`);
+    assert.equal(initial.status, 200);
+    const initialPayload = (await initial.json()) as {
+      theme: string;
+      accentLight: string;
+      accentDark: string;
+    };
+    assert.equal(initialPayload.theme, 'light');
+    assert.equal(initialPayload.accentLight, '#1677ff');
+    assert.equal(initialPayload.accentDark, '#91caff');
+
+    // 更新主题模式与主色
+    const updated = await fetch(`${baseUrl}/api/web-config`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ theme: 'dark', accentLight: '#722ed1', accentDark: '#d3adf7' }),
+    });
+    assert.equal(updated.status, 200);
+    const updatedPayload = (await updated.json()) as {
+      theme: string;
+      accentLight: string;
+      accentDark: string;
+    };
+    assert.equal(updatedPayload.theme, 'dark');
+    assert.equal(updatedPayload.accentLight, '#722ed1');
+    assert.equal(updatedPayload.accentDark, '#d3adf7');
+
+    // 配置已持久化到 YAML 文件
+    const savedYaml = await readFile(configPath, 'utf8');
+    assert.match(savedYaml, /theme:\s*dark/);
+    assert.match(savedYaml, /#722ed1/);
+    assert.match(savedYaml, /#d3adf7/);
+
+    // 非法 theme 被拒绝
+    const badTheme = await fetch(`${baseUrl}/api/web-config`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ theme: 'blue' }),
+    });
+    assert.equal(badTheme.status, 400);
+
+    // 非法颜色格式被拒绝
+    const badColor = await fetch(`${baseUrl}/api/web-config`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accentLight: 'red' }),
+    });
+    assert.equal(badColor.status, 400);
+
+    // 空请求体被拒绝
+    const empty = await fetch(`${baseUrl}/api/web-config`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    assert.equal(empty.status, 400);
+
+    await instance.close();
+
+    // 重启后从 config.yaml 恢复最新主题配置
+    const restarted = await createWebServer(serverOptions);
+    try {
+      const restored = await fetch(`http://127.0.0.1:${restarted.port}/api/web-config`);
+      assert.equal(restored.status, 200);
+      const restoredPayload = (await restored.json()) as {
+        theme: string;
+        accentLight: string;
+        accentDark: string;
+      };
+      assert.equal(restoredPayload.theme, 'dark');
+      assert.equal(restoredPayload.accentLight, '#722ed1');
+      assert.equal(restoredPayload.accentDark, '#d3adf7');
+    } finally {
+      await restarted.close();
+    }
+  } finally {
+    await instance.close().catch(() => undefined);
+    await rm(directory, { recursive: true, force: true });
+  }
+});

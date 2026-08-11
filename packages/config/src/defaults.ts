@@ -35,6 +35,11 @@ export const DEFAULT_CONFIG: AppConfig = {
     showCostEstimates: true,
     enableMouse: false,
   },
+  web: {
+    theme: 'light',
+    accentLight: '#1677ff',
+    accentDark: '#91caff',
+  },
   stats: {
     enabled: true,
     recordPayloads: false,

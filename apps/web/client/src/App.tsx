@@ -545,10 +545,60 @@ function hexToRgba(hex: string, alpha: number): string {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
+/** /api/web-config 返回的外观配置（来自 config.yaml 的 web 段） */
+interface WebConfigPayload {
+  theme: ColorMode;
+  accentLight: string;
+  accentDark: string;
+}
+
 export default function PersonalAgentApp() {
+  return (
+    <AntApp>
+      <AppearanceHost />
+    </AntApp>
+  );
+}
+
+/**
+ * Web UI 外观宿主：持有主题模式与主色状态。
+ * 启动时从 /api/web-config（config.yaml）加载最新配置并覆盖本地缓存；
+ * 修改后防抖 400ms 写回 config.yaml，保存失败回滚为服务端当前值。
+ * localStorage 仅作为首帧渲染前的快速兜底缓存。
+ */
+function AppearanceHost() {
+  const { message: messageApi } = AntApp.useApp();
   const [colorMode, setColorMode] = useState<ColorMode>(getInitialColorMode);
   const [accentColors, setAccentColors] = useState<AccentColors>(getInitialAccent);
+  const [themeLoaded, setThemeLoaded] = useState(false);
+  const lastSavedRef = useRef<{ theme: ColorMode; light: string; dark: string } | null>(null);
   const accent = accentColors[colorMode];
+
+  // 启动：从 config.yaml 读取最新主题配置（localStorage 仅作首帧兜底）
+  useEffect(() => {
+    let cancelled = false;
+    apiFetch('/api/web-config')
+      .then((response) =>
+        response.ok ? (response.json() as Promise<WebConfigPayload>) : null,
+      )
+      .then((payload) => {
+        if (cancelled || !payload) return;
+        setColorMode(payload.theme);
+        setAccentColors({ light: payload.accentLight, dark: payload.accentDark });
+        lastSavedRef.current = {
+          theme: payload.theme,
+          light: payload.accentLight,
+          dark: payload.accentDark,
+        };
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (!cancelled) setThemeLoaded(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     document.documentElement.dataset.theme = colorMode;
@@ -560,6 +610,57 @@ export default function PersonalAgentApp() {
     document.documentElement.style.setProperty('--pa-accent', accent);
     localStorage.setItem('personal-agent-accent', JSON.stringify(accentColors));
   }, [accent, accentColors]);
+
+  // 主题/主色变化后防抖持久化到 config.yaml
+  useEffect(() => {
+    if (!themeLoaded) return;
+    const snapshot = { theme: colorMode, light: accentColors.light, dark: accentColors.dark };
+    const last = lastSavedRef.current;
+    if (last && last.theme === snapshot.theme && last.light === snapshot.light && last.dark === snapshot.dark) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      void persistAppearance(snapshot);
+    }, 400);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [colorMode, accentColors, themeLoaded]);
+
+  async function persistAppearance(snapshot: { theme: ColorMode; light: string; dark: string }) {
+    try {
+      const response = await apiFetch('/api/web-config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          theme: snapshot.theme,
+          accentLight: snapshot.light,
+          accentDark: snapshot.dark,
+        }),
+      });
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(payload.error ?? `保存失败 (${response.status})`);
+      }
+      lastSavedRef.current = snapshot;
+    } catch (err) {
+      messageApi.error(`保存主题配置失败: ${err instanceof Error ? err.message : String(err)}`);
+      // 保存失败时回滚为服务端当前值
+      try {
+        const response = await apiFetch('/api/web-config');
+        if (!response.ok) return;
+        const payload = (await response.json()) as WebConfigPayload;
+        setColorMode(payload.theme);
+        setAccentColors({ light: payload.accentLight, dark: payload.accentDark });
+        lastSavedRef.current = {
+          theme: payload.theme,
+          light: payload.accentLight,
+          dark: payload.accentDark,
+        };
+      } catch {
+        // 回滚失败时保持本地值
+      }
+    }
+  }
 
   const themeConfig = useMemo(
     () => ({
@@ -591,17 +692,15 @@ export default function PersonalAgentApp() {
 
   return (
     <ConfigProvider locale={zhCN} theme={themeConfig}>
-      <AntApp>
-        <AgentWorkspace
-          colorMode={colorMode}
-          onToggleColorMode={() =>
-            setColorMode((current) => (current === 'light' ? 'dark' : 'light'))
-          }
-          accentColors={accentColors}
-          onAccentColorsChange={setAccentColors}
-          onResetAccent={() => setAccentColors(DEFAULT_ACCENT)}
-        />
-      </AntApp>
+      <AgentWorkspace
+        colorMode={colorMode}
+        onToggleColorMode={() =>
+          setColorMode((current) => (current === 'light' ? 'dark' : 'light'))
+        }
+        accentColors={accentColors}
+        onAccentColorsChange={setAccentColors}
+        onResetAccent={() => setAccentColors(DEFAULT_ACCENT)}
+      />
     </ConfigProvider>
   );
 }

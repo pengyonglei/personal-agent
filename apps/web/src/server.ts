@@ -15,6 +15,7 @@ import {
   savePromptSettings,
   saveStatsSettings,
   saveToolsSettings,
+  saveWebSettings,
 } from '@personal-agent/config';
 import { UsageStore, getByDay, getByModel, getSummary } from '@personal-agent/stats';
 import {
@@ -430,6 +431,67 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
         runtime.setShellPreference(shell);
       }
       res.json({ maxTurns: runtime.config.agent.maxTurns, shell: runtime.config.tools.shell });
+    } catch (error) {
+      res.status(400).json({ error: formatError(error) });
+    }
+  });
+
+  // Web UI 外观配置（设置 -> 通用 -> 外观）：主题模式、浅色/深色主色，
+  // 持久化到 config.yaml，服务启动时读取并下发给前端。
+  app.get('/api/web-config', (req, res) => {
+    if (!isAuthorized(req.headers.authorization, req.query.token, authToken)) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    const config = loadConfig({ cwd: runtime.workingDirectory, configPath: configPath });
+    res.json({
+      theme: config.web.theme,
+      accentLight: config.web.accentLight,
+      accentDark: config.web.accentDark,
+    });
+  });
+
+  app.put('/api/web-config', async (req, res) => {
+    if (!isAuthorized(req.headers.authorization, req.query.token, authToken)) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    try {
+      const body = req.body as Record<string, unknown> | undefined;
+      const theme = body?.theme;
+      const accentLight = body?.accentLight;
+      const accentDark = body?.accentDark;
+      if (theme === undefined && accentLight === undefined && accentDark === undefined) {
+        throw new Error('没有需要保存的配置项。');
+      }
+      const update: { theme?: 'light' | 'dark'; accentLight?: string; accentDark?: string } = {};
+      if (theme !== undefined) {
+        if (theme !== 'light' && theme !== 'dark') {
+          throw new Error('theme 必须是 light 或 dark。');
+        }
+        update.theme = theme;
+      }
+      const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
+      for (const [key, value] of [
+        ['accentLight', accentLight],
+        ['accentDark', accentDark],
+      ] as const) {
+        if (value === undefined) continue;
+        if (typeof value !== 'string' || !HEX_COLOR.test(value)) {
+          throw new Error(`${key} 必须是 #rrggbb 格式的颜色。`);
+        }
+        update[key] = value;
+      }
+      await saveWebSettings(update, configPath);
+      // Take effect immediately in the running process.
+      if (update.theme !== undefined) runtime.config.web.theme = update.theme;
+      if (update.accentLight !== undefined) runtime.config.web.accentLight = update.accentLight;
+      if (update.accentDark !== undefined) runtime.config.web.accentDark = update.accentDark;
+      res.json({
+        theme: runtime.config.web.theme,
+        accentLight: runtime.config.web.accentLight,
+        accentDark: runtime.config.web.accentDark,
+      });
     } catch (error) {
       res.status(400).json({ error: formatError(error) });
     }

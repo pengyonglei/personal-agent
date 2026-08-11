@@ -78,6 +78,22 @@ const tuiConfigSchema = z.object({
   enableMouse: z.boolean().default(false),
 });
 
+/** Web UI 外观配置：主题模式与主色，由 Web 设置面板持久化到 config.yaml。 */
+const webConfigSchema = z.object({
+  /** 主题模式：light 浅色 / dark 深色 */
+  theme: z.enum(['light', 'dark']).default('light'),
+  /** 浅色模式主色（#rrggbb） */
+  accentLight: z
+    .string()
+    .regex(/^#[0-9a-fA-F]{6}$/, 'accentLight 必须是 #rrggbb 格式')
+    .default('#1677ff'),
+  /** 深色模式主色（#rrggbb） */
+  accentDark: z
+    .string()
+    .regex(/^#[0-9a-fA-F]{6}$/, 'accentDark 必须是 #rrggbb 格式')
+    .default('#91caff'),
+});
+
 const statsConfigSchema = z.object({
   enabled: z.boolean().default(true),
   /** SQLite database file path. Defaults to ~/.personal-agent/stats/model-requests.db */
@@ -131,6 +147,7 @@ export const appConfigSchema = z.object({
     })
     .default({}),
   tui: tuiConfigSchema.default({}),
+  web: webConfigSchema.default({}),
   stats: statsConfigSchema.default({}),
   memory: z
     .object({
@@ -156,6 +173,7 @@ export const appConfigSchema = z.object({
 
 export type AppConfig = z.infer<typeof appConfigSchema>;
 export type ModelConfig = z.infer<typeof modelConfigSchema>;
+export type WebConfig = z.infer<typeof webConfigSchema>;
 export type ToolSandboxConfig = z.infer<typeof sandboxSchema>;
 export type StatsConfig = z.infer<typeof statsConfigSchema>;
 export type PermissionRuleConfig = z.infer<typeof permissionRuleSchema>;

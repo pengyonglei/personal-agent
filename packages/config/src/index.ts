@@ -23,3 +23,4 @@ export {
   type ToolsSettingsUpdate,
   type ToolsShellPreference,
 } from './tools-settings';
+export { saveWebSettings, type WebSettingsUpdate } from './web-settings';
