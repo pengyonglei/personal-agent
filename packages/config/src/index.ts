@@ -11,6 +11,7 @@ export {
 } from './provider-settings';
 export { saveStatsSettings, type StatsSettingsUpdate } from './stats-settings';
 export { saveAgentSettings, type AgentSettingsUpdate } from './agent-settings';
+export { saveMemorySettings, type MemorySettingsUpdate } from './memory-settings';
 export {
   loadPromptSettings,
   resolvePromptConfigPath,

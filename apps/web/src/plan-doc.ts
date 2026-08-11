@@ -10,6 +10,8 @@ export interface PlanDoc {
   plan: Plan;
   createdAt: number;
   updatedAt: number;
+  /** 计划创建所属轮次序号（该任务的第几次用户请求，1-based），客户端刷新后按此把卡片插到对应回复下方。 */
+  requestSeq?: number;
 }
 
 const PLAN_STATUS_LABELS: Record<string, string> = {

@@ -51,6 +51,12 @@ export interface AgentLoopConfig {
   onModelCallStart?: (call: ModelCallDebugStart) => void;
   /** Optional diagnostics hook fired when a provider request finishes. */
   onModelCallEnd?: (call: ModelCallDebugEnd) => void;
+  /**
+   * 任务执行期间注入的用户消息（补充消息）：每轮开始前与最终收尾时被吸取，
+   * 并作为 user 消息写入对话历史，引导模型在本次运行内回应（用于
+   * inject_user_message 等「插入当前执行循环」的能力）。返回的数组会被清空。
+   */
+  drainPendingUserMessages?: () => string[];
 }
 
 export interface ModelCallDebugStart {
@@ -145,12 +151,23 @@ export class AgentLoop {
     log.info(`Starting agent loop for: "${userInput.slice(0, 100)}..."`);
 
     try {
+      // 上一轮因注入消息而延续循环的标志（详见 message_end 分支）
+      let injectedTurnPending = false;
+
       // ---- 3. 主循环：每一轮 = 一次「模型调用 + 可能的工具执行」 ----
       // 循环条件：未达到最大轮数，且未被中断
       while (this.turnCount < this.config.maxTurns && !this.aborted) {
         this.turnCount++;
         // 通知前端：新一轮开始（前端可据此刷新界面状态）
         yield { type: 'turn_start', turnNumber: this.turnCount };
+
+        // ---- 吸取执行期间注入的用户消息 ----
+        // 任务执行中通过 inject_user_message 注入的补充消息在本轮开始前写入历史，
+        // 本轮模型调用即可看到（作为 user 消息引导模型思考方向）。
+        const injectedMessages = this.config.drainPendingUserMessages?.() ?? [];
+        for (const injectedText of injectedMessages) {
+          this.config.contextAssembler.addMessage({ role: 'user', content: injectedText });
+        }
 
         // ---- 3a. 检查 Token 预算，必要时压缩历史 ----
         const history = this.config.contextAssembler.getHistory();
@@ -327,6 +344,21 @@ export class AgentLoop {
 
                   yield { type: 'turn_end', turnNumber: this.turnCount, usage: event.usage };
 
+                  // 执行期间注入的用户消息：若存在，则追加进历史并延续循环，
+                  // 让模型在本轮运行内回应这些补充消息，而不是直接结束。
+                  const injectedMessages = this.config.drainPendingUserMessages?.() ?? [];
+                  if (injectedMessages.length > 0) {
+                    for (const injectedText of injectedMessages) {
+                      this.config.contextAssembler.addMessage({
+                        role: 'user',
+                        content: injectedText,
+                      });
+                    }
+                    // 标记注入延续：跳过下方 3e 收尾（assistant 消息/turn_end 已产出）
+                    injectedTurnPending = true;
+                    break;
+                  }
+
                   // 全部完成：产出 done 事件（总轮数 + 总 Token 用量），结束生成器
                   yield {
                     type: 'done',
@@ -360,6 +392,13 @@ export class AgentLoop {
         if (this.aborted) {
           yield { type: 'interrupted' };
           return;
+        }
+
+        // 上一轮因注入消息而延续：assistant 消息与 turn_end 已在 message_end 分支产出，
+        // 跳过 3d/3e 收尾，直接进入下一轮（下一轮开始时会再次吸取注入消息，通常为空）。
+        if (injectedTurnPending) {
+          injectedTurnPending = false;
+          continue;
         }
 
         // ---- 3d. 若模型发起了工具调用，则逐个执行 ----
@@ -558,6 +597,15 @@ export class AgentLoop {
       if (!this.aborted) {
         const error = err instanceof Error ? err : new Error(String(err));
         yield { type: 'error', error, turnNumber: this.turnCount };
+      }
+    } finally {
+      // ---- 6. 兜底：循环退出后仍未处理的注入消息 ----
+      // 无论是 maxTurns 耗尽、中断还是异常，只要队列里还有注入消息，
+      // 就写回对话历史（随后 runPrompt 会 replaceMessages 落盘持久化），
+      // 保证用户消息不丢失，下一次运行（如排队消息的自动执行）会自然携带。
+      const leftover = this.config.drainPendingUserMessages?.() ?? [];
+      for (const text of leftover) {
+        this.config.contextAssembler.addMessage({ role: 'user', content: text });
       }
     }
   }

@@ -140,6 +140,8 @@ export interface UsageInfo {
   outputTokens: number;
   cacheCreationInputTokens?: number | null;
   cacheReadInputTokens?: number | null;
+  /** 命中缓存的输入 token 数（如 DeepSeek 的 prompt_cache_hit_tokens）。其他模型不提供该字段。 */
+  cacheHitTokens?: number | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -194,6 +196,8 @@ export interface ToolResult {
     fileModified?: string[];
     truncated?: boolean;
     interrupted?: boolean;
+    /** Structured tasks from todo_write, so UIs can render icons instead of plain text. */
+    tasks?: Array<{ status: string; subject: string }>;
   };
 }
 
@@ -318,4 +322,14 @@ export interface SessionMetadata {
    * 刷新/重启后按当前模型恢复，而不是显示别的模型的值或 0。
    */
   lastInputTokensByModel?: Record<string, number>;
+  /**
+   * 最近一次模型请求中命中缓存的输入 tokens（仅 deepseek 等模型提供），
+   * 与 lastInputTokens 一同持久化，刷新/重启后上下文仪表盘的缓存命中占比不丢失。
+   */
+  lastCacheHitTokens?: number;
+  /**
+   * 每个模型最近一次请求的缓存命中 tokens，keyed by `${provider}:${model}`，
+   * 与 lastInputTokensByModel 对称：切换模型后按当前模型恢复各自的值。
+   */
+  lastCacheHitTokensByModel?: Record<string, number>;
 }

@@ -12,6 +12,31 @@ test('parseClientMessage validates and normalizes prompts', () => {
   assert.throws(() => parseClientMessage('not-json'), /JSON/);
 });
 
+test('parseClientMessage validates inject_user_message', () => {
+  assert.deepEqual(
+    parseClientMessage('{"type":"inject_user_message","text":"  注意测试  ","taskId":" task-1 "}'),
+    {
+      type: 'inject_user_message',
+      text: '注意测试',
+      taskId: 'task-1',
+    },
+  );
+  assert.deepEqual(parseClientMessage('{"type":"inject_user_message","text":"继续"}'), {
+    type: 'inject_user_message',
+    text: '继续',
+    taskId: undefined,
+  });
+  assert.throws(
+    () => parseClientMessage('{"type":"inject_user_message","text":"   "}'),
+    /不能为空/,
+  );
+  assert.throws(() => parseClientMessage('{"type":"inject_user_message"}'), /不能为空/);
+  assert.throws(
+    () => parseClientMessage('{"type":"inject_user_message","text":"x","taskId":"  "}'),
+    /taskId 格式无效/,
+  );
+});
+
 test('parseClientMessage validates permission responses', () => {
   assert.deepEqual(
     parseClientMessage(
@@ -116,10 +141,11 @@ test('parseClientMessage validates project archive and rename commands', () => {
 });
 
 test('parseClientMessage accepts optional taskId on task-bound messages', () => {
-  assert.deepEqual(
-    parseClientMessage('{"type":"prompt","text":"hello","taskId":" task-1 "}'),
-    { type: 'prompt', text: 'hello', taskId: 'task-1' },
-  );
+  assert.deepEqual(parseClientMessage('{"type":"prompt","text":"hello","taskId":" task-1 "}'), {
+    type: 'prompt',
+    text: 'hello',
+    taskId: 'task-1',
+  });
   assert.deepEqual(parseClientMessage('{"type":"interrupt","taskId":"task-1"}'), {
     type: 'interrupt',
     taskId: 'task-1',

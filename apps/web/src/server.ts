@@ -11,6 +11,7 @@ import type { UserAnswer, UserQuestion } from '@personal-agent/shared';
 import {
   loadConfig,
   saveAgentSettings,
+  saveMemorySettings,
   savePromptSettings,
   saveStatsSettings,
   saveToolsSettings,
@@ -263,11 +264,7 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
         // 技能目录名 = zip 文件名（去 .zip），由前端通过 ?name= 传入
         const zipName =
           typeof req.query.name === 'string' ? req.query.name.replace(/\.zip$/i, '') : '';
-        const installed = await installSkillFromZip(
-          body,
-          runtime.getSkillsDirectory(),
-          zipName,
-        );
+        const installed = await installSkillFromZip(body, runtime.getSkillsDirectory(), zipName);
         await runtime.reloadStandaloneSkills();
         res.status(201).json({ skill: installed });
       } catch (error) {
@@ -438,6 +435,60 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
     }
   });
 
+  // 记忆配置（设置 -> 通用）：是否开启、最大记忆条数
+  app.get('/api/memory-config', (req, res) => {
+    if (!isAuthorized(req.headers.authorization, req.query.token, authToken)) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    const config = loadConfig({ cwd: runtime.workingDirectory, configPath: configPath });
+    res.json({ enabled: config.memory.enabled, maxEntries: config.memory.maxEntries });
+  });
+
+  app.put('/api/memory-config', async (req, res) => {
+    if (!isAuthorized(req.headers.authorization, req.query.token, authToken)) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    try {
+      const body = req.body as Record<string, unknown> | undefined;
+      const enabled = body?.enabled;
+      const maxEntries = body?.maxEntries;
+      if (enabled === undefined && maxEntries === undefined) {
+        throw new Error('没有需要保存的配置项。');
+      }
+      if (enabled !== undefined && typeof enabled !== 'boolean') {
+        throw new Error('enabled 必须是布尔值。');
+      }
+      if (maxEntries !== undefined) {
+        if (typeof maxEntries !== 'number' || !Number.isInteger(maxEntries)) {
+          throw new Error('最大记忆条数必须是整数。');
+        }
+        if (maxEntries < 1) {
+          throw new Error('最大记忆条数不能低于 1。');
+        }
+        if (maxEntries > 100000) {
+          throw new Error('最大记忆条数不能超过 100000。');
+        }
+      }
+      await saveMemorySettings(
+        { enabled: enabled as boolean | undefined, maxEntries: maxEntries as number | undefined },
+        configPath,
+      );
+      // Take effect immediately in the running process.
+      await runtime.applyMemorySettings({
+        enabled: (enabled as boolean | undefined) ?? runtime.config.memory.enabled,
+        maxEntries: (maxEntries as number | undefined) ?? runtime.config.memory.maxEntries,
+      });
+      res.json({
+        enabled: runtime.config.memory.enabled,
+        maxEntries: runtime.config.memory.maxEntries,
+      });
+    } catch (error) {
+      res.status(400).json({ error: formatError(error) });
+    }
+  });
+
   app.post('/api/runtime/model', async (req, res) => {
     if (!isAuthorized(req.headers.authorization, req.query.token, authToken)) {
       res.status(401).json({ error: 'Unauthorized' });
@@ -587,10 +638,13 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
             resolveAnswer(answer);
           };
           const onAbort = (): void => finish({ selections: [] });
-          const timeout = setTimeout(() => {
-            finish({ selections: [] });
-            send({ type: 'notice', message: '问题等待超时，未收到回答。' });
-          }, 5 * 60 * 1000);
+          const timeout = setTimeout(
+            () => {
+              finish({ selections: [] });
+              send({ type: 'notice', message: '问题等待超时，未收到回答。' });
+            },
+            5 * 60 * 1000,
+          );
           pendingQuestions.set(requestId, { resolve: finish, timeout });
           if (signal?.aborted) onAbort();
           else signal?.addEventListener('abort', onAbort, { once: true });
@@ -838,12 +892,7 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
                   model: `${conversation.providerInstance.providerId}:${conversation.providerInstance.getModel()}`,
                 }),
               });
-              void refineTaskTitleWithLlm(
-                conversation,
-                routedTaskId,
-                fallbackTitle,
-                message.text,
-              );
+              void refineTaskTitleWithLlm(conversation, routedTaskId, fallbackTitle, message.text);
             }
           }
           // Run the agent loop WITHOUT blocking the message queue: while a task
@@ -863,6 +912,12 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
             .catch((error) => {
               send({ type: 'error', message: formatError(error), code: 'REQUEST_FAILED' });
             });
+          break;
+        case 'inject_user_message':
+          // 把消息插入到正在执行的任务循环内（作为补充消息引导模型思考方向）。
+          // 同步调用不阻塞消息队列；busy 时入队由 AgentLoop 吸取，空闲时等价于
+          // 直接执行。失败（会话已关闭等）由 handleMessage 外层统一报错。
+          conversation.injectUserMessage(message.text);
           break;
         case 'interrupt':
           conversation.interrupt();

@@ -43,6 +43,10 @@ export class PlanStore {
       ...doc,
       createdAt: await this.readCreatedAt(filePath, doc.createdAt),
       updatedAt: Date.now(),
+      // requestSeq 三态：文件已有值 → 保留（更新不覆盖创建时轮次）；
+      // 文件已存在但无值（旧数据）→ 保持缺失，避免把创建轮次错误标记成更新时的轮次；
+      // 文件不存在 → 首次创建，写入本次计算的轮次。
+      requestSeq: await this.readRequestSeq(filePath, doc.requestSeq),
     };
     const tmpPath = join(
       this.directory,
@@ -99,6 +103,28 @@ export class PlanStore {
       // 文件不存在或损坏：使用 fallback
     }
     return fallback;
+  }
+
+  /**
+   * 读取已有文件的 requestSeq：
+   * - 文件已有合法值 → 返回该值（更新时保留创建时轮次）；
+   * - 文件已存在但无该字段（旧数据）→ 返回 undefined（保持缺失，不覆盖成当前轮次）；
+   * - 文件不存在/损坏 → 返回 fallback（首次创建，使用调用方计算的轮次）。
+   */
+  private async readRequestSeq(
+    filePath: string,
+    fallback: number | undefined,
+  ): Promise<number | undefined> {
+    try {
+      const raw = await readFile(filePath, 'utf-8');
+      const existing = JSON.parse(raw) as Partial<PlanDoc>;
+      if (typeof existing.requestSeq === 'number' && Number.isFinite(existing.requestSeq)) {
+        return existing.requestSeq;
+      }
+      return undefined;
+    } catch {
+      return fallback;
+    }
   }
 
   private async pruneIfNeeded(): Promise<void> {

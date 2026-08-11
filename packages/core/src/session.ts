@@ -51,6 +51,8 @@ export class SessionManager {
         tokensUsedByModel: {},
         lastInputTokens: 0,
         lastInputTokensByModel: {},
+        lastCacheHitTokens: 0,
+        lastCacheHitTokensByModel: {},
       },
     };
   }
@@ -175,6 +177,30 @@ export class SessionManager {
     );
   }
 
+  /** Record the cache-hit input token count of the most recent model request. */
+  setLastCacheHitTokens(input: number): void {
+    const key = this.modelKey();
+    this.currentSession.metadata.lastCacheHitTokens = input;
+    this.currentSession.metadata.lastCacheHitTokensByModel = {
+      ...(this.currentSession.metadata.lastCacheHitTokensByModel ?? {}),
+      [key]: input,
+    };
+    this.currentSession.updatedAt = new Date();
+  }
+
+  /**
+   * Cache-hit input tokens of the most recent model request (0 if none yet).
+   * 与 lastInputTokens 口径一致：按当前模型返回，刷新/重启后恢复各自的值。
+   */
+  getLastCacheHitTokens(): number {
+    const key = this.modelKey();
+    return (
+      this.currentSession.metadata.lastCacheHitTokensByModel?.[key] ??
+      this.currentSession.metadata.lastCacheHitTokens ??
+      0
+    );
+  }
+
   // -------------------------------------------------------------------
   // Persistence
   // -------------------------------------------------------------------
@@ -207,6 +233,8 @@ export class SessionManager {
         tokensUsedByModel: snapshot.metadata.tokensUsedByModel ?? {},
         lastInputTokens: snapshot.metadata.lastInputTokens ?? 0,
         lastInputTokensByModel: snapshot.metadata.lastInputTokensByModel ?? {},
+        lastCacheHitTokens: snapshot.metadata.lastCacheHitTokens ?? 0,
+        lastCacheHitTokensByModel: snapshot.metadata.lastCacheHitTokensByModel ?? {},
       },
     };
 
@@ -249,6 +277,8 @@ export class SessionManager {
           tokensUsedByModel: raw.metadata.tokensUsedByModel ?? {},
           lastInputTokens: raw.metadata.lastInputTokens ?? 0,
           lastInputTokensByModel: raw.metadata.lastInputTokensByModel ?? {},
+          lastCacheHitTokens: raw.metadata.lastCacheHitTokens ?? 0,
+          lastCacheHitTokensByModel: raw.metadata.lastCacheHitTokensByModel ?? {},
         },
       };
 

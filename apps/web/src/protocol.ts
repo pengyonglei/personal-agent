@@ -27,10 +27,18 @@ export interface ContextUsage {
   reservedOutputTokens: number;
   /** Used percentage of the total context window (0-100). */
   percentage: number;
+  /** 最近一次模型请求中命中缓存的输入 token 数（仅 deepseek 等模型提供）。 */
+  cacheHitTokens?: number | null;
 }
 
 export type ClientMessage =
   | { type: 'prompt'; text: string; taskId?: string }
+  | {
+      /** 把消息「插入」到正在执行的任务循环内，作为用户的补充消息引导模型思考方向（任务空闲时等价于 prompt 直接执行）。 */
+      type: 'inject_user_message';
+      text: string;
+      taskId?: string;
+    }
   | { type: 'interrupt'; taskId?: string }
   | {
       type: 'permission_response';
@@ -172,8 +180,21 @@ export type ServerMessage =
   | { type: 'llm_call_end'; call: ModelCallDebugEnd; taskId?: string }
   | { type: 'thinking_delta'; thinking: string; turnNumber: number; taskId?: string }
   | { type: 'assistant_delta'; text: string; turnNumber: number; taskId?: string }
-  | { type: 'tool_start'; toolName: string; toolCallId: string; arguments: Record<string, unknown>; turnNumber: number; taskId?: string }
-  | { type: 'tool_progress'; toolCallId: string; content: string; turnNumber: number; taskId?: string }
+  | {
+      type: 'tool_start';
+      toolName: string;
+      toolCallId: string;
+      arguments: Record<string, unknown>;
+      turnNumber: number;
+      taskId?: string;
+    }
+  | {
+      type: 'tool_progress';
+      toolCallId: string;
+      content: string;
+      turnNumber: number;
+      taskId?: string;
+    }
   | {
       type: 'permission_request';
       requestId: string;
@@ -206,6 +227,8 @@ export type ServerMessage =
       /** 本次任务执行（一次用户请求）中修改的文件及前后内容。 */
       files: Array<{ path: string; oldContent: string; newContent: string }>;
       taskId?: string;
+      /** 本次执行对应的轮次序号（该任务的第几次用户请求，1-based），刷新后客户端按此把卡片插到对应轮次回复下方。 */
+      requestSeq?: number;
     }
   | { type: 'interrupted'; taskId?: string }
   | { type: 'permission_mode'; mode: PermissionMode; taskId?: string }
@@ -217,6 +240,8 @@ export type ServerMessage =
       taskId?: string;
       /** 服务端生成的计划 Markdown 文档（plan 非空时提供，前端直接展示同一份内容）。 */
       markdown?: string;
+      /** 计划创建所属轮次序号（该任务的第几次用户请求，1-based），客户端刷新后按此定位卡片。 */
+      requestSeq?: number;
     }
   | { type: 'context_usage'; usage: ContextUsage; taskId?: string }
   | { type: 'notice'; message: string; taskId?: string }
@@ -228,6 +253,8 @@ export interface StoredFileChangeBatch {
   id: string;
   taskId?: string;
   time: string;
+  /** 该批次所属轮次序号（该任务的第几次用户请求，1-based），客户端按此把卡片插到对应回复下方。 */
+  requestSeq?: number;
   files: Array<{
     path: string;
     oldContent: string;
@@ -260,6 +287,15 @@ export function parseClientMessage(raw: string): ClientMessage {
       }
       return {
         type: 'prompt',
+        text: message.text.trim(),
+        taskId: parseOptionalTaskId(message),
+      };
+    case 'inject_user_message':
+      if (typeof message.text !== 'string' || !message.text.trim()) {
+        throw new Error('inject_user_message.text 不能为空');
+      }
+      return {
+        type: 'inject_user_message',
         text: message.text.trim(),
         taskId: parseOptionalTaskId(message),
       };
@@ -388,12 +424,20 @@ export function parseClientMessage(raw: string): ClientMessage {
       if (typeof message.enabled !== 'boolean') {
         throw new Error('set_plan_mode.enabled 必须是布尔值');
       }
-      return { type: 'set_plan_mode', enabled: message.enabled, taskId: parseOptionalTaskId(message) };
+      return {
+        type: 'set_plan_mode',
+        enabled: message.enabled,
+        taskId: parseOptionalTaskId(message),
+      };
     case 'set_permission_mode':
       if (message.mode !== 'allow' && message.mode !== 'ask' && message.mode !== 'approval') {
         throw new Error('set_permission_mode.mode 无效');
       }
-      return { type: 'set_permission_mode', mode: message.mode, taskId: parseOptionalTaskId(message) };
+      return {
+        type: 'set_permission_mode',
+        mode: message.mode,
+        taskId: parseOptionalTaskId(message),
+      };
     case 'set_task_model': {
       if (typeof message.taskId !== 'string' || !message.taskId.trim()) {
         throw new Error('set_task_model.taskId 不能为空');

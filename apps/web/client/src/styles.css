@@ -4,18 +4,19 @@
   --pa-bg-gray: #f0f0f0;
   --pa-bg: var(--pa-bg-gray);
   --pa-panel: #ffffff;
-  --pa-panel-soft: #f8faf5;
+  /* 以下带主题色调的灰阶均由 --pa-accent 派生，切换主题色时自动跟随 */
+  --pa-panel-soft: color-mix(in oklab, var(--pa-accent) 5%, white);
   --pa-panel-glass: rgba(255, 255, 255, 0.94);
-  --pa-border: #dfe5da;
-  --pa-border-strong: #cfd8c8;
-  --pa-text: #172017;
-  --pa-muted: #718071;
-  --pa-faint: #98a397;
+  --pa-border: color-mix(in oklab, var(--pa-accent) 12%, var(--pa-bg-gray));
+  --pa-border-strong: color-mix(in oklab, var(--pa-accent) 14%, #e0e0e0);
+  --pa-text: color-mix(in oklab, var(--pa-accent) 8%, #141414);
+  --pa-muted: color-mix(in oklab, var(--pa-accent) 18%, #686868);
+  --pa-faint: color-mix(in oklab, var(--pa-accent) 21%, #a8a8a8);
   --pa-accent: #6e9e2f;
   --pa-accent-soft: color-mix(in srgb, var(--pa-accent) 12%, white);
   --pa-danger: #c74d45;
   --pa-shadow: rgba(45, 60, 47, 0.13);
-  --pa-code: #f0f3ed;
+  --pa-code: color-mix(in oklab, var(--pa-accent) 10%, white);
   /* 块级背景：外层灰色、内层白色（思考块/工具调用/提示词展示） */
   --pa-block-bg: var(--pa-bg-gray);
   --pa-block-panel: #ffffff;
@@ -27,21 +28,22 @@
   --pa-bg-gray: #1d221d;
   --pa-bg: var(--pa-bg-gray);
   --pa-panel: #141814;
-  --pa-panel-soft: #181d18;
+  /* 以下带主题色调的灰阶均由 --pa-accent 派生，切换主题色时自动跟随 */
+  --pa-panel-soft: color-mix(in oklab, var(--pa-accent) 4%, #141414);
   --pa-panel-glass: rgba(17, 21, 17, 0.94);
-  --pa-border: #293029;
-  --pa-border-strong: #3a4438;
-  --pa-text: #edf2e9;
-  --pa-muted: #9ca89a;
-  --pa-faint: #6f7c6e;
+  --pa-border: color-mix(in oklab, var(--pa-accent) 9%, #202020);
+  --pa-border-strong: color-mix(in oklab, var(--pa-accent) 11%, #303030);
+  --pa-text: color-mix(in oklab, var(--pa-accent) 7%, #f0f0f0);
+  --pa-muted: color-mix(in oklab, var(--pa-accent) 9%, #a8a8a8);
+  --pa-faint: color-mix(in oklab, var(--pa-accent) 15%, #686868);
   --pa-accent: #b7e56d;
   --pa-accent-soft: color-mix(in srgb, var(--pa-accent) 10%, transparent);
   --pa-danger: #ff8d84;
   --pa-shadow: rgba(0, 0, 0, 0.32);
-  --pa-code: #0d110d;
+  --pa-code: color-mix(in oklab, var(--pa-accent) 4%, #0a0a0a);
   /* 块级背景：外层灰色、内层白色（思考块/工具调用/提示词展示） */
   --pa-block-bg: var(--pa-bg-gray);
-  --pa-block-panel: #2a302a;
+  --pa-block-panel: color-mix(in oklab, var(--pa-accent) 10%, #202020);
 }
 
 * {
@@ -600,12 +602,12 @@ select {
   min-width: 0;
   max-width: 280px;
   padding: 6px 11px;
-  border: 1px solid #d9e0d4;
+  border: 1px solid var(--pa-border);
   border-radius: 8px;
   flex-direction: column;
-  color: #172017;
+  color: var(--pa-text);
   background: var(--pa-bg-gray);
-  box-shadow: 0 8px 22px rgba(23, 32, 23, 0.16);
+  box-shadow: 0 8px 22px var(--pa-shadow);
   opacity: 0;
   pointer-events: none;
   transform: translateY(-50%) translateX(-4px);
@@ -620,8 +622,8 @@ select {
   left: -4px;
   width: 8px;
   height: 8px;
-  border-left: 1px solid #d9e0d4;
-  border-bottom: 1px solid #d9e0d4;
+  border-left: 1px solid var(--pa-border);
+  border-bottom: 1px solid var(--pa-border);
   background: var(--pa-bg-gray);
   content: '';
   transform: translateY(-50%) rotate(45deg);
@@ -637,7 +639,7 @@ select {
   font-size: 9px;
   font-weight: 700;
   letter-spacing: 0.08em;
-  color: #718071;
+  color: var(--pa-muted);
 }
 
 .pa-turn-nav-tip-text {
@@ -1266,6 +1268,89 @@ select {
   white-space: pre-wrap;
 }
 
+/* ---------------------------------------------------------------------------
+   todo_write — structured task list (antd status icons)
+--------------------------------------------------------------------------- */
+
+.pa-todo-list {
+  max-height: 280px;
+  padding: 4px;
+  overflow: auto;
+  border-radius: 8px;
+  background: var(--pa-block-panel);
+}
+
+.pa-todo-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.pa-todo-item + .pa-todo-item {
+  border-top: 1px solid var(--pa-border);
+}
+
+.pa-todo-item:hover {
+  background: color-mix(in srgb, var(--pa-accent) 8%, transparent);
+}
+
+.pa-todo-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.pa-todo-subject {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--pa-text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pa-todo-status {
+  flex: 0 0 auto;
+  color: var(--pa-muted);
+  font-size: 10px;
+}
+
+.pa-todo-pending .pa-todo-icon {
+  color: var(--pa-muted);
+}
+
+.pa-todo-in_progress .pa-todo-icon {
+  color: var(--pa-accent);
+}
+
+.pa-todo-completed .pa-todo-icon {
+  color: #52c41a;
+}
+
+.pa-todo-completed .pa-todo-subject {
+  text-decoration: line-through;
+  color: var(--pa-muted);
+}
+
+.pa-todo-deleted .pa-todo-icon {
+  color: var(--pa-muted);
+}
+
+.pa-todo-deleted .pa-todo-subject {
+  text-decoration: line-through;
+  color: var(--pa-muted);
+}
+
+.pa-todo-deleted .pa-todo-status {
+  text-decoration: line-through;
+}
+
 .pa-scroll-latest {
   position: absolute;
   right: max(24px, calc((100% - 860px) / 2));
@@ -1369,6 +1454,95 @@ select {
   min-width: 0;
   color: var(--pa-muted);
   font-size: 11px;
+}
+
+/* 排队消息浮窗：任务执行中 Enter 入队的消息，展示在输入框（composer）上方 */
+.pa-queue-floating {
+  position: absolute;
+  right: max(18px, calc((100% - 860px) / 2));
+  bottom: calc(100% + 10px);
+  left: max(18px, calc((100% - 860px) / 2));
+  z-index: 11;
+  pointer-events: none;
+}
+
+.pa-queue-card {
+  display: flex;
+  max-height: min(40vh, 300px);
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--pa-accent), transparent 55%);
+  border-radius: 12px;
+  background: var(--pa-panel-glass);
+  box-shadow: 0 18px 60px var(--pa-shadow);
+  pointer-events: auto;
+  backdrop-filter: blur(18px);
+}
+
+.pa-queue-header {
+  display: flex;
+  min-width: 0;
+  padding: 10px 14px 8px;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.pa-queue-title {
+  flex: 0 0 auto;
+  color: var(--pa-text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.pa-queue-hint {
+  overflow: hidden;
+  color: var(--pa-muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pa-queue-list {
+  min-height: 0;
+  padding: 0 8px 8px;
+  overflow-y: auto;
+}
+
+.pa-queue-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px;
+  border-radius: 8px;
+}
+
+.pa-queue-item:hover {
+  background: var(--pa-panel-soft);
+}
+
+.pa-queue-index {
+  flex: 0 0 auto;
+  width: 18px;
+  color: var(--pa-faint);
+  font-size: 10px;
+  font-weight: 600;
+  text-align: center;
+}
+
+.pa-queue-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--pa-text);
+  font-size: 12px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pa-queue-action {
+  flex: 0 0 auto;
 }
 
 .pa-composer {
@@ -2528,7 +2702,7 @@ select {
 }
 .pa-appearance-card {
   margin-bottom: 16px;
-}/* 创建项目：本地根目录输入框 + 选择按钮 同行布局 */
+} /* 创建项目：本地根目录输入框 + 选择按钮 同行布局 */
 .pa-root-path-row {
   display: flex;
   align-items: flex-end;
@@ -3074,6 +3248,13 @@ select {
 .pa-run-changes-copy time {
   color: var(--pa-faint);
   font-size: 10px;
+}
+
+/* 吸附进消息内容末尾的卡片容器：卡片内部列表不受对话 Markdown 排版影响
+   （.pa-message-content ul/ol 的缩进与间距规则会覆盖到任意深度的列表） */
+.pa-message-cards .pa-run-changes-files {
+  margin: 10px 0 0;
+  padding-left: 0;
 }
 
 .pa-run-changes-files {

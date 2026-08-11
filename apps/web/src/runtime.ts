@@ -747,6 +747,30 @@ export class WebAgentRuntime {
   }
 
   /**
+   * Live-update memory settings (settings page).
+   * 开启时（重新）初始化 memory store 并注册 read_memory / write_memory 工具；
+   * 关闭时注销工具并置空 store。maxEntries 变化时重建 store 以立即生效。
+   */
+  async applyMemorySettings(settings: { enabled: boolean; maxEntries: number }): Promise<void> {
+    this.config.memory.enabled = settings.enabled;
+    this.config.memory.maxEntries = settings.maxEntries;
+    this.toolRegistry.unregister('read_memory');
+    this.toolRegistry.unregister('write_memory');
+    this.memoryStore = null;
+
+    if (!settings.enabled) return;
+
+    try {
+      this.memoryStore = new FileSystemMemoryStore({ maxEntries: settings.maxEntries });
+      await this.memoryStore.initialize();
+      this.registerMemoryTools();
+    } catch (error) {
+      log.warn(`Memory initialization failed: ${formatError(error)}`);
+      this.memoryStore = null;
+    }
+  }
+
+  /**
    * Add a task-specific permission rule to the shared rules table.
    * The rule only takes effect for the target task (see PermissionManager.check).
    */
@@ -947,10 +971,7 @@ export class WebAgentRuntime {
     }));
   }
 
-  async injectPromptContext(
-    conversation: WebConversation,
-    userInput: string,
-  ): Promise<string> {
+  async injectPromptContext(conversation: WebConversation, userInput: string): Promise<string> {
     conversation.context.removeSection('automatic-memory-context');
     conversation.context.removeSection('active-plugin-skills');
 
@@ -964,8 +985,9 @@ export class WebAgentRuntime {
           conversation.context.addSection({
             name: 'automatic-memory-context',
             priority: 6,
-            content: (this.promptOverrides?.['memory-inject-web'] ??
-              '## Remembered Context\n\n${memory}').replace('${memory}', () => memory),
+            content: (
+              this.promptOverrides?.['memory-inject-web'] ?? '## Remembered Context\n\n${memory}'
+            ).replace('${memory}', () => memory),
           });
         }
       } catch (error) {
@@ -985,11 +1007,10 @@ export class WebAgentRuntime {
         name: 'active-plugin-skills',
         priority: 7,
         content: skills
-          .map(
-            (skill) =>
-              (this.promptOverrides?.['skills-inject-web'] ?? '## Skill: ${name}\n\n${content}')
-                .replaceAll('${name}', () => skill.name)
-                .replaceAll('${content}', () => skill.content),
+          .map((skill) =>
+            (this.promptOverrides?.['skills-inject-web'] ?? '## Skill: ${name}\n\n${content}')
+              .replaceAll('${name}', () => skill.name)
+              .replaceAll('${content}', () => skill.content),
           )
           .join('\n\n'),
       });
@@ -1183,6 +1204,11 @@ export class WebConversation {
   private statsRecorder: ModelRequestRecorder | null = null;
   /** Per-task reasoning effort override (falls back to the runtime default). */
   private reasoningEffortOverride: ReasoningEffort | undefined;
+  /**
+   * 任务执行期间注入的用户消息（补充消息）：busy 时入队，由 AgentLoop 每轮
+   * 吸取（drainPendingUserMessages）写入历史；空闲时注入等价于直接执行。
+   */
+  private injectedUserMessages: string[] = [];
 
   get providerInstance(): LLMProvider {
     return this.provider;
@@ -1259,7 +1285,10 @@ export class WebConversation {
       const usage = this.agentLoop.getTotalUsage();
       this.session.addTokensUsed(usage.inputTokens, usage.outputTokens);
       const lastUsage = this.agentLoop.getLastUsage();
-      if (lastUsage) this.session.setLastInputTokens(lastUsage.inputTokens);
+      if (lastUsage) {
+        this.session.setLastInputTokens(lastUsage.inputTokens);
+        this.session.setLastCacheHitTokens(lastUsage.cacheHitTokens ?? 0);
+      }
       this.session.incrementTurnCount();
       this.publishContextUsage();
     } finally {
@@ -1303,11 +1332,18 @@ export class WebConversation {
     }
     const files = [...deduped].map(([path, change]) => ({ path, ...change }));
     const batchId = `fc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    // 轮次序号 = 当前历史中的 user 消息数（含本轮 prompt），1-based。
+    // 客户端重放 history 时同样按 user 消息计数定位轮次，两端口径一致，
+    // 即使会话被压缩（两端看到同一份历史）也能对齐；无法定位时客户端回退追加到末尾。
+    const requestSeq = this.context
+      .getHistory()
+      .filter((message) => message.role === 'user').length;
     this.emit({
       type: 'run_changes',
       id: batchId,
       files,
       taskId: this.taskId,
+      requestSeq,
     });
     this.pendingFileChanges = [];
     // 异步落盘：失败仅丢失该批次持久化，不影响已推送的实时内容
@@ -1319,6 +1355,7 @@ export class WebConversation {
           taskId: conversation.taskId,
           time: new Date().toISOString(),
           files,
+          requestSeq,
         }),
       )
       .catch(() => {
@@ -1328,6 +1365,30 @@ export class WebConversation {
 
   interrupt(): void {
     if (this.busy) this.agentLoop.interrupt();
+  }
+
+  /**
+   * 把一条用户消息「插入」到正在执行的任务循环内，作为补充消息引导模型思考方向：
+   * - busy 时：入队等待 AgentLoop 下一轮吸取（消息最终进入对话历史并被模型回应）；
+   * - 空闲时（如用户点击「插入」的瞬间任务刚好结束）：等价于直接执行一次 runPrompt，
+   *   行为与正常发送 prompt 一致，不丢失消息。
+   * 注入消息直接写入历史，不走 dispatchUserInput/injectPromptContext（记忆/技能注入
+   * 不适用于补充消息，避免重复注入）。
+   */
+  injectUserMessage(text: string): void {
+    if (this.closed) throw new Error('Conversation is closed');
+    if (this.busy) {
+      this.injectedUserMessages.push(text);
+      return;
+    }
+    void this.runPrompt(text);
+  }
+
+  /** 供 AgentLoop 吸取执行期间注入的用户消息（取走并清空队列）。 */
+  drainInjectedUserMessages(): string[] {
+    const pending = this.injectedUserMessages;
+    this.injectedUserMessages = [];
+    return pending;
   }
 
   async checkpoint(): Promise<void> {
@@ -1472,16 +1533,14 @@ When you need the user to make a decision, call ask_user with the question and u
         this.context.addSection({
           name: 'plan-execution',
           priority: 5,
-          content:
-            (this.runtime.promptOverrides?.['plan-execution-web'] ??
-              `## Approved Plan
+          content: (
+            this.runtime.promptOverrides?.['plan-execution-web'] ??
+            `## Approved Plan
 
 ${'${plan}'}
 
-Execute in dependency order and use update_plan_step to report progress.`).replace(
-              '${plan}',
-              () => formatPlan(approved),
-            ),
+Execute in dependency order and use update_plan_step to report progress.`
+          ).replace('${plan}', () => formatPlan(approved)),
         });
       }
     }
@@ -1492,12 +1551,18 @@ Execute in dependency order and use update_plan_step to report progress.`).repla
   publishPlan(): void {
     const plan = this.planEngine.getPlan();
     const markdown = plan ? planToMarkdown(plan) : undefined;
+    // 计划所属轮次序号（与 run_changes 同口径：历史中 user 消息数，含本轮 prompt），
+    // 客户端刷新后按此把计划卡片插到对应轮次回复下方。
+    const requestSeq = this.context
+      .getHistory()
+      .filter((message) => message.role === 'user').length;
     this.emit({
       type: 'plan',
       active: this.planModeActive,
       plan,
       progress: this.planEngine.getProgress(),
       markdown,
+      requestSeq,
     });
     if (plan) {
       // 计划文档异步落盘（创建/批准/步骤状态更新都会重推并刷新 updatedAt；
@@ -1511,6 +1576,7 @@ Execute in dependency order and use update_plan_step to report progress.`).repla
           plan,
           createdAt: Date.now(),
           updatedAt: Date.now(),
+          requestSeq,
         })
         .catch((error) => log.warn(`Plan doc save failed: ${formatError(error)}`));
     }
@@ -1635,9 +1701,12 @@ Execute in dependency order and use update_plan_step to report progress.`).repla
         // 会循环调用多次模型，UI 上的 token 数也能实时更新。
         if (call.status === 'completed' && call.response.usage) {
           this.session.setLastInputTokens(call.response.usage.inputTokens);
+          this.session.setLastCacheHitTokens(call.response.usage.cacheHitTokens ?? 0);
           this.publishContextUsage();
         }
       },
+      // 任务执行中注入的用户消息（inject_user_message）：由循环每轮吸取
+      drainPendingUserMessages: () => this.drainInjectedUserMessages(),
     });
     if (history.length > 0) this.context.replaceHistory(history);
     // 注意：此处不主动推送 context_usage —— createAgentState 可能在会话
@@ -1680,6 +1749,8 @@ Execute in dependency order and use update_plan_step to report progress.`).repla
         totalTokens,
         reservedOutputTokens: TOKEN_BUDGET_RESERVED_OUTPUT,
         percentage,
+        // 与 usedTokens 同一持久化来源（会话 metadata），刷新/重启后按当前模型恢复
+        cacheHitTokens: this.session.getLastCacheHitTokens(),
       };
       this.emit({ type: 'context_usage', usage });
     } catch (error) {

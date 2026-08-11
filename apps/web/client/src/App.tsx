@@ -49,6 +49,8 @@ import {
   BulbOutlined,
   CaretRightOutlined,
   CheckCircleFilled,
+  CheckCircleOutlined,
+  ClockCircleOutlined,
   CloseOutlined,
   CodeOutlined,
   CommentOutlined,
@@ -69,12 +71,15 @@ import {
   InfoCircleOutlined,
   ItalicOutlined,
   LinkOutlined,
+  LoadingOutlined,
   MenuOutlined,
   MenuUnfoldOutlined,
+  MinusCircleOutlined,
   MinusOutlined,
   MoonOutlined,
   MoreOutlined,
   OrderedListOutlined,
+  PlayCircleOutlined,
   PlusOutlined,
   QuestionCircleOutlined,
   ReloadOutlined,
@@ -99,7 +104,12 @@ import {
 } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import type { ReasoningEffort, UnifiedMessage, UserAnswer } from '@personal-agent/shared';
+import type {
+  ReasoningEffort,
+  ToolResult,
+  UnifiedMessage,
+  UserAnswer,
+} from '@personal-agent/shared';
 import { VERSION } from '@personal-agent/shared';
 import type {
   ClientMessage,
@@ -114,7 +124,12 @@ import type {
 import { assistantResponseId } from './timeline';
 import type { PlanDoc } from './plan-doc';
 import { planStatusLabel, planToMarkdown } from './plan-doc';
-import { MAX_DIFF_LINES, collapseDiffContext, computeLineDiff, toUnifiedDiffText } from './file-diff';
+import {
+  MAX_DIFF_LINES,
+  collapseDiffContext,
+  computeLineDiff,
+  toUnifiedDiffText,
+} from './file-diff';
 
 const { Header, Content, Sider } = Layout;
 const { Text, Title } = Typography;
@@ -186,10 +201,12 @@ interface ToolTimelineItem {
   status: 'running' | 'success' | 'failed' | 'interrupted';
   output: string;
   duration?: number;
+  metadata?: ToolResult['metadata'];
   restored?: boolean;
 }
 
-type TimelineItem = MessageTimelineItem | ToolTimelineItem | PlanDocTimelineItem | RunChangesTimelineItem;
+type TimelineItem =
+  MessageTimelineItem | ToolTimelineItem | PlanDocTimelineItem | RunChangesTimelineItem;
 
 /** 计划文档卡片：对话时间线中可点击打开侧边栏文档 Tab 的条目。 */
 interface PlanDocTimelineItem {
@@ -198,6 +215,8 @@ interface PlanDocTimelineItem {
   docId: string;
   title: string;
   time: string;
+  /** 所属轮次序号（该任务的第几次用户请求，1-based），刷新重放时按此定位插入位置。 */
+  requestSeq?: number;
 }
 
 /** 运行修改卡片：一次任务执行中修改的文件列表（点击文件打开侧边栏 diff Tab）。 */
@@ -206,6 +225,8 @@ interface RunChangesTimelineItem {
   kind: 'run-changes';
   changeIds: string[];
   time: string;
+  /** 所属轮次序号（该任务的第几次用户请求，1-based），刷新重放时按此定位插入位置。 */
+  requestSeq?: number;
 }
 
 /** 一次文件修改（执行前后内容，用于展示 git 风格 diff）。 */
@@ -218,6 +239,13 @@ interface FileChange {
   time: string;
   /** 服务端落盘时内容超过上限被截断（diff 可能不完整）。 */
   truncated?: boolean;
+}
+
+/** 任务执行期间排队等待的消息（展示在输入框上方浮窗中，支持删除/插入当前执行）。 */
+interface QueuedMessage {
+  id: string;
+  text: string;
+  time: string;
 }
 
 /** 右侧侧边栏的 Tab：第一个「概要」固定不可删除，其余为可关闭的计划文档/文件差异 Tab。 */
@@ -599,6 +627,10 @@ function AgentWorkspace({
   const activeResponseSequenceRef = useRef(0);
   const [timeline, setTimeline] = useState<TimelineItem[]>([]);
   const timelineRef = useRef(timeline);
+  // 排队消息（per-task）：busy 时 Enter 入队，任务结束后自动按序执行，
+  // 也可手动「插入」到当前执行循环内作为补充消息引导模型思考方向。
+  const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([]);
+  const queuedByTaskRef = useRef<Record<string, QueuedMessage[]>>({});
   const transcriptRef = useRef<HTMLDivElement | null>(null);
   const userMessageEls = useRef(new Map<string, HTMLElement>());
   const followOutputRef = useRef(true);
@@ -640,6 +672,11 @@ function AgentWorkspace({
   useEffect(() => {
     fileChangesRef.current = fileChanges;
   }, [fileChanges]);
+  // 服务端落盘的修改文件批次（唯一事实源：实时 run_changes 事件 + seed 拉取
+  // 幂等合并登记），history 重放 / seed 拉取 / 实时事件三路径共用
+  // insertRunChangesCards 按 requestSeq 把卡片插到对应轮次回复下方（按卡片 id 去重），
+  // 消除「seed 先到被 history 整体替换冲掉 / history 先到 seed 后补」两种竞态。
+  const fileChangeBatchesRef = useRef<StoredFileChangeBatch[]>([]);
 
   /** 从服务端拉取 starter-prompts 自定义内容并更新首页示例（保存后也会被调用） */
   const reloadStarterPrompts = useCallback(async () => {
@@ -648,9 +685,7 @@ function AgentWorkspace({
       if (!response.ok) return;
       const payload = (await response.json()) as { prompts: BuiltinPromptItem[] };
       const starter = payload.prompts.find((item) => item.key === 'starter-prompts');
-      setStarterItems(
-        starter?.customized ? parseStarterPrompts(starter.content) : starterPrompts,
-      );
+      setStarterItems(starter?.customized ? parseStarterPrompts(starter.content) : starterPrompts);
     } catch {
       // 拉取失败时保持内置示例
     }
@@ -793,6 +828,7 @@ function AgentWorkspace({
         setModelCalls([]);
         modelCallsRef.current = [];
         setSelectedModelCallId(undefined);
+        setQueuedMessages([]);
         activeResponseSequenceRef.current = 0;
         patchState({
           busy: false,
@@ -814,6 +850,8 @@ function AgentWorkspace({
       setModelCalls(data.modelCalls);
       modelCallsRef.current = data.modelCalls;
       setSelectedModelCallId(undefined);
+      // 队列随任务切换：展示目标任务自己的排队消息
+      setQueuedMessages(queuedByTaskRef.current[taskId] ?? []);
       activeResponseSequenceRef.current = data.responseSeq;
       patchState({
         busy: data.busy,
@@ -853,7 +891,12 @@ function AgentWorkspace({
    * markdown 优先使用服务端生成的同一份文档（已落盘），缺失时回退本地生成。
    */
   const upsertPlanDoc = useCallback(
-    (plan: PlanMessage['plan'], taskId?: string, markdown?: string): PlanDoc | null => {
+    (
+      plan: PlanMessage['plan'],
+      taskId?: string,
+      markdown?: string,
+      requestSeq?: number,
+    ): PlanDoc | null => {
       if (!plan) return null;
       const content = markdown ?? planToMarkdown(plan);
       const existing = planDocsRef.current[plan.id];
@@ -876,6 +919,7 @@ function AgentWorkspace({
         plan,
         createdAt: Date.now(),
         updatedAt: Date.now(),
+        requestSeq,
       };
       planDocsRef.current[plan.id] = doc;
       setPlanDocs({ ...planDocsRef.current });
@@ -972,11 +1016,17 @@ function AgentWorkspace({
       planDocsRef.current = docs;
       setPlanDocs(docs);
       // plans 接口可能晚于 history 到达：主动补齐当前时间线与各任务快照缺失的卡片
+      //（plan 与 run-changes 两类卡片统一按轮次插入，任一来源先到后到都安全）
       updateTimeline((items) =>
-        appendPlanDocCards(items, docs, stateRef.current.activeTaskId),
+        insertReplayCards(items, docs, fileChangeBatchesRef.current, stateRef.current.activeTaskId),
       );
       for (const [taskId, data] of Object.entries(taskDataRef.current)) {
-        data.timeline = appendPlanDocCards(data.timeline, docs, taskId);
+        data.timeline = insertReplayCards(
+          data.timeline,
+          docs,
+          fileChangeBatchesRef.current,
+          taskId,
+        );
       }
     } catch {
       // 服务端不可用时保持当前内存态（不阻断页面）
@@ -1009,12 +1059,25 @@ function AgentWorkspace({
       }
       fileChangesRef.current = changes;
       setFileChanges(changes);
+      // 合并登记批次（可能已有实时 run_changes 登记的条目；insertRunChangesCards 按卡片 id 去重）
+      fileChangeBatchesRef.current = [...fileChangeBatchesRef.current, ...payload.batches];
       // 接口可能晚于 history 到达：主动补齐当前时间线与各任务快照缺失的卡片
+      //（plan 与 run-changes 两类卡片统一按轮次插入，任一来源先到后到都安全）
       updateTimeline((items) =>
-        appendRunChangesCards(items, payload.batches, stateRef.current.activeTaskId),
+        insertReplayCards(
+          items,
+          planDocsRef.current,
+          fileChangeBatchesRef.current,
+          stateRef.current.activeTaskId,
+        ),
       );
       for (const [taskId, data] of Object.entries(taskDataRef.current)) {
-        data.timeline = appendRunChangesCards(data.timeline, payload.batches, taskId);
+        data.timeline = insertReplayCards(
+          data.timeline,
+          planDocsRef.current,
+          fileChangeBatchesRef.current,
+          taskId,
+        );
       }
     } catch {
       // 服务端不可用时保持当前内存态（不阻断页面）
@@ -1033,6 +1096,31 @@ function AgentWorkspace({
       ),
     [timeline],
   );
+
+  /**
+   * plan / run-changes 卡片 → 所属 assistant 消息的吸附映射：卡片渲染进该消息的
+   * .pa-message-content 内部末尾（同一轮内计划文档在前、修改文件列表在后）。
+   * 吸附范围为「assistant/system 消息之后、下一轮 user 消息之前」的卡片；
+   * 无归属 assistant 的卡片（异常数据）由主循环独立渲染兜底。
+   */
+  const { assistantCards, attachedCardIds } = useMemo(() => {
+    const cards = new Map<string, TimelineItem[]>();
+    let ownerId: string | undefined;
+    for (const item of timeline) {
+      if (item.kind === 'message') {
+        if (item.role === 'assistant' || item.role === 'system') {
+          ownerId = item.id;
+          cards.set(ownerId, []);
+        } else {
+          ownerId = undefined;
+        }
+      } else if ((item.kind === 'plan-doc' || item.kind === 'run-changes') && ownerId) {
+        cards.get(ownerId)?.push(item);
+      }
+    }
+    const attached = new Set([...cards.values()].flat().map((card) => card.id));
+    return { assistantCards: cards, attachedCardIds: attached };
+  }, [timeline]);
 
   const registerMessageElement = useCallback((id: string, element: HTMLElement | null) => {
     if (element) userMessageEls.current.set(id, element);
@@ -1095,6 +1183,98 @@ function AgentWorkspace({
       return true;
     },
     [messageApi],
+  );
+
+  /** 任务执行中把消息加入当前任务的排队队列（busy→false 后自动按序执行）。 */
+  const enqueueQueuedMessage = useCallback(
+    (text: string) => {
+      const taskId = stateRef.current.activeTaskId;
+      if (!taskId) return;
+      const item: QueuedMessage = { id: nextId('queued'), text, time: currentTime() };
+      const next = [...(queuedByTaskRef.current[taskId] ?? []), item];
+      queuedByTaskRef.current[taskId] = next;
+      if (stateRef.current.activeTaskId === taskId) setQueuedMessages(next);
+      setPrompt('');
+    },
+    [nextId],
+  );
+
+  /**
+   * 冲刷目标任务（默认当前任务）的排队消息：任务空闲且队列非空时，把队首消息
+   * 作为正常 prompt 发送（写入该任务自己的时间线），下一条由下一次 busy→false
+   * 事件链式触发。用于「当前任务执行结束后自动理解并执行排队的指令」。
+   */
+  const flushQueuedMessages = useCallback(
+    (taskId?: string) => {
+      const target = taskId ?? stateRef.current.activeTaskId;
+      if (!target) return;
+      const queue = queuedByTaskRef.current[target];
+      if (!queue || queue.length === 0) return;
+      if (stateRef.current.creatingTask || stateRef.current.pendingQuestion) return;
+      // 目标任务是否空闲：活动任务查全局 busy，非活动任务查视图快照
+      const taskBusy =
+        target === stateRef.current.activeTaskId
+          ? stateRef.current.busy
+          : (taskDataRef.current[target]?.busy ?? false);
+      if (taskBusy) return;
+      const [first, ...rest] = queue;
+      queuedByTaskRef.current[target] = rest;
+      if (target === stateRef.current.activeTaskId) setQueuedMessages(rest);
+      // 写入正确任务的时间线：活动任务更新全局 timeline，非活动任务更新快照
+      if (target === stateRef.current.activeTaskId) {
+        followOutputRef.current = true;
+        appendMessage('user', first.text);
+      } else {
+        const data = taskDataRef.current[target] ?? emptyTaskSnapshot();
+        data.timeline = [
+          ...data.timeline,
+          {
+            id: nextId('user'),
+            kind: 'message',
+            role: 'user',
+            text: first.text,
+            time: currentTime(),
+          },
+        ];
+        taskDataRef.current[target] = data;
+      }
+      send({ type: 'prompt', text: first.text, taskId: target });
+    },
+    [appendMessage, nextId, send],
+  );
+
+  /** 删除一条排队消息。 */
+  const removeQueuedMessage = useCallback((id: string) => {
+    const taskId = stateRef.current.activeTaskId;
+    if (!taskId) return;
+    const next = (queuedByTaskRef.current[taskId] ?? []).filter((item) => item.id !== id);
+    queuedByTaskRef.current[taskId] = next;
+    setQueuedMessages(next);
+  }, []);
+
+  /**
+   * 把一条排队消息「插入」到当前正在执行的任务循环内，作为用户的补充消息引导
+   * 模型思考方向（服务端 busy 时由 AgentLoop 下一轮吸取；空闲时等价于正常执行）。
+   * 乐观更新：先移除队列并追加到时间线；发送失败（连接断开等）时恢复队列条目。
+   */
+  const injectQueuedMessage = useCallback(
+    (id: string) => {
+      const taskId = stateRef.current.activeTaskId;
+      if (!taskId) return;
+      const item = (queuedByTaskRef.current[taskId] ?? []).find((queued) => queued.id === id);
+      if (!item) return;
+      const rest = (queuedByTaskRef.current[taskId] ?? []).filter((queued) => queued.id !== id);
+      queuedByTaskRef.current[taskId] = rest;
+      setQueuedMessages(rest);
+      followOutputRef.current = true;
+      appendMessage('user', item.text);
+      if (!send({ type: 'inject_user_message', text: item.text, taskId })) {
+        queuedByTaskRef.current[taskId] = [item, ...rest];
+        setQueuedMessages([item, ...rest]);
+        messageApi.error('插入失败：服务连接已断开，消息已放回队列');
+      }
+    },
+    [appendMessage, messageApi, send],
   );
 
   const handleServerMessage = useCallback(
@@ -1172,9 +1352,7 @@ function AgentWorkspace({
                   kind: 'message',
                   role: 'assistant',
                   text: '',
-                  turns: [
-                    { turnNumber: (groupTurnSeq += 1), thinking, text, tools },
-                  ],
+                  turns: [{ turnNumber: (groupTurnSeq += 1), thinking, text, tools }],
                   time: currentTime(),
                 });
                 groupAssistantIndex = itemIndex;
@@ -1206,9 +1384,7 @@ function AgentWorkspace({
                   turns: (owner.turns ?? []).map((turn) => ({
                     ...turn,
                     tools: turn.tools.map((tool) =>
-                      tool.toolCallId === toolCallId
-                        ? { ...tool, status, output }
-                        : tool,
+                      tool.toolCallId === toolCallId ? { ...tool, status, output } : tool,
                     ),
                   })),
                 };
@@ -1226,8 +1402,17 @@ function AgentWorkspace({
             }
           }
           followOutputRef.current = true;
-          // 重放该任务的计划文档卡片（切任务/重连/刷新后保持可见）
-          restored = appendPlanDocCards(restored, planDocsRef.current, eventTaskId);
+          // 重放 plan 与 run-changes 两类卡片（切任务/重连/刷新后保持可见，与
+          // seedPlanDocs / seedFileChanges 幂等，按卡片 id 去重）：按 requestSeq
+          // 插到对应轮次回复下方（同一轮内 plan 在前、文件列表在后），避免刷新后
+          // 全部堆在对话末尾；同时兜底 seed 先完成、历史后到达被 replaceTimeline
+          // 整体替换的竞态（desktop 重启等场景），保证卡片不丢失。
+          restored = insertReplayCards(
+            restored,
+            planDocsRef.current,
+            fileChangeBatchesRef.current,
+            eventTaskId,
+          );
           replaceTimeline(restored);
           patchState({ sessionId: incoming.sessionId });
           if (eventTaskId && eventTaskId !== viewingTask && viewingTask) {
@@ -1281,12 +1466,20 @@ function AgentWorkspace({
           }));
           break;
         case 'project_deleted':
+          // 清理该项目下任务的排队消息（任务已不存在，队列不可再执行）
+          for (const task of stateRef.current.tasks) {
+            if (task.projectId === incoming.projectId) {
+              delete queuedByTaskRef.current[task.id];
+            }
+          }
           patchState((current) => ({
             projects: current.projects.filter((project) => project.id !== incoming.projectId),
             tasks: current.tasks.filter((task) => task.projectId !== incoming.projectId),
             activeTaskId:
               current.activeProjectId === incoming.projectId ? undefined : current.activeTaskId,
           }));
+          // 同步当前展示的队列（删除的项目若包含当前任务，队列已清空）
+          setQueuedMessages(queuedByTaskRef.current[stateRef.current.activeTaskId ?? ''] ?? []);
           break;
         case 'task_changed':
           switchTaskView(incoming.task.id);
@@ -1328,6 +1521,8 @@ function AgentWorkspace({
           requestAnimationFrame(() =>
             document.querySelector<HTMLTextAreaElement>('#prompt-input')?.focus(),
           );
+          // 切换到空闲任务且存在排队消息（如切换前该任务已执行完）：立即冲刷
+          flushQueuedMessages(incoming.task.id);
           break;
         case 'task_renamed':
           patchState((current) => ({
@@ -1347,6 +1542,8 @@ function AgentWorkspace({
             if (incoming.busy) data.responseSeq += 1;
             data.busy = incoming.busy;
             taskDataRef.current[eventTaskId] = data;
+            // 非活动任务执行结束：自动冲刷该任务的排队消息
+            if (!incoming.busy) flushQueuedMessages(eventTaskId);
             break;
           }
           if (incoming.busy && !stateRef.current.busy) {
@@ -1355,6 +1552,8 @@ function AgentWorkspace({
           }
           patchState({ busy: incoming.busy });
           if (!incoming.busy) {
+            // 当前任务执行结束：自动按序执行排队消息
+            flushQueuedMessages(eventTaskId);
             updateTimeline((items) =>
               items.map((item) =>
                 item.kind === 'message' && item.streaming ? { ...item, streaming: false } : item,
@@ -1552,6 +1751,7 @@ function AgentWorkspace({
                     (incoming.result.success ? incoming.result.content : incoming.result.error) ||
                     '(无输出)',
                   duration: incoming.result.metadata?.duration,
+                  metadata: incoming.result.metadata,
                 })),
               }),
             );
@@ -1576,6 +1776,7 @@ function AgentWorkspace({
                     (incoming.result.success ? incoming.result.content : incoming.result.error) ||
                     '(无输出)',
                   duration: incoming.result.metadata?.duration,
+                  metadata: incoming.result.metadata,
                 })),
               }),
             ),
@@ -1648,17 +1849,33 @@ function AgentWorkspace({
           const eventTaskId = incoming.taskId ?? stateRef.current.activeTaskId;
           if (incoming.files.length === 0) break;
           // 服务端批次 id：存在时用确定性 change/card id（刷新恢复后 diff Tab 可命中），
-          // 不存在（旧服务端）退回本地自增 id。
-          const batchId = incoming.id;
-          const changeIds: string[] = [];
+          // 不存在（旧服务端）退回本地唯一 id。
+          const batchId = incoming.id ?? nextId('local-batch');
+          const batch: StoredFileChangeBatch = {
+            id: batchId,
+            taskId: eventTaskId,
+            time: new Date().toISOString(),
+            requestSeq: incoming.requestSeq,
+            files: incoming.files.map((file) => ({ ...file })),
+          };
+          // 登记到唯一批次事实源（fileChangeBatchesRef）：后续 history 重放
+          // （切换任务/压缩上下文等）时用同一份数据恢复卡片。
+          // 旧服务端无批次 id 时仅本地使用（不登记），重放后无法恢复属预期降级。
+          if (incoming.id) {
+            fileChangeBatchesRef.current = [
+              ...fileChangeBatchesRef.current.filter((existing) => existing.id !== batchId),
+              batch,
+            ];
+          }
           const next = { ...fileChangesRef.current };
           const seenPaths = new Set<string>();
           let fileIndex = 0;
           for (const file of incoming.files) {
-            // 同批次内按路径去重（服务端已去重，此处兜底兼容旧服务端）
+            // 同批次内按路径去重（服务端已去重，此处兜底兼容旧服务端）；
+            // change id 与卡片内 insertRunChangesCards 派生的 id 保持一致
             if (seenPaths.has(file.path)) continue;
             seenPaths.add(file.path);
-            const id = batchId ? `file-change-${batchId}-${fileIndex}` : nextId('file-change');
+            const id = `file-change-${batchId}-${fileIndex}`;
             fileIndex += 1;
             next[id] = {
               id,
@@ -1668,28 +1885,18 @@ function AgentWorkspace({
               newContent: file.newContent,
               time: currentTime(),
             };
-            changeIds.push(id);
           }
-          if (changeIds.length === 0) break;
           fileChangesRef.current = next;
           setFileChanges(next);
-          const card: RunChangesTimelineItem = {
-            id: batchId ? `run-changes-${batchId}` : nextId('run-changes'),
-            kind: 'run-changes',
-            changeIds,
-            time: currentTime(),
-          };
-          const appendCard = (items: TimelineItem[]): TimelineItem[] => {
-            if (items.some((item) => item.id === card.id)) return items;
-            return [...items, card];
-          };
+          // 与 history 重放 / seed 拉取共用同一个插入函数（实时时该轮回复位于
+          // 末尾，插入即追加到对应轮次回复下方）
           if (eventTaskId && eventTaskId !== stateRef.current.activeTaskId) {
             const data = taskDataRef.current[eventTaskId] ?? emptyTaskSnapshot();
-            data.timeline = appendCard(data.timeline);
+            data.timeline = insertRunChangesCards(data.timeline, [batch], eventTaskId);
             taskDataRef.current[eventTaskId] = data;
             break;
           }
-          updateTimeline(appendCard);
+          updateTimeline((items) => insertRunChangesCards(items, [batch], eventTaskId));
           break;
         }
         case 'interrupted': {
@@ -1762,7 +1969,12 @@ function AgentWorkspace({
         }
         case 'plan': {
           const eventTaskId = incoming.taskId ?? stateRef.current.activeTaskId;
-          const newDoc = upsertPlanDoc(incoming.plan, eventTaskId, incoming.markdown);
+          const newDoc = upsertPlanDoc(
+            incoming.plan,
+            eventTaskId,
+            incoming.markdown,
+            incoming.requestSeq,
+          );
           if (eventTaskId && eventTaskId !== stateRef.current.activeTaskId) {
             const data = taskDataRef.current[eventTaskId] ?? emptyTaskSnapshot();
             data.planActive = incoming.active;
@@ -1832,6 +2044,7 @@ function AgentWorkspace({
     },
     [
       appendMessage,
+      flushQueuedMessages,
       messageApi,
       nextId,
       patchState,
@@ -2053,10 +2266,14 @@ function AgentWorkspace({
       !text ||
       !stateRef.current.connected ||
       !stateRef.current.configured ||
-      // Creating a new task must not be blocked by the current task's busy state.
-      (!hasDraft && stateRef.current.busy) ||
       stateRef.current.creatingTask
     ) {
+      return;
+    }
+    // 任务执行中：不直接发送，消息进入排队队列（当前任务结束后自动按序执行，
+    // 也可在输入框上方的队列浮窗中手动「插入」到当前执行循环）。
+    if (!hasDraft && stateRef.current.busy) {
+      enqueueQueuedMessage(text);
       return;
     }
     setModelCalls([]);
@@ -2178,8 +2395,7 @@ function AgentWorkspace({
 
   async function openProviderSettings(tab: 'providers' | 'general' = 'general') {
     // 防御：React onClick 可能把 MouseEvent 误传为 tab，非法值回退到通用
-    const targetTab: 'providers' | 'general' =
-      tab === 'providers' ? 'providers' : 'general';
+    const targetTab: 'providers' | 'general' = tab === 'providers' ? 'providers' : 'general';
     setProviderModalOpen(true);
     setSettingsTab(targetTab);
     setProviderLoading(true);
@@ -2685,17 +2901,29 @@ function AgentWorkspace({
               {timeline.length === 0 ? (
                 <Welcome onSelectPrompt={submitPrompt} prompts={starterItems} />
               ) : (
-                timeline.map((item) => (
-                  <TimelineEntry
-                    key={item.id}
-                    item={item}
-                    planDocs={planDocs}
-                    fileChanges={fileChanges}
-                    onMessageElement={registerMessageElement}
-                    onOpenPlanDoc={openPlanDocTab}
-                    onOpenFileDiff={openFileDiffTab}
-                  />
-                ))
+                timeline.map((item) => {
+                  // 计划文档 / 修改文件卡片吸附进所属 assistant 消息的
+                  // .pa-message-content 内部末尾（plan 在前、run-changes 在后）；
+                  // 无归属 assistant 的卡片（异常数据）独立渲染兜底。
+                  if (
+                    (item.kind === 'plan-doc' || item.kind === 'run-changes') &&
+                    attachedCardIds.has(item.id)
+                  ) {
+                    return null;
+                  }
+                  return (
+                    <TimelineEntry
+                      key={item.id}
+                      item={item}
+                      cards={item.kind === 'message' ? assistantCards.get(item.id) : undefined}
+                      planDocs={planDocs}
+                      fileChanges={fileChanges}
+                      onMessageElement={registerMessageElement}
+                      onOpenPlanDoc={openPlanDocTab}
+                      onOpenFileDiff={openFileDiffTab}
+                    />
+                  );
+                })
               )}
             </div>
           </div>
@@ -2740,8 +2968,11 @@ function AgentWorkspace({
             runtimeReasoningOptions={runtimeReasoningOptions}
             runtimeDisabled={runtimeDisabled}
             executionLabel={executionLabel}
+            queuedMessages={queuedMessages}
             onPromptChange={setPrompt}
             onSubmit={submitPrompt}
+            onRemoveQueued={removeQueuedMessage}
+            onInjectQueued={injectQueuedMessage}
             onStop={() => send({ type: 'interrupt', taskId: stateRef.current.activeTaskId })}
             onAnswerPermission={answerPermission}
             onAnswerQuestion={answerQuestion}
@@ -3766,11 +3997,7 @@ function RunChangesCard({
         <ul className={`pa-run-changes-files${collapsed ? ' collapsed' : ''}`}>
           {visible.map((change) => (
             <li key={change.id}>
-              <button
-                type="button"
-                title={change.path}
-                onClick={() => onOpenFileDiff?.(change.id)}
-              >
+              <button type="button" title={change.path} onClick={() => onOpenFileDiff?.(change.id)}>
                 <FileTextOutlined />
                 <span>{lastPathSegment(change.path) ?? change.path}</span>
               </button>
@@ -3795,6 +4022,7 @@ function RunChangesCard({
 
 function TimelineEntry({
   item,
+  cards,
   planDocs,
   fileChanges,
   onMessageElement,
@@ -3802,6 +4030,8 @@ function TimelineEntry({
   onOpenFileDiff,
 }: {
   item: TimelineItem;
+  /** 吸附进本消息 .pa-message-content 内部末尾的卡片（plan-doc / run-changes，plan 在前）。 */
+  cards?: TimelineItem[];
   planDocs?: Record<string, PlanDoc>;
   fileChanges?: Record<string, FileChange>;
   onMessageElement?: (id: string, element: HTMLElement | null) => void;
@@ -3832,7 +4062,11 @@ function TimelineEntry({
         <span className="pa-plan-doc-card-copy">
           <strong>{item.title}</strong>
           <span className="pa-plan-doc-card-meta">
-            {status && <Tag color={PLAN_STATUS_TAG_COLORS[status] ?? 'default'}>{planStatusLabel(status)}</Tag>}
+            {status && (
+              <Tag color={PLAN_STATUS_TAG_COLORS[status] ?? 'default'}>
+                {planStatusLabel(status)}
+              </Tag>
+            )}
             <time>{item.time}</time>
           </span>
         </span>
@@ -3894,7 +4128,9 @@ function TimelineEntry({
   // 一轮回复的文本：多次调用的文本按序拼接（调用之间空行分隔）
   const messageText = turnsText(item.turns);
   const showThinking =
-    !user && !system && (Boolean(item.turns?.length) || Boolean(item.thinking) || Boolean(item.tools?.length));
+    !user &&
+    !system &&
+    (Boolean(item.turns?.length) || Boolean(item.thinking) || Boolean(item.tools?.length));
   const copyUserMessage = (): void => {
     void copyTextToClipboard(item.text)
       .then(() => messageApi.success('用户输入已复制'))
@@ -3920,11 +4156,56 @@ function TimelineEntry({
           streaming={Boolean(item.streaming)}
         />
       )}
-      {(messageText || item.text || user || system) && (
+      {(messageText || item.text || user || system || (cards && cards.length > 0)) && (
         <div
           className={`pa-message-content${item.streaming && (messageText || item.text) ? ' streaming' : ''}`}
         >
           {system ? item.text : <MarkdownContent text={messageText || item.text} />}
+          {!user && cards && cards.length > 0 && (
+            <div className="pa-message-cards">
+              {cards.map((card) => {
+                if (card.kind === 'plan-doc') {
+                  const status = planDocs?.[card.docId]?.plan.status;
+                  return (
+                    <button
+                      key={card.id}
+                      type="button"
+                      className="pa-plan-doc-card"
+                      title="查看计划文档"
+                      onClick={() => onOpenPlanDoc?.(card.docId)}
+                    >
+                      <span className="pa-plan-doc-card-icon" aria-hidden="true">
+                        <FileTextOutlined />
+                      </span>
+                      <span className="pa-plan-doc-card-copy">
+                        <strong>{card.title}</strong>
+                        <span className="pa-plan-doc-card-meta">
+                          {status && (
+                            <Tag color={PLAN_STATUS_TAG_COLORS[status] ?? 'default'}>
+                              {planStatusLabel(status)}
+                            </Tag>
+                          )}
+                          <time>{card.time}</time>
+                        </span>
+                      </span>
+                    </button>
+                  );
+                }
+                if (card.kind !== 'run-changes') return null;
+                const changes = card.changeIds
+                  .map((id) => fileChanges?.[id])
+                  .filter((change): change is FileChange => Boolean(change));
+                return (
+                  <RunChangesCard
+                    key={card.id}
+                    changes={changes}
+                    time={card.time}
+                    onOpenFileDiff={onOpenFileDiff}
+                  />
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
       {user && (
@@ -4154,7 +4435,69 @@ function ThinkingTool({ tool }: { tool: ToolTimelineItem }) {
       </div>
       {bashCommand && <pre className="pa-tool-command">{bashCommand}</pre>}
       {askQuestion && <pre className="pa-tool-command">{askQuestion}</pre>}
-      <pre className="pa-tool-output">{tool.output}</pre>
+      {tool.name === 'todo_write' && parseTodoTasks(tool) ? (
+        <TodoTaskList tool={tool} />
+      ) : (
+        <pre className="pa-tool-output">{tool.output}</pre>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// todo_write — structured task list with antd status icons
+// ---------------------------------------------------------------------------
+
+interface TodoTask {
+  status: string;
+  subject: string;
+}
+
+/** Extract structured tasks: prefer metadata.tasks, fall back to parsing the plain-text output. */
+function parseTodoTasks(tool: ToolTimelineItem): TodoTask[] | undefined {
+  if (tool.metadata?.tasks && tool.metadata.tasks.length > 0) {
+    return tool.metadata.tasks;
+  }
+  // Fallback for restored history items (no metadata): "  [pending] Task A"
+  const tasks: TodoTask[] = [];
+  for (const line of tool.output.split('\n')) {
+    const match = /^\[(pending|in_progress|completed|deleted)\]\s*(.*)$/.exec(line.trim());
+    if (match) tasks.push({ status: match[1], subject: match[2] });
+  }
+  return tasks.length > 0 ? tasks : undefined;
+}
+
+const TODO_STATUS_ICONS: Record<string, ReactNode> = {
+  pending: <ClockCircleOutlined />,
+  in_progress: <PlayCircleOutlined />,
+  completed: <CheckCircleOutlined />,
+  deleted: <MinusCircleOutlined />,
+};
+
+const TODO_STATUS_LABELS: Record<string, string> = {
+  pending: '待处理',
+  in_progress: '进行中',
+  completed: '已完成',
+  deleted: '已删除',
+};
+
+function TodoTaskList({ tool }: { tool: ToolTimelineItem }) {
+  const tasks = parseTodoTasks(tool);
+  if (!tasks) return null;
+  return (
+    <div className="pa-todo-list">
+      {tasks.map((task, index) => {
+        const status = task.status;
+        return (
+          <div key={`${index}-${task.subject}`} className={`pa-todo-item pa-todo-${status}`}>
+            <span className="pa-todo-icon">
+              {TODO_STATUS_ICONS[status] ?? <ClockCircleOutlined />}
+            </span>
+            <span className="pa-todo-subject">{task.subject}</span>
+            <span className="pa-todo-status">{TODO_STATUS_LABELS[status] ?? status}</span>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -4221,9 +4564,7 @@ function AskUserCard({
         <div className="pa-permission-header">
           <Avatar size={30} icon={<QuestionCircleOutlined />} />
           <div>
-            <strong>
-              {taskTitle ? `「${taskTitle}」需要你的选择` : 'Agent 需要你的选择'}
-            </strong>
+            <strong>{taskTitle ? `「${taskTitle}」需要你的选择` : 'Agent 需要你的选择'}</strong>
             <span>{request.multiSelect ? '可多选（勾选多个选项）' : '请选择一个答案'}</span>
           </div>
         </div>
@@ -4276,9 +4617,7 @@ function AskUserCard({
                   {renderOptionLabel(option, i)}
                 </Radio>
               ))}
-              {request.allowCustom && (
-                <Radio value="__custom__">✎ 自定义答案（以上都不选）</Radio>
-              )}
+              {request.allowCustom && <Radio value="__custom__">✎ 自定义答案（以上都不选）</Radio>}
             </Radio.Group>
           )}
           {customMode && (
@@ -4332,8 +4671,11 @@ function Composer({
   runtimeReasoningOptions,
   runtimeDisabled,
   executionLabel,
+  queuedMessages,
   onPromptChange,
   onSubmit,
+  onRemoveQueued,
+  onInjectQueued,
   onStop,
   onAnswerPermission,
   onAnswerQuestion,
@@ -4367,8 +4709,14 @@ function Composer({
   runtimeReasoningOptions: ReasoningEffort[];
   runtimeDisabled: boolean;
   executionLabel?: string;
+  /** 当前任务的排队消息（任务执行中 Enter 入队，展示在输入框上方浮窗）。 */
+  queuedMessages: QueuedMessage[];
   onPromptChange: (prompt: string) => void;
   onSubmit: (prompt?: string) => void;
+  /** 删除一条排队消息。 */
+  onRemoveQueued: (id: string) => void;
+  /** 把一条排队消息「插入」到当前执行循环（补充消息引导模型）。 */
+  onInjectQueued: (id: string) => void;
   onStop: () => void;
   onAnswerPermission: (approved: boolean) => void;
   onAnswerQuestion: (answer: UserAnswer) => void;
@@ -4419,7 +4767,8 @@ function Composer({
     const start = textarea.selectionStart ?? prompt.length;
     const end = textarea.selectionEnd ?? start;
     const lineStart = prompt.lastIndexOf('\n', start - 1) + 1;
-    const lineEnd = prompt.indexOf('\n', end) === -1 ? prompt.length : prompt.indexOf('\n', end) + 1;
+    const lineEnd =
+      prompt.indexOf('\n', end) === -1 ? prompt.length : prompt.indexOf('\n', end) + 1;
     const block = prompt.slice(lineStart, lineEnd);
     const content =
       block.trim() === ''
@@ -4458,7 +4807,7 @@ function Composer({
   const placeholder = !enabled
     ? '配置 Provider 后即可开始对话'
     : busy
-      ? 'Agent 正在处理…'
+      ? '任务执行中…输入后按 Enter 加入队列'
       : '给 personal-agent 发送消息…（输入 / 选择技能，Enter 发送，Shift+Enter 换行）';
 
   /** 取光标之前最近的 `/技能名前缀`（/ 前需为行首或空白，避免误匹配 URL 等），无则返回 null。 */
@@ -4586,6 +4935,54 @@ function Composer({
           ))}
         </div>
       )}
+      {queuedMessages.length > 0 && (
+        <div className="pa-queue-floating">
+          <div className="pa-queue-card">
+            <div className="pa-queue-header">
+              <span className="pa-queue-title">消息队列（{queuedMessages.length}）</span>
+              <span className="pa-queue-hint">任务结束后自动按序执行，也可插入当前执行循环</span>
+            </div>
+            <div className="pa-queue-list">
+              {queuedMessages.map((item, index) => (
+                <div className="pa-queue-item" key={item.id}>
+                  <span className="pa-queue-index">{index + 1}</span>
+                  <span className="pa-queue-text" title={item.text}>
+                    {item.text}
+                  </span>
+                  <Tooltip
+                    title={
+                      busy
+                        ? '插入到当前执行循环，作为补充消息引导模型思考方向'
+                        : '当前任务空闲，立即执行'
+                    }
+                  >
+                    <Button
+                      type="text"
+                      size="small"
+                      className="pa-queue-action"
+                      icon={<InboxOutlined />}
+                      aria-label="插入当前任务"
+                      disabled={!enabled || creatingTask}
+                      onClick={() => onInjectQueued(item.id)}
+                    />
+                  </Tooltip>
+                  <Tooltip title="删除">
+                    <Button
+                      type="text"
+                      size="small"
+                      className="pa-queue-action"
+                      danger
+                      icon={<DeleteOutlined />}
+                      aria-label="删除排队消息"
+                      onClick={() => onRemoveQueued(item.id)}
+                    />
+                  </Tooltip>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
       <div className="pa-composer">
         <Tooltip title={rootPath} placement="topLeft">
           <div className="pa-composer-path">
@@ -4603,7 +5000,13 @@ function Composer({
               onClick={() => setToolbarOpen((open) => !open)}
             >
               Markdown 工具栏
-              <DownOutlined style={{ fontSize: 9, transition: 'transform 0.2s ease', transform: toolbarOpen ? 'rotate(180deg)' : undefined }} />
+              <DownOutlined
+                style={{
+                  fontSize: 9,
+                  transition: 'transform 0.2s ease',
+                  transform: toolbarOpen ? 'rotate(180deg)' : undefined,
+                }}
+              />
             </Button>
             <span className="pa-md-hint">支持 Markdown</span>
           </div>
@@ -4622,38 +5025,104 @@ function Composer({
         {toolbarOpen && (
           <div className="pa-md-toolbar-actions">
             <Tooltip title="加粗">
-              <Button type="text" size="small" icon={<BoldOutlined />} disabled={!enabled} onClick={() => applyInline('**', '**', '加粗文本')} />
+              <Button
+                type="text"
+                size="small"
+                icon={<BoldOutlined />}
+                disabled={!enabled}
+                onClick={() => applyInline('**', '**', '加粗文本')}
+              />
             </Tooltip>
             <Tooltip title="斜体">
-              <Button type="text" size="small" icon={<ItalicOutlined />} disabled={!enabled} onClick={() => applyInline('*', '*', '斜体文本')} />
+              <Button
+                type="text"
+                size="small"
+                icon={<ItalicOutlined />}
+                disabled={!enabled}
+                onClick={() => applyInline('*', '*', '斜体文本')}
+              />
             </Tooltip>
             <Tooltip title="行内代码">
-              <Button type="text" size="small" icon={<CodeOutlined />} disabled={!enabled} onClick={() => applyInline('`', '`', '代码')} />
+              <Button
+                type="text"
+                size="small"
+                icon={<CodeOutlined />}
+                disabled={!enabled}
+                onClick={() => applyInline('`', '`', '代码')}
+              />
             </Tooltip>
             <Tooltip title="链接">
-              <Button type="text" size="small" icon={<LinkOutlined />} disabled={!enabled} onClick={() => applyInline('[', '](https://)', '链接文字')} />
+              <Button
+                type="text"
+                size="small"
+                icon={<LinkOutlined />}
+                disabled={!enabled}
+                onClick={() => applyInline('[', '](https://)', '链接文字')}
+              />
             </Tooltip>
             <span className="pa-md-toolbar-sep" aria-hidden="true" />
             <Tooltip title="标题">
-              <Button type="text" size="small" icon={<FontSizeOutlined />} disabled={!enabled} onClick={() => applyLinePrefix('## ', '标题')} />
+              <Button
+                type="text"
+                size="small"
+                icon={<FontSizeOutlined />}
+                disabled={!enabled}
+                onClick={() => applyLinePrefix('## ', '标题')}
+              />
             </Tooltip>
             <Tooltip title="无序列表">
-              <Button type="text" size="small" icon={<UnorderedListOutlined />} disabled={!enabled} onClick={() => applyLinePrefix('- ', '列表项')} />
+              <Button
+                type="text"
+                size="small"
+                icon={<UnorderedListOutlined />}
+                disabled={!enabled}
+                onClick={() => applyLinePrefix('- ', '列表项')}
+              />
             </Tooltip>
             <Tooltip title="有序列表">
-              <Button type="text" size="small" icon={<OrderedListOutlined />} disabled={!enabled} onClick={() => applyLinePrefix('1. ', '列表项')} />
+              <Button
+                type="text"
+                size="small"
+                icon={<OrderedListOutlined />}
+                disabled={!enabled}
+                onClick={() => applyLinePrefix('1. ', '列表项')}
+              />
             </Tooltip>
             <Tooltip title="引用">
-              <Button type="text" size="small" icon={<CommentOutlined />} disabled={!enabled} onClick={() => applyLinePrefix('> ', '引用内容')} />
+              <Button
+                type="text"
+                size="small"
+                icon={<CommentOutlined />}
+                disabled={!enabled}
+                onClick={() => applyLinePrefix('> ', '引用内容')}
+              />
             </Tooltip>
             <Tooltip title="代码块">
-              <Button type="text" size="small" icon={<CodeOutlined />} disabled={!enabled} onClick={applyCodeBlock} />
+              <Button
+                type="text"
+                size="small"
+                icon={<CodeOutlined />}
+                disabled={!enabled}
+                onClick={applyCodeBlock}
+              />
             </Tooltip>
             <Tooltip title="表格">
-              <Button type="text" size="small" icon={<TableOutlined />} disabled={!enabled} onClick={() => insertSnippet('\n| 列1 | 列2 |\n| --- | --- |\n| 内容 | 内容 |\n')} />
+              <Button
+                type="text"
+                size="small"
+                icon={<TableOutlined />}
+                disabled={!enabled}
+                onClick={() => insertSnippet('\n| 列1 | 列2 |\n| --- | --- |\n| 内容 | 内容 |\n')}
+              />
             </Tooltip>
             <Tooltip title="分隔线">
-              <Button type="text" size="small" icon={<MinusOutlined />} disabled={!enabled} onClick={() => insertSnippet('\n---\n')} />
+              <Button
+                type="text"
+                size="small"
+                icon={<MinusOutlined />}
+                disabled={!enabled}
+                onClick={() => insertSnippet('\n---\n')}
+              />
             </Tooltip>
           </div>
         )}
@@ -4769,11 +5238,13 @@ function Composer({
               />
             )}
             {executionLabel && <span className="pa-execution-timer">{executionLabel}</span>}
-            {busy ? (
+            {busy && (
               <Tooltip title="停止生成">
                 <Button danger shape="circle" icon={<StopOutlined />} onClick={onStop} />
               </Tooltip>
-            ) : (
+            )}
+            {/* 发送按钮始终存在：任务执行中点击会把消息加入排队队列（不直接发送） */}
+            <Tooltip title={busy ? '任务执行中，发送将加入队列' : '发送消息'}>
               <Button
                 type="primary"
                 shape="circle"
@@ -4783,7 +5254,7 @@ function Composer({
                 aria-label="发送消息"
                 onClick={() => onSubmit()}
               />
-            )}
+            </Tooltip>
           </div>
         </div>
       </div>
@@ -5269,6 +5740,10 @@ function GeneralSettingsPanel({
   const [savingMaxTurns, setSavingMaxTurns] = useState(false);
   const [shell, setShell] = useState<'auto' | 'powershell' | 'bash' | null>(null);
   const [savingShell, setSavingShell] = useState(false);
+  const [memoryEnabled, setMemoryEnabled] = useState<boolean | null>(null);
+  const [savingMemoryEnabled, setSavingMemoryEnabled] = useState(false);
+  const [memoryMaxEntries, setMemoryMaxEntries] = useState<number | null>(null);
+  const [savingMemoryMaxEntries, setSavingMemoryMaxEntries] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -5302,6 +5777,27 @@ function GeneralSettingsPanel({
         if (!cancelled) {
           setMaxTurns(payload.maxTurns);
           setShell(payload.shell);
+        }
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) messageApi.error(err instanceof Error ? err.message : String(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [messageApi]);
+
+  useEffect(() => {
+    let cancelled = false;
+    apiFetch('/api/memory-config')
+      .then((response) => {
+        if (!response.ok) throw new Error(`读取记忆配置失败 (${response.status})`);
+        return response.json() as Promise<{ enabled: boolean; maxEntries: number }>;
+      })
+      .then((payload) => {
+        if (!cancelled) {
+          setMemoryEnabled(payload.enabled);
+          setMemoryMaxEntries(payload.maxEntries);
         }
       })
       .catch((err: unknown) => {
@@ -5398,6 +5894,65 @@ function GeneralSettingsPanel({
         .catch(() => undefined);
     } finally {
       setSavingShell(false);
+    }
+  }
+
+  async function toggleMemoryEnabled(value: boolean) {
+    setMemoryEnabled(value);
+    setSavingMemoryEnabled(true);
+    try {
+      const response = await apiFetch('/api/memory-config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: value }),
+      });
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(payload.error ?? `保存失败 (${response.status})`);
+      }
+      messageApi.success(value ? '已开启记忆' : '已关闭记忆');
+    } catch (err) {
+      messageApi.error(`保存失败: ${err instanceof Error ? err.message : String(err)}`);
+      setMemoryEnabled((current) => (current === null ? null : !current));
+    } finally {
+      setSavingMemoryEnabled(false);
+    }
+  }
+
+  async function persistMemoryMaxEntries(value: number | null) {
+    if (value === null || value === undefined) return;
+    if (!Number.isInteger(value) || value < 1 || value > 100000) {
+      messageApi.warning('最大记忆条数必须是 1–100000 之间的整数。');
+      // 输入非法时回滚为服务端当前值
+      apiFetch('/api/memory-config')
+        .then((response) => response.json() as Promise<{ maxEntries: number }>)
+        .then((payload) => setMemoryMaxEntries(payload.maxEntries))
+        .catch(() => undefined);
+      return;
+    }
+    setSavingMemoryMaxEntries(true);
+    try {
+      const response = await apiFetch('/api/memory-config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ maxEntries: value }),
+      });
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(payload.error ?? `保存失败 (${response.status})`);
+      }
+      const payload = (await response.json()) as { maxEntries: number };
+      setMemoryMaxEntries(payload.maxEntries);
+      messageApi.success(`已保存：最大记忆条数 ${payload.maxEntries}`);
+    } catch (err) {
+      messageApi.error(`保存失败: ${err instanceof Error ? err.message : String(err)}`);
+      // 保存失败时回滚为服务端当前值
+      apiFetch('/api/memory-config')
+        .then((response) => response.json() as Promise<{ maxEntries: number }>)
+        .then((payload) => setMemoryMaxEntries(payload.maxEntries))
+        .catch(() => undefined);
+    } finally {
+      setSavingMemoryMaxEntries(false);
     }
   }
 
@@ -5535,6 +6090,55 @@ function GeneralSettingsPanel({
           </Form.Item>
         </Form>
       </Card>
+      <Card size="small" title="记忆">
+        <Form
+          layout="horizontal"
+          colon
+          labelAlign="left"
+          labelCol={{ flex: '220px' }}
+          style={{ maxWidth: 640 }}
+        >
+          <Form.Item
+            label={
+              <Space size={4}>
+                是否开启
+                <Tooltip title="开启后，Agent 会跨会话记住用户的事实、偏好与决策，并在对话中自动注入相关记忆。">
+                  <QuestionCircleOutlined className="pa-settings-help" />
+                </Tooltip>
+              </Space>
+            }
+          >
+            <Switch
+              checked={memoryEnabled ?? false}
+              disabled={memoryEnabled === null}
+              loading={savingMemoryEnabled}
+              onChange={toggleMemoryEnabled}
+            />
+          </Form.Item>
+          <Form.Item
+            label={
+              <Space size={4}>
+                最大记忆条数
+                <Tooltip title="记忆库的条目上限（1-100000），超出后按「重要性 + 最近访问」自动淘汰最不重要的记忆。">
+                  <QuestionCircleOutlined className="pa-settings-help" />
+                </Tooltip>
+              </Space>
+            }
+          >
+            <InputNumber
+              min={1}
+              max={100000}
+              precision={0}
+              value={memoryMaxEntries ?? undefined}
+              disabled={memoryMaxEntries === null || savingMemoryMaxEntries}
+              onChange={(value) => setMemoryMaxEntries(value as number | null)}
+              onBlur={() => void persistMemoryMaxEntries(memoryMaxEntries)}
+              onPressEnter={() => void persistMemoryMaxEntries(memoryMaxEntries)}
+              style={{ width: 140 }}
+            />
+          </Form.Item>
+        </Form>
+      </Card>
     </div>
   );
 }
@@ -5626,14 +6230,11 @@ function SkillsPanel() {
     setUploading(true);
     try {
       const buffer = await file.arrayBuffer();
-      const response = await apiFetch(
-        `/api/skills/upload?name=${encodeURIComponent(file.name)}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/zip' },
-          body: buffer,
-        },
-      );
+      const response = await apiFetch(`/api/skills/upload?name=${encodeURIComponent(file.name)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/zip' },
+        body: buffer,
+      });
       const payload = (await response.json().catch(() => ({}))) as {
         error?: string;
         skill?: { name: string; path: string; fileCount: number };
@@ -5671,8 +6272,8 @@ function SkillsPanel() {
         <div>
           <Title level={4}>技能</Title>
           <Text type="secondary">
-            上传 Claude Code / Codex 标准格式的技能压缩包（zip：单个技能根目录 + SKILL.md）。
-            仅 {directory || '~/.personal-agent/skills/'} 内的技能会生效，上传后立即生效、无需重启。
+            上传 Claude Code / Codex 标准格式的技能压缩包（zip：单个技能根目录 + SKILL.md）。 仅{' '}
+            {directory || '~/.personal-agent/skills/'} 内的技能会生效，上传后立即生效、无需重启。
           </Text>
         </div>
       </div>
@@ -5809,7 +6410,7 @@ function PromptsPanel({ onStarterPromptsChange }: { onStarterPromptsChange: () =
       onOk: () => void savePrompt(prompt.key, null),
     });
   };
-  
+
   /** 在编辑框光标位置插入变量占位符 */
   const insertVariable = (variable: string): void => {
     const textarea = editTextAreaRef.current?.nativeElement as HTMLTextAreaElement | null;
@@ -5840,7 +6441,9 @@ function PromptsPanel({ onStarterPromptsChange }: { onStarterPromptsChange: () =
       <div className="pa-settings-heading">
         <div>
           <Title level={4}>系统内置提示词</Title>
-          <Text type="secondary">查看系统内置提示词及其作用，可编辑自定义（Web 下一条消息生效，CLI 重启生效）。</Text>
+          <Text type="secondary">
+            查看系统内置提示词及其作用，可编辑自定义（Web 下一条消息生效，CLI 重启生效）。
+          </Text>
         </div>
       </div>
       {prompts === null ? (
@@ -6041,10 +6644,7 @@ function FileDiffViewer({ change }: { change?: FileChange }) {
     [change],
   );
   // 只展示被修改区域：大段未修改的上下文折叠为省略行
-  const displayLines = useMemo(
-    () => (diff ? collapseDiffContext(diff.lines) : null),
-    [diff],
-  );
+  const displayLines = useMemo(() => (diff ? collapseDiffContext(diff.lines) : null), [diff]);
 
   if (!change || !diff || !displayLines) {
     return (
@@ -6057,9 +6657,7 @@ function FileDiffViewer({ change }: { change?: FileChange }) {
   const added = diff.lines.filter((line) => line.kind === 'add').length;
   const removed = diff.lines.filter((line) => line.kind === 'remove').length;
   const copyDiff = (): void => {
-    void copyTextToClipboard(
-      toUnifiedDiffText(change.path, change.oldContent, change.newContent),
-    )
+    void copyTextToClipboard(toUnifiedDiffText(change.path, change.oldContent, change.newContent))
       .then(() => messageApi.success('Unified Diff 已复制'))
       .catch(() => messageApi.error('复制失败，请手动选择文本'));
   };
@@ -6324,29 +6922,54 @@ function planDocCardItem(doc: PlanDoc): PlanDocTimelineItem {
     kind: 'plan-doc',
     docId: doc.id,
     title: doc.title,
+    requestSeq: doc.requestSeq,
     time: currentTime(),
   };
 }
 
 /**
  * 把 planDocs 中 taskId 匹配（或未绑定任务）且尚未出现在 items 里的计划文档
- * 卡片追加到时间线末尾（按 docId 去重）。history 重放与 /api/plans 恢复共用。
+ * 卡片按所属轮次插入时间线（每张卡片插到该轮回复的下方、下一轮用户消息之前；
+ * requestSeq 缺失时回退追加到末尾）。history 重放与 /api/plans 恢复共用，
+ * 按 docId 去重（幂等）。
  */
-function appendPlanDocCards(
+function insertPlanDocCards(
   items: TimelineItem[],
   docs: Record<string, PlanDoc>,
   taskId?: string,
 ): TimelineItem[] {
   const result = [...items];
   const existing = new Set(
-    result.filter((item): item is PlanDocTimelineItem => item.kind === 'plan-doc').map((item) => item.docId),
+    result
+      .filter((item): item is PlanDocTimelineItem => item.kind === 'plan-doc')
+      .map((item) => item.docId),
   );
   for (const doc of Object.values(docs)) {
     if (doc.taskId && doc.taskId !== taskId) continue;
     if (existing.has(doc.id)) continue;
-    result.push(planDocCardItem(doc));
+    // 同一轮内 plan 卡片应位于 run-changes 卡片之前（与实时顺序一致）：
+    // 从轮次结束位置向前跳过紧邻的 run-changes 卡片
+    let insertAt = findRoundInsertIndex(result, doc.requestSeq);
+    while (insertAt > 0 && result[insertAt - 1]?.kind === 'run-changes') insertAt -= 1;
+    result.splice(insertAt, 0, planDocCardItem(doc));
+    existing.add(doc.id);
   }
   return result;
+}
+
+/**
+ * history 重放/seed 恢复时统一插入计划与修改文件两类卡片：
+ * 先插 run-changes 再插 plan（同一轮内 plan 卡片在前、文件列表卡片在后，与实时一致），
+ * 两类卡片都按 requestSeq 定位到对应轮次回复下方；无法定位时回退末尾。
+ * 各步骤幂等（按卡片 id 去重），plan/批次任一来源先到后到都安全。
+ */
+function insertReplayCards(
+  items: TimelineItem[],
+  docs: Record<string, PlanDoc>,
+  batches: StoredFileChangeBatch[],
+  taskId?: string,
+): TimelineItem[] {
+  return insertPlanDocCards(insertRunChangesCards(items, batches, taskId), docs, taskId);
 }
 
 /** 把服务端落盘文档 JSON 中的 Plan 元信息时间字符串还原为 Date。 */
@@ -6362,11 +6985,14 @@ function normalizeStoredPlanDoc(doc: PlanDoc): PlanDoc {
 }
 
 /**
- * 把已落盘的修改文件记录批次重放为时间线 run-changes 卡片（按卡片 id 去重）。
- * history 重放之后调用，保证刷新/重连后任务修改清单仍可见；changeIds 用与
- * seedFileChanges 一致的确定性 id（file-change-<batchId>-<index>）。
+ * 把已落盘的修改文件记录批次按所属轮次插入时间线：每批卡片插到该轮回复的下方、
+ * 下一轮用户消息之前；requestSeq 缺失或超出轮次数（旧数据/历史被压缩等）时
+ * 回退追加到末尾。实时 run_changes 事件、history 重放与 seedFileChanges 三条
+ * 路径共用本函数（实时时该轮回复位于末尾，插入即追加），保证卡片位置稳定且不重复。
+ * 卡片与 changeIds 的构造内聚在此处（确定性 id：run-changes-<batchId> /
+ * file-change-<batchId>-<index>，与 fileChanges map 的条目 id 一致）。
  */
-function appendRunChangesCards(
+function insertRunChangesCards(
   items: TimelineItem[],
   batches: StoredFileChangeBatch[],
   taskId?: string,
@@ -6383,17 +7009,37 @@ function appendRunChangesCards(
     if (existing.has(cardId)) continue;
     const changeIds = batch.files.map((_, index) => `file-change-${batch.id}-${index}`);
     if (changeIds.length === 0) continue;
-    result.push({
+    const card: RunChangesTimelineItem = {
       id: cardId,
       kind: 'run-changes',
       changeIds,
+      requestSeq: batch.requestSeq,
       time: new Date(batch.time).toLocaleTimeString('zh-CN', {
         hour: '2-digit',
         minute: '2-digit',
       }),
-    });
+    };
+    result.splice(findRoundInsertIndex(result, batch.requestSeq), 0, card);
+    existing.add(cardId);
   }
   return result;
+}
+
+/**
+ * 返回第 requestSeq 轮（该任务第 requestSeq 次用户请求，1-based）的结束位置：
+ * 即下一轮用户消息的索引，plan / run-changes 卡片应插在此处。requestSeq 缺失
+ * 或超出时间线轮次数（历史被压缩/截断等）时回退到时间线末尾。
+ */
+function findRoundInsertIndex(items: TimelineItem[], requestSeq: number | undefined): number {
+  if (typeof requestSeq !== 'number' || requestSeq < 1) return items.length;
+  let userCount = 0;
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index];
+    if (item.kind !== 'message' || item.role !== 'user') continue;
+    userCount += 1;
+    if (userCount === requestSeq + 1) return index;
+  }
+  return items.length;
 }
 
 /**
@@ -6425,9 +7071,7 @@ function updateAssistantTurn(
   const turns = current.turns ?? [];
   const turnIndex = turns.findIndex((turn) => turn.turnNumber === turnNumber);
   const turn: AssistantTurn =
-    turnIndex >= 0
-      ? turns[turnIndex]
-      : { turnNumber, thinking: '', text: '', tools: [] };
+    turnIndex >= 0 ? turns[turnIndex] : { turnNumber, thinking: '', text: '', tools: [] };
   const updatedTurn = updater(turn);
   const nextTurns =
     turnIndex >= 0
@@ -6657,6 +7301,16 @@ function formatTokens(value: number): string {
   return value.toLocaleString('en-US');
 }
 
+/**
+ * 缓存命中 token 占上下文窗口的百分比（与「占用」行同一口径）。
+ * 命中占比通常较小，<10% 时保留 1 位小数，避免显示成 0%。
+ */
+function cacheHitPercentage(cacheHitTokens: number, totalTokens: number): string {
+  if (totalTokens <= 0) return '0%';
+  const percentage = (cacheHitTokens / totalTokens) * 100;
+  return `${percentage >= 10 ? percentage.toFixed(0) : percentage.toFixed(1)}%`;
+}
+
 function ContextUsagePanel({ usage, footer }: { usage?: ContextUsage; footer?: ReactNode }) {
   if (!usage || usage.totalTokens <= 0) {
     return <div className="pa-context-tip">暂无上下文数据</div>;
@@ -6683,6 +7337,12 @@ function ContextUsagePanel({ usage, footer }: { usage?: ContextUsage; footer?: R
         <span>占用</span>
         <b>{usage.percentage}%</b>
       </div>
+      {typeof usage.cacheHitTokens === 'number' && usage.cacheHitTokens > 0 && (
+        <div className="pa-context-tip-row">
+          <span>缓存命中</span>
+          <b>{cacheHitPercentage(usage.cacheHitTokens, usage.totalTokens)}</b>
+        </div>
+      )}
       <div className="pa-context-tip-hint">
         <div>已使用：最后一次模型调用的输入Token</div>
         <div>预留输出：{formatTokens(usage.reservedOutputTokens)} tokens</div>

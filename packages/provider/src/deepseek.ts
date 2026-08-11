@@ -206,6 +206,10 @@ export class DeepSeekProvider extends BaseLLMProvider {
           }
 
           const usage = chunk.usage;
+          // DeepSeek 扩展字段（OpenAI SDK 的 CompletionUsage 类型未包含）
+          const deepseekUsage = usage as (typeof usage & {
+            prompt_cache_hit_tokens?: number;
+          }) | undefined;
           yield {
             type: 'message_end',
             stopReason: mapOpenAIStopReason(chunk.choices[0].finish_reason),
@@ -213,6 +217,7 @@ export class DeepSeekProvider extends BaseLLMProvider {
               ? {
                   inputTokens: usage.prompt_tokens,
                   outputTokens: usage.completion_tokens,
+                  cacheHitTokens: deepseekUsage?.prompt_cache_hit_tokens ?? null,
                 }
               : null,
           };
@@ -285,6 +290,10 @@ export class DeepSeekProvider extends BaseLLMProvider {
       }
     }
 
+    // DeepSeek 扩展字段（OpenAI SDK 的 CompletionUsage 类型未包含）
+    const deepseekUsage = response.usage as (typeof response.usage & {
+      prompt_cache_hit_tokens?: number;
+    }) | undefined;
     return {
       id: response.id,
       model: response.model,
@@ -294,6 +303,7 @@ export class DeepSeekProvider extends BaseLLMProvider {
         ? {
             inputTokens: response.usage.prompt_tokens,
             outputTokens: response.usage.completion_tokens,
+            cacheHitTokens: deepseekUsage?.prompt_cache_hit_tokens ?? null,
           }
         : { inputTokens: 0, outputTokens: 0 },
     };

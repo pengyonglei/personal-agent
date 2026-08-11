@@ -174,7 +174,15 @@ export class TodoWriteTool extends BaseTool {
       return `${icons[status as string] ?? '  '}[${status}] ${t.subject}`;
     });
 
-    return this.success(lines.join('\n'));
+    // Structured copy of the task list for UIs (e.g. the web client renders
+    // antd icons per status instead of the plain-text markers above).
+    return this.success(lines.join('\n'), {
+      duration: 0,
+      tasks: tasks.map((t) => ({
+        status: String(t.status ?? 'pending'),
+        subject: String(t.subject ?? ''),
+      })),
+    });
   }
 }
 
