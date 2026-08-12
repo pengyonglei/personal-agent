@@ -19,20 +19,19 @@
     "make:installer": "node scripts/release.mjs make-installer",
     "make:arm64": "node scripts/release.mjs make-arm64",
     "make:installer:arm64": "node scripts/release.mjs make-installer-arm64",
-    "forge:package:x64": "electron-forge package --platform=win32 --arch=x64",
-    "forge:package:arm64": "electron-forge package --platform=win32 --arch=arm64",
+    "publish": "node scripts/release.mjs publish",
     "lint": "echo lint ok",
     "test": "echo test ok",
     "clean": "node -e \"fs.rmSync('dist',{recursive:true,force:true});fs.rmSync('out',{recursive:true,force:true})\""
   },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
+  },
   "devDependencies": {
-    "@electron-forge/cli": "^7.11.2",
-    "@electron-forge/maker-squirrel": "^7.11.2",
     "@personal-agent/web": "workspace:*",
-    "@types/electron-squirrel-startup": "^1.0.2",
     "@types/node": "^22.20.1",
-    "electron": "^43.2.0",
-    "electron-squirrel-startup": "^1.0.1",
+    "electron": "43.2.0",
+    "electron-builder": "^26.15.3",
     "esbuild": "~0.27.7",
     "typescript": "^5.9.3"
   }

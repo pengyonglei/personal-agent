@@ -5,6 +5,11 @@ node_modules/
 # Build output and caches
 dist/
 build/
+!apps/desktop/build/
+apps/desktop/build/*
+!apps/desktop/build/icon.ico
+!apps/desktop/build/icon.png
+!apps/desktop/build/license.txt
 out/
 .turbo/
 .cache/

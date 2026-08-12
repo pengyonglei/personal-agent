@@ -8,7 +8,7 @@
  */
 
 /** 版本号（不带 v 前缀），例如 '0.1.5' */
-export const VERSION = '0.2.2';
+export const VERSION = '0.2.8';
 
 /** 展示用版本标签（带 v 前缀），例如 'v0.1.5' */
 export const VERSION_LABEL = `v${VERSION}`;

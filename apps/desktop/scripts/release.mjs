@@ -13,6 +13,8 @@ const operations = new Set([
   'make-installer',
   'make-arm64',
   'make-installer-arm64',
+  'publish',
+  'upload',
 ]);
 
 function parseArgs(args) {
@@ -125,24 +127,66 @@ function runPnpm(args, env) {
   return run(packageManager, args, env);
 }
 
-async function packageApplication(arch, env) {
-  await runPnpm(['run', 'prepare:runtime'], env);
-  await runPnpm(['run', 'build:production'], env);
-  await runPnpm(['exec', 'electron-forge', 'package', '--platform=win32', `--arch=${arch}`], env);
+function buildEnv() {
+  return {
+    // electron-builder 工具链（NSIS、winCodeSign 等）下载镜像，默认走 npmmirror 加速
+    ELECTRON_BUILDER_BINARIES_MIRROR:
+      process.env.ELECTRON_BUILDER_BINARIES_MIRROR ||
+      'https://npmmirror.com/mirrors/electron-builder-binaries/',
+  };
 }
 
+async function buildRuntime() {
+  await runPnpm(['run', 'prepare:runtime'], {});
+  await runPnpm(['run', 'build:production'], {});
+}
+
+/** 生成可运行目录（out/win-unpacked），对应原 Forge 的 package 阶段 */
+async function packageApplication(arch, env) {
+  await buildRuntime();
+  await runPnpm(['exec', 'electron-builder', '--win', `--${arch}`, '--dir', env.versionArg], env);
+}
+
+/**
+ * 生成 NSIS 安装包（out/PersonalAgent-vX.X.X-Setup.exe + latest.yml + blockmap）。
+ * electron-builder 没有独立的 make 阶段，安装包必然完整重建，
+ * 因此 make-installer / make-installer-arm64 语义为「完整构建安装包」。
+ */
 async function makeInstaller(arch, env) {
-  await runPnpm(
-    ['exec', 'electron-forge', 'make', '--skip-package', '--platform=win32', `--arch=${arch}`],
-    env,
-  );
+  await buildRuntime();
+  await runPnpm(['exec', 'electron-builder', '--win', `--${arch}`, env.versionArg], env);
+}
+
+function printUploadInstructions(version) {
+  const out = resolve(desktopDirectory, 'out');
+  const setupExe = resolve(out, `PersonalAgent-v${version.value}-Setup.exe`);
+  const blockmap = resolve(out, `PersonalAgent-v${version.value}-Setup.exe.blockmap`);
+  const latestYml = resolve(out, 'latest.yml');
+
+  console.log('');
+  console.log('========================================================');
+  console.log('构建完成。请将以下 3 个产物上传到 Gitee Release：');
+  console.log('  Release 地址：https://gitee.com/pengyonglei/personal-agent/releases/new?tag=latest');
+  console.log('  （每次发版都更新同一个 tag=latest 的 Release 附件）');
+  console.log('');
+  console.log(`  1. 安装包    ${setupExe}`);
+  console.log(`  2. 差分块    ${blockmap}`);
+  console.log(`  3. 更新元数据 ${latestYml}`);
+  console.log('');
+  console.log('上传完成后，用户端会自动检测到新版本并后台下载更新。');
+  console.log('（也可运行 pnpm desktop:publish:upload 调用脚本自动上传，需配置 GITEE_TOKEN）');
+  console.log('========================================================');
+  console.log('');
 }
 
 async function main() {
   const { operation, version: versionArgument } = parseArgs(process.argv.slice(2));
   const version = await resolveVersion(versionArgument);
   const env = {
+    ...buildEnv(),
     PERSONAL_AGENT_RELEASE_VERSION: version.label,
+    // 版本注入：不修改 package.json，构建时覆盖生效版本（含产物名与更新元数据）
+    versionArg: `-c.extraMetadata.version=${version.value}`,
   };
 
   console.log(`桌面版打包版本：${version.label}`);
@@ -152,19 +196,26 @@ async function main() {
       await packageApplication('x64', env);
       break;
     case 'make':
-      await packageApplication('x64', env);
       await makeInstaller('x64', env);
       break;
     case 'make-installer':
       await makeInstaller('x64', env);
       break;
     case 'make-arm64':
-      await packageApplication('arm64', env);
       await makeInstaller('arm64', env);
       break;
     case 'make-installer-arm64':
       await makeInstaller('arm64', env);
       break;
+    case 'publish':
+      await makeInstaller('x64', env);
+      printUploadInstructions(version);
+      break;
+    case 'upload': {
+      const uploadScript = resolve(desktopDirectory, 'scripts', 'upload-gitee.mjs');
+      await run(process.execPath, [uploadScript, version.label], env);
+      break;
+    }
     default:
       throw new Error(`不支持的打包操作：${operation}`);
   }

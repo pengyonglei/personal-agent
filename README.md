@@ -154,7 +154,7 @@ personal-agent/
 │  └─ desktop/
 │     ├─ src/main.ts             # Electron 主进程与内嵌 Web Server
 │     ├─ src/preload.ts          # 受限的桌面能力桥接
-│     └─ forge.config.cjs        # Windows 安装包配置
+│     └─ electron-builder.yml     # Windows 安装包配置（NSIS 向导 + 自动更新）
 ├─ packages/
 │  ├─ shared/                    # 公共类型与工具函数
 │  ├─ config/                    # 配置 Schema、默认值和加载器
@@ -587,31 +587,23 @@ Web UI 支持：
 pnpm desktop
 ```
 
-生成 x64 Windows 安装程序：
+生成 x64 Windows 安装程序（NSIS 向导安装包）：
 
 ```powershell
 pnpm desktop:make -- --version v0.1.2
 ```
 
-也可以省略参数，命令会交互式询问版本号；版本号支持 `v0.1.2` 或 `0.1.2`。生成的应用本体和安装程序分别类似于 `PersonalAgent-v0.1.2.exe`、`PersonalAgent-v0.1.2-Setup.exe`。
+也可以省略参数，命令会交互式询问版本号；版本号支持 `v0.1.2` 或 `0.1.2`。安装包为 NSIS 向导式安装：欢迎 → 许可协议 → **选择安装位置**（可自定义目录，每用户安装免管理员权限）→ 快捷方式选项 → 完成，并自带卸载程序（控制面板可卸载）。产物位于 `apps/desktop/out/`：
 
-该命令使用 Turbo 缓存工作区构建，并将“生成可运行目录”和“压缩安装程序”拆成两个可单独重试的阶段。如果 Forge 已经成功完成 `Packaging application`，但在 `Making a squirrel distributable` 阶段被中断，可以跳过重新构建和打包，直接重试安装程序生成：
+- `PersonalAgent-v0.1.2-Setup.exe` — 向导安装包（文件名含版本号）
+- `PersonalAgent-v0.1.2-Setup.exe.blockmap` — 差分更新块（自动更新增量下载用）
+- `latest.yml` — 自动更新元数据
+- `win-unpacked/` — 免安装可运行目录（应用本体 `PersonalAgent.exe`，不带版本号）
 
-```powershell
-pnpm desktop:make:installer -- --version v0.1.2
-```
-
-如果只需要本机可运行目录，不需要 Squirrel 安装程序，使用下列命令可以避开最慢的安装包压缩阶段：
+如果只需要本机可运行目录，不需要安装包，使用下列命令可以避开最慢的安装包压缩阶段：
 
 ```powershell
 pnpm desktop:package -- --version v0.1.2
-```
-
-如果当前网络访问 GitHub Release 较慢，可在当前 PowerShell 会话使用 Electron 官方文档列出的镜像变量：
-
-```powershell
-$env:ELECTRON_MIRROR = 'https://npmmirror.com/mirrors/electron/'
-pnpm desktop:make -- --version v0.1.2
 ```
 
 生成 ARM64 Windows 安装程序：
@@ -620,7 +612,39 @@ pnpm desktop:make -- --version v0.1.2
 pnpm desktop:make:arm64 -- --version v0.1.2
 ```
 
-构建产物位于 `apps/desktop/out/make`。未签名的安装程序可能触发 Windows SmartScreen 提示；正式分发时应在 `apps/desktop/forge.config.cjs` 中配置代码签名证书。
+> 注：electron-builder 没有独立的“仅生成安装包”阶段，`desktop:make:installer` 会完整重建；打包目录内的 exe 名固定为 `PersonalAgent.exe`（不再带版本号），仅安装包文件名带版本。
+
+Electron 二进制与 NSIS 工具链下载已默认使用 npmmirror 镜像，通常无需额外配置；如需覆盖可在当前 PowerShell 会话设置：
+
+```powershell
+$env:ELECTRON_MIRROR = 'https://npmmirror.com/mirrors/electron/'
+$env:ELECTRON_BUILDER_BINARIES_MIRROR = 'https://npmmirror.com/mirrors/electron-builder-binaries/'
+pnpm desktop:make -- --version v0.1.2
+```
+
+#### 发布与自动更新
+
+桌面版内置自动更新（electron-updater）：启动 15 秒后检查一次，之后每 6 小时轮询；发现新版本后自动后台下载，完成后弹系统通知，点击即重启安装；NSIS 差分更新使后续版本只下载增量部分。
+
+发布新版本：
+
+1. 构建并输出上传清单：`pnpm desktop:publish -- --version v0.1.2`
+2. 将 `PersonalAgent-v0.1.2-Setup.exe`、`PersonalAgent-v0.1.2-Setup.exe.blockmap`、`latest.yml` 三个文件上传到 Gitee Release（**固定 tag `latest`**，每次发版更新同一个 Release 的附件）：https://gitee.com/pengyonglei/personal-agent/releases/new?tag=latest
+   或使用脚本自动上传（需 Gitee 私人令牌）：
+
+   ```powershell
+   $env:GITEE_TOKEN = '你的私人令牌'
+   pnpm desktop:publish:upload -- --version v0.1.2
+   ```
+
+3. 用户端应用在下一次检查时自动更新。
+
+手动更新兜底：直接下载新版 `Setup.exe` 覆盖安装即可（可重新选择安装目录）。用户配置、项目与会话数据统一保存在 `~/.personal-agent/`，与安装目录无关，卸载/换目录不会丢失。
+
+> 说明：
+> - 旧版（Squirrel 安装）位于 `%LocalAppData%\PersonalAgent`；新版默认安装到 `%LocalAppData%\Programs\Personal Agent`（向导中可自定义）。升级后旧版快捷方式需手动删除。
+> - 自动更新通道配置在 `apps/desktop/electron-builder.yml` 的 `publish.url`，如需切换到自建服务器或其它渠道，修改该处并重新构建即可。
+> - 未签名的安装程序可能触发 Windows SmartScreen 提示；正式分发建议在 `apps/desktop/electron-builder.yml` 的 `win` 下配置代码签名证书。
 
 - Memory、MCP 和插件运行状态展示
 

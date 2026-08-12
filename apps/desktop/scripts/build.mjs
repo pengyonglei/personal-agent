@@ -16,11 +16,15 @@ await Promise.all([
     platform: 'node',
     target: 'node20',
     format: 'esm',
-    external: ['electron'],
+    // electron-updater 为 CJS 且保持真实 node_modules 依赖（由 electron-builder 打进安装包），
+    // 运行时经 __require（createRequire）加载，避免 ESM/CJS interop 问题
+    external: ['electron', 'electron-updater'],
     minify: production,
     sourcemap: !production,
     banner: {
-      js: "import { createRequire as __createRequire } from 'node:module'; const require = __createRequire(import.meta.url);",
+      // esbuild's ESM CommonJS shim looks specifically for a `require` binding.
+      // Keep __require as an alias for the explicit electron-updater load in main.ts.
+      js: "import { createRequire as __createRequire } from 'node:module'; const require = __createRequire(import.meta.url); const __require = require;",
     },
     logLevel: 'info',
   }),

@@ -1,0 +1,70 @@
+# electron-builder 配置：NSIS 向导安装包（许可协议 + 自定义安装目录） + Gitee 自动更新
+# 文档：https://www.electron.build/configuration/nsis
+
+appId: com.personal-agent.desktop
+productName: Personal Agent
+
+directories:
+  output: out
+  # buildResources 目录存放 icon.ico / license 等构建资源（未提供 icon 时使用 Electron 默认图标）
+
+# 主进程（dist/main.mjs / dist/preload.cjs）已由 esbuild 完全 bundle：
+# 仅需打入产物与 package.json；electron-updater 等生产依赖的 node_modules 由 electron-builder 自动包含。
+files:
+  - dist/**/*
+  - package.json
+
+asar: true
+
+# 裁剪 Electron 自带语言包（替代原 Forge afterExtract hook），只保留中英文
+electronLanguages:
+  - en-US
+  - zh-CN
+  - zh-TW
+
+# Electron 二进制下载镜像（国内加速）；如需更换请直接修改此处
+electronDownload:
+  mirror: https://npmmirror.com/mirrors/electron/
+
+# Web 前端静态资源 → resources/client（与 src/main.ts 的 process.resourcesPath/client 保持一致）
+extraResources:
+  - from: ../web/dist/client
+    to: client
+  - from: build/icon.ico
+    to: tray-icon.ico
+
+win:
+  executableName: PersonalAgent
+  icon: build/icon.ico
+  # 每用户安装，默认不请求管理员权限（requestedExecutionLevel: asInvoker）
+  # exe 元数据（公司名/描述/产品名）自动取自 package.json 的 author/description/productName
+
+nsis:
+  # 向导模式：欢迎 → 许可协议 → 选择安装位置 → 快捷方式 → 完成
+  oneClick: false
+  # 安装目录自定义（仅在 oneClick:false 向导模式下生效）
+  allowToChangeInstallationDirectory: true
+  # 每用户安装（免 UAC），默认目录 %LOCALAPPDATA%\Programs\Personal Agent，可自由修改
+  perMachine: false
+  # 许可协议页（build/license.txt，内容与根 LICENSE 一致，MIT）
+  license: license.txt
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Personal Agent
+  # 默认简体中文界面（2052 = 简体中文 LCID），可切换英文
+  language: 2052
+  installerLanguages:
+    - zh_CN
+    - en_US
+  # 安装包命名与旧版保持一致（含版本号）
+  artifactName: PersonalAgent-v${version}-Setup.exe
+  # 卸载不删除应用数据（用户数据在 ~/.personal-agent）
+  deleteAppDataOnUninstall: false
+
+# 自动更新源：Gitee Release（固定 tag: latest）。
+# 构建时自动生成 latest.yml、*.blockmap 与 resources/app-update.yml。
+# 发布流程：把 Setup.exe + latest.yml + *.blockmap 上传到
+# https://gitee.com/pengyonglei/personal-agent/releases/download/latest/
+publish:
+  provider: generic
+  url: https://gitee.com/pengyonglei/personal-agent/releases/download/latest

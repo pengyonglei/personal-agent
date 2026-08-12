@@ -32,6 +32,8 @@
     "desktop:make": "node apps/desktop/scripts/release.mjs make",
     "desktop:make:installer": "node apps/desktop/scripts/release.mjs make-installer",
     "desktop:make:arm64": "node apps/desktop/scripts/release.mjs make-arm64",
+    "desktop:publish": "node apps/desktop/scripts/release.mjs publish",
+    "desktop:publish:upload": "node apps/desktop/scripts/release.mjs upload",
     "changeset": "changeset",
     "version-packages": "changeset version",
     "release": "pnpm build && pnpm test && changeset publish"
