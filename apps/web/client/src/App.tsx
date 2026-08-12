@@ -140,6 +140,7 @@ import {
   retainTaskMarkers,
   retainUnreadTasks,
 } from './task-unread';
+import { nextProjectTaskCount, paginateProjectTasks } from './project-task-pagination';
 import type { PlanDoc } from './plan-doc';
 import { planStatusLabel, planToMarkdown } from './plan-doc';
 import {
@@ -3925,6 +3926,9 @@ function SidebarContent({
     projectId: string;
     position: 'before' | 'after';
   }>();
+  const [visibleProjectTaskCounts, setVisibleProjectTaskCounts] = useState<Record<string, number>>(
+    {},
+  );
   const projectTasks = useMemo(() => {
     const groups = new Map<string, TaskSummary[]>();
     for (const project of projects) {
@@ -3966,6 +3970,59 @@ function SidebarContent({
       pinned,
     );
     finishProjectDrag();
+  }
+
+  function showMoreProjectTasks(projectId: string, total: number) {
+    setVisibleProjectTaskCounts((current) => ({
+      ...current,
+      [projectId]: nextProjectTaskCount(current[projectId], total),
+    }));
+  }
+
+  function renderProjectTasks(project: ProjectSummary) {
+    const allTasks = projectTasks.get(project.id) ?? [];
+    if (allTasks.length === 0) {
+      return (
+        <div className="pa-project-tasks-empty">
+          <Text type="secondary">暂无任务</Text>
+        </div>
+      );
+    }
+
+    const page = paginateProjectTasks(allTasks, visibleProjectTaskCounts[project.id]);
+    return (
+      <>
+        {page.tasks.map((task) => (
+          <TaskMenuItem
+            key={task.id}
+            task={task}
+            activeTaskId={activeTaskId}
+            unread={unreadTaskIds.has(task.id)}
+            waitingAction={waitingActionTaskIds.has(task.id)}
+            busy={busy}
+            renamingTaskId={renamingTaskId}
+            renameTitle={renameTitle}
+            onOpenTask={onOpenTask}
+            onStartRename={onStartRename}
+            onRenameTitleChange={onRenameTitleChange}
+            onSaveRename={onSaveRename}
+            onCancelRename={onCancelRename}
+            onArchiveTask={onArchiveTask}
+          />
+        ))}
+        {page.hasMore && (
+          <Button
+            type="text"
+            size="small"
+            className="pa-project-tasks-more"
+            aria-label={`查看更多 ${project.name} 的任务`}
+            onClick={() => showMoreProjectTasks(project.id, allTasks.length)}
+          >
+            查看更多
+          </Button>
+        )}
+      </>
+    );
   }
 
   return (
@@ -4208,32 +4265,7 @@ function SidebarContent({
                           </Tooltip>
                         </div>
                         {!project.archived && !collapsedProjects.has(project.id) && (
-                          <div className="pa-project-tasks">
-                            {projectTasks.get(project.id)?.length ? (
-                              (projectTasks.get(project.id) ?? []).map((task) => (
-                                <TaskMenuItem
-                                  key={task.id}
-                                  task={task}
-                                  activeTaskId={activeTaskId}
-                                  unread={unreadTaskIds.has(task.id)}
-                                  waitingAction={waitingActionTaskIds.has(task.id)}
-                                  busy={busy}
-                                  renamingTaskId={renamingTaskId}
-                                  renameTitle={renameTitle}
-                                  onOpenTask={onOpenTask}
-                                  onStartRename={onStartRename}
-                                  onRenameTitleChange={onRenameTitleChange}
-                                  onSaveRename={onSaveRename}
-                                  onCancelRename={onCancelRename}
-                                  onArchiveTask={onArchiveTask}
-                                />
-                              ))
-                            ) : (
-                              <div className="pa-project-tasks-empty">
-                                <Text type="secondary">暂无任务</Text>
-                              </div>
-                            )}
-                          </div>
+                          <div className="pa-project-tasks">{renderProjectTasks(project)}</div>
                         )}
                       </>
                     )}

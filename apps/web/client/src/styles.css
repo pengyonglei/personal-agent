@@ -427,6 +427,18 @@ select {
   font-size: 10px;
 }
 
+.pa-project-tasks-more {
+  width: calc(100% - 36px);
+  margin-left: 36px;
+  color: var(--pa-muted);
+  font-size: 10px;
+}
+
+.pa-project-tasks-more:hover,
+.pa-project-tasks-more:focus-visible {
+  color: var(--pa-accent);
+}
+
 .pa-task-list-item {
   display: block;
   padding: 1px 0;
