@@ -19,7 +19,7 @@
   },
   "scripts": {
     "build": "turbo run build",
-    "dev": "pnpm build && cd apps/cli && node --import tsx src/index.ts",
+    "dev": "cd apps/cli && node --import tsx src/index.ts",
     "lint": "turbo run lint",
     "test": "turbo run test",
     "format": "prettier --write \"**/*.{ts,tsx,js,json,md}\"",

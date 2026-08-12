@@ -12,6 +12,8 @@ export interface Project {
   name: string;
   rootPath: string;
   archived: boolean;
+  pinned: boolean;
+  sortOrder: number;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -36,7 +38,12 @@ export interface ProjectTask {
 interface SerializedProjectStore {
   version: 1;
   projects: Array<
-    Omit<Project, 'createdAt' | 'updatedAt'> & { createdAt: string; updatedAt: string }
+    Omit<Project, 'createdAt' | 'updatedAt' | 'pinned' | 'sortOrder'> & {
+      pinned?: boolean;
+      sortOrder?: number;
+      createdAt: string;
+      updatedAt: string;
+    }
   >;
   tasks: Array<
     Omit<ProjectTask, 'createdAt' | 'updatedAt'> & {
@@ -61,10 +68,19 @@ export class ProjectManager {
       const raw = JSON.parse(await readFile(this.storagePath, 'utf-8')) as SerializedProjectStore;
       this.projects.clear();
       this.tasks.clear();
+      const legacyProjectOrder = new Map(
+        [...(raw.projects ?? [])]
+          .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
+          .map((project, index) => [project.id, index]),
+      );
       for (const project of raw.projects ?? []) {
         this.projects.set(project.id, {
           ...project,
           archived: project.archived === true,
+          pinned: project.pinned === true,
+          sortOrder: Number.isFinite(project.sortOrder)
+            ? (project.sortOrder as number)
+            : (legacyProjectOrder.get(project.id) ?? 0),
           createdAt: new Date(project.createdAt),
           updatedAt: new Date(project.updatedAt),
         });
@@ -116,6 +132,8 @@ export class ProjectManager {
       name,
       rootPath,
       archived: false,
+      pinned: false,
+      sortOrder: this.nextProjectSortOrder(false),
       createdAt: now,
       updatedAt: now,
     };
@@ -127,7 +145,7 @@ export class ProjectManager {
   listProjects(options: { includeArchived?: boolean } = {}): Project[] {
     return [...this.projects.values()]
       .filter((project) => options.includeArchived || !project.archived)
-      .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime())
+      .sort(compareProjects)
       .map(cloneProject);
   }
 
@@ -140,6 +158,7 @@ export class ProjectManager {
     const project = this.requireProject(projectId);
     if (project.archived) return cloneProject(project);
     project.archived = true;
+    project.pinned = false;
     project.updatedAt = new Date();
     await this.persist();
     return cloneProject(project);
@@ -147,7 +166,10 @@ export class ProjectManager {
 
   async restoreProject(projectId: string): Promise<Project> {
     const project = this.requireProject(projectId);
+    if (!project.archived) return cloneProject(project);
     project.archived = false;
+    project.pinned = false;
+    project.sortOrder = this.nextProjectSortOrder(false);
     project.updatedAt = new Date();
     await this.persist();
     return cloneProject(project);
@@ -159,6 +181,40 @@ export class ProjectManager {
     project.updatedAt = new Date();
     await this.persist();
     return cloneProject(project);
+  }
+
+  async setProjectPinned(projectId: string, pinned: boolean): Promise<Project> {
+    const project = this.requireProject(projectId);
+    if (project.archived) throw new Error('归档项目不能置顶');
+    if (project.pinned === pinned) return cloneProject(project);
+    project.pinned = pinned;
+    project.sortOrder = this.nextProjectSortOrder(pinned);
+    project.updatedAt = new Date();
+    await this.persist();
+    return cloneProject(project);
+  }
+
+  async reorderProjects(projectIds: string[], pinned: boolean): Promise<Project[]> {
+    const group = [...this.projects.values()].filter(
+      (project) => !project.archived && project.pinned === pinned,
+    );
+    const uniqueProjectIds = new Set(projectIds);
+    if (
+      uniqueProjectIds.size !== projectIds.length ||
+      projectIds.length !== group.length ||
+      group.some((project) => !uniqueProjectIds.has(project.id))
+    ) {
+      throw new Error('项目排序列表与当前项目不一致，请刷新后重试');
+    }
+
+    const now = new Date();
+    for (const [sortOrder, projectId] of projectIds.entries()) {
+      const project = this.requireProject(projectId);
+      project.sortOrder = sortOrder;
+      project.updatedAt = now;
+    }
+    await this.persist();
+    return projectIds.map((projectId) => cloneProject(this.requireProject(projectId)));
   }
 
   async deleteProject(projectId: string): Promise<void> {
@@ -174,6 +230,14 @@ export class ProjectManager {
     const project = this.projects.get(projectId);
     if (!project) throw new Error(`项目不存在: ${projectId}`);
     return project;
+  }
+
+  private nextProjectSortOrder(pinned: boolean): number {
+    const sortOrders = [...this.projects.values()]
+      .filter((project) => !project.archived && project.pinned === pinned)
+      .map((project) => project.sortOrder)
+      .filter(Number.isFinite);
+    return sortOrders.length > 0 ? Math.min(...sortOrders) - 1 : 0;
   }
 
   async createTask(input: {
@@ -334,6 +398,13 @@ function normalizePermissionMode(value: unknown): ProjectTaskPermissionMode {
 
 function samePath(left: string, right: string): boolean {
   return process.platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right;
+}
+
+function compareProjects(left: Project, right: Project): number {
+  if (left.archived !== right.archived) return left.archived ? 1 : -1;
+  if (left.pinned !== right.pinned) return left.pinned ? -1 : 1;
+  if (left.sortOrder !== right.sortOrder) return left.sortOrder - right.sortOrder;
+  return right.createdAt.getTime() - left.createdAt.getTime();
 }
 
 function cloneProject(project: Project): Project {

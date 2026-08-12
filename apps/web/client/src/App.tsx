@@ -67,6 +67,7 @@ import {
   FontSizeOutlined,
   FolderAddOutlined,
   FolderOpenOutlined,
+  HolderOutlined,
   InboxOutlined,
   InfoCircleOutlined,
   ItalicOutlined,
@@ -82,6 +83,8 @@ import {
   PlayCircleOutlined,
   PictureOutlined,
   PlusOutlined,
+  PushpinFilled,
+  PushpinOutlined,
   QuestionCircleOutlined,
   ReloadOutlined,
   RobotOutlined,
@@ -129,6 +132,14 @@ import {
   type PromptImageInput,
 } from '../../src/protocol';
 import { assistantResponseId } from './timeline';
+import {
+  addTaskMarker,
+  addUnreadTask,
+  removeTaskMarker,
+  removeUnreadTask,
+  retainTaskMarkers,
+  retainUnreadTasks,
+} from './task-unread';
 import type { PlanDoc } from './plan-doc';
 import { planStatusLabel, planToMarkdown } from './plan-doc';
 import {
@@ -883,6 +894,12 @@ function AgentWorkspace({
   useEffect(() => {
     saveStoredIds('pa-collapsed-projects', collapsedProjects);
   }, [collapsedProjects]);
+  const [unreadTaskIds, setUnreadTaskIds] = useState<Set<string>>(() =>
+    loadStoredIds('pa-unread-tasks'),
+  );
+  const unreadTaskIdsRef = useRef(unreadTaskIds);
+  const [waitingActionTaskIds, setWaitingActionTaskIds] = useState<Set<string>>(() => new Set());
+  const waitingActionTaskIdsRef = useRef(waitingActionTaskIds);
 
   const [projectForm] = Form.useForm<ProjectFormValues>();
   const [providerForm] = Form.useForm<ProviderFormValues>();
@@ -1318,6 +1335,43 @@ function AgentWorkspace({
     [messageApi],
   );
 
+  const updateUnreadTasks = useCallback((updater: (current: Set<string>) => Set<string>) => {
+    const current = unreadTaskIdsRef.current;
+    const next = updater(current);
+    if (next === current) return;
+    unreadTaskIdsRef.current = next;
+    setUnreadTaskIds(next);
+    saveStoredIds('pa-unread-tasks', next);
+  }, []);
+
+  const updateWaitingActionTasks = useCallback((updater: (current: Set<string>) => Set<string>) => {
+    const current = waitingActionTaskIdsRef.current;
+    const next = updater(current);
+    if (next === current) return;
+    waitingActionTaskIdsRef.current = next;
+    setWaitingActionTaskIds(next);
+  }, []);
+
+  const openTask = useCallback(
+    (taskId: string) => {
+      pendingTaskDraftRef.current = undefined;
+      setDraftTaskProjectId(undefined);
+      if (!send({ type: 'open_task', taskId })) return;
+      updateUnreadTasks((current) => removeUnreadTask(current, taskId));
+      patchState({ creatingTask: false, sidebarOpen: false });
+    },
+    [patchState, send, updateUnreadTasks],
+  );
+
+  useEffect(() => {
+    const taskId = state.activeTaskId;
+    if (taskId) updateUnreadTasks((current) => removeUnreadTask(current, taskId));
+  }, [state.activeTaskId, updateUnreadTasks]);
+
+  useEffect(() => {
+    return window.personalAgentDesktop?.onOpenTaskRequested(openTask);
+  }, [openTask]);
+
   /** 任务执行中把消息加入当前任务的排队队列（busy→false 后自动按序执行）。 */
   const enqueueQueuedMessage = useCallback(
     (text: string) => {
@@ -1499,6 +1553,9 @@ function AgentWorkspace({
                 if (current.kind === 'message') {
                   restored[groupAssistantIndex] = {
                     ...current,
+                    // 一次任务可能因工具调用产生多条 assistant 历史消息；
+                    // 服务端把任务总耗时写在最后一条上，合并回放时需同步到整条回复。
+                    durationMs: historyMessage.durationMs ?? current.durationMs,
                     turns: [
                       ...(current.turns ?? []),
                       { turnNumber: (groupTurnSeq += 1), thinking, text, tools },
@@ -1571,6 +1628,9 @@ function AgentWorkspace({
             ? undefined
             : (incoming.activeTaskId ?? stateRef.current.activeTaskId);
           if (nextActive !== stateRef.current.activeTaskId) switchTaskView(nextActive);
+          const existingTaskIds = new Set(incoming.tasks.map((task) => task.id));
+          updateUnreadTasks((current) => retainUnreadTasks(current, existingTaskIds));
+          updateWaitingActionTasks((current) => retainTaskMarkers(current, existingTaskIds));
           patchState((current) => ({
             tasks: incoming.tasks,
             activeTaskId: pendingTaskDraftRef.current
@@ -1652,7 +1712,9 @@ function AgentWorkspace({
             if (draftPlanMode) {
               send({ type: 'set_plan_mode', enabled: true, taskId: incoming.task.id });
             }
-            appendMessage('user', initialPrompt, { images: promptImagesForTimeline(initialImages) });
+            appendMessage('user', initialPrompt, {
+              images: promptImagesForTimeline(initialImages),
+            });
             if (
               send({
                 type: 'prompt',
@@ -1684,6 +1746,9 @@ function AgentWorkspace({
           break;
         case 'busy': {
           const eventTaskId = incoming.taskId ?? stateRef.current.activeTaskId;
+          if (!incoming.busy && eventTaskId) {
+            updateWaitingActionTasks((current) => removeTaskMarker(current, eventTaskId));
+          }
           if (eventTaskId && eventTaskId !== stateRef.current.activeTaskId) {
             const data = taskDataRef.current[eventTaskId] ?? emptyTaskSnapshot();
             if (incoming.busy) data.responseSeq += 1;
@@ -1942,6 +2007,19 @@ function AgentWorkspace({
         }
         case 'permission_request': {
           const eventTaskId = incoming.taskId ?? stateRef.current.activeTaskId;
+          if (eventTaskId) {
+            updateWaitingActionTasks((current) => addTaskMarker(current, eventTaskId));
+            const taskTitle =
+              stateRef.current.tasks.find((task) => task.id === eventTaskId)?.title ?? '当前任务';
+            const notification = window.personalAgentDesktop?.showPermissionRequestNotification?.({
+              taskId: eventTaskId,
+              title: taskTitle,
+              toolName: incoming.toolName,
+            });
+            void notification?.catch((error) =>
+              console.warn('[desktop] permission notification failed:', error),
+            );
+          }
           if (eventTaskId && eventTaskId !== stateRef.current.activeTaskId) {
             const data = taskDataRef.current[eventTaskId] ?? emptyTaskSnapshot();
             data.pendingPermission = incoming;
@@ -1954,6 +2032,18 @@ function AgentWorkspace({
         }
         case 'ask_user_request': {
           const eventTaskId = incoming.taskId ?? stateRef.current.activeTaskId;
+          if (eventTaskId) {
+            updateWaitingActionTasks((current) => addTaskMarker(current, eventTaskId));
+            const taskTitle =
+              stateRef.current.tasks.find((task) => task.id === eventTaskId)?.title ?? '当前任务';
+            const notification = window.personalAgentDesktop?.showQuestionRequestNotification?.({
+              taskId: eventTaskId,
+              title: taskTitle,
+            });
+            void notification?.catch((error) =>
+              console.warn('[desktop] question notification failed:', error),
+            );
+          }
           if (eventTaskId && eventTaskId !== stateRef.current.activeTaskId) {
             const data = taskDataRef.current[eventTaskId] ?? emptyTaskSnapshot();
             data.pendingQuestion = incoming;
@@ -1988,6 +2078,14 @@ function AgentWorkspace({
         case 'done': {
           const eventTaskId = incoming.taskId ?? stateRef.current.activeTaskId;
           if (eventTaskId && eventTaskId !== stateRef.current.activeTaskId) {
+            updateUnreadTasks((current) =>
+              addUnreadTask(current, eventTaskId, stateRef.current.activeTaskId),
+            );
+            const taskTitle =
+              stateRef.current.tasks.find((task) => task.id === eventTaskId)?.title ?? '后台任务';
+            void window.personalAgentDesktop
+              ?.showTaskCompletionNotification({ taskId: eventTaskId, title: taskTitle })
+              .catch((error) => console.warn('[desktop] task notification failed:', error));
             const data = taskDataRef.current[eventTaskId] ?? emptyTaskSnapshot();
             // 按消息 id 定位当前回复：turn_end 已把 streaming 置 false，
             // 不能依赖 streaming 判断（否则耗时永远写不进去）。
@@ -2073,6 +2171,9 @@ function AgentWorkspace({
         }
         case 'interrupted': {
           const eventTaskId = incoming.taskId ?? stateRef.current.activeTaskId;
+          if (eventTaskId) {
+            updateWaitingActionTasks((current) => removeTaskMarker(current, eventTaskId));
+          }
           if (eventTaskId && eventTaskId !== stateRef.current.activeTaskId) {
             const data = taskDataRef.current[eventTaskId] ?? emptyTaskSnapshot();
             data.pendingPermission = undefined;
@@ -2227,6 +2328,8 @@ function AgentWorkspace({
       updateTimeline,
       upsertPlanDoc,
       switchTaskView,
+      updateUnreadTasks,
+      updateWaitingActionTasks,
     ],
   );
 
@@ -2503,13 +2606,21 @@ function AgentWorkspace({
   function answerPermission(approved: boolean) {
     const pending = stateRef.current.pendingPermission;
     if (!pending) return;
-    send({
-      type: 'permission_response',
-      requestId: pending.requestId,
-      approved,
-      remember: rememberPermission,
-      taskId: pending.taskId ?? stateRef.current.activeTaskId,
-    });
+    const taskId = pending.taskId ?? stateRef.current.activeTaskId;
+    if (
+      !send({
+        type: 'permission_response',
+        requestId: pending.requestId,
+        approved,
+        remember: rememberPermission,
+        taskId,
+      })
+    ) {
+      return;
+    }
+    if (taskId) {
+      updateWaitingActionTasks((current) => removeTaskMarker(current, taskId));
+    }
     patchState({ pendingPermission: undefined });
     setRememberPermission(false);
   }
@@ -2517,12 +2628,20 @@ function AgentWorkspace({
   function answerQuestion(answer: UserAnswer) {
     const pending = stateRef.current.pendingQuestion;
     if (!pending) return;
-    send({
-      type: 'ask_user_response',
-      requestId: pending.requestId,
-      answer,
-      taskId: pending.taskId ?? stateRef.current.activeTaskId,
-    });
+    const taskId = pending.taskId ?? stateRef.current.activeTaskId;
+    if (
+      !send({
+        type: 'ask_user_response',
+        requestId: pending.requestId,
+        answer,
+        taskId,
+      })
+    ) {
+      return;
+    }
+    if (taskId) {
+      updateWaitingActionTasks((current) => removeTaskMarker(current, taskId));
+    }
     patchState({ pendingQuestion: undefined });
   }
 
@@ -2849,6 +2968,8 @@ function AgentWorkspace({
       tasks={state.tasks}
       activeProjectId={state.activeProjectId}
       activeTaskId={state.activeTaskId}
+      unreadTaskIds={unreadTaskIds}
+      waitingActionTaskIds={waitingActionTaskIds}
       busy={state.creatingTask}
       creatingTask={state.creatingTask}
       renamingTaskId={renamingTaskId}
@@ -2878,11 +2999,7 @@ function AgentWorkspace({
       }}
       onCreateTask={createNewTask}
       onRefresh={() => send({ type: 'list_projects' })}
-      onOpenTask={(taskId) => {
-        discardTaskDraft();
-        send({ type: 'open_task', taskId });
-        patchState({ sidebarOpen: false });
-      }}
+      onOpenTask={openTask}
       onStartRename={startTaskRename}
       onRenameTitleChange={setRenameTitle}
       onSaveRename={saveTaskRename}
@@ -2895,6 +3012,12 @@ function AgentWorkspace({
       onArchiveProject={archiveProject}
       onRestoreProject={(projectId) => send({ type: 'restore_project', projectId })}
       onDeleteProject={deleteProject}
+      onSetProjectPinned={(projectId, pinned) =>
+        send({ type: 'set_project_pinned', projectId, pinned })
+      }
+      onReorderProjects={(projectIds, pinned) =>
+        send({ type: 'reorder_projects', projectIds, pinned })
+      }
       onOpenSettings={openProviderSettings}
       version={appVersion}
     />
@@ -3711,6 +3834,8 @@ function SidebarContent({
   tasks,
   activeProjectId,
   activeTaskId,
+  unreadTaskIds,
+  waitingActionTaskIds,
   busy,
   creatingTask,
   renamingTaskId,
@@ -3738,6 +3863,8 @@ function SidebarContent({
   onArchiveProject,
   onRestoreProject,
   onDeleteProject,
+  onSetProjectPinned,
+  onReorderProjects,
   onOpenSettings,
   version,
 }: {
@@ -3745,6 +3872,8 @@ function SidebarContent({
   tasks: TaskSummary[];
   activeProjectId?: string;
   activeTaskId?: string;
+  unreadTaskIds: ReadonlySet<string>;
+  waitingActionTaskIds: ReadonlySet<string>;
   busy: boolean;
   creatingTask: boolean;
   renamingTaskId?: string;
@@ -3772,12 +3901,30 @@ function SidebarContent({
   onArchiveProject: (project: ProjectSummary) => void;
   onRestoreProject: (projectId: string) => void;
   onDeleteProject: (project: ProjectSummary) => void;
+  onSetProjectPinned: (projectId: string, pinned: boolean) => void;
+  onReorderProjects: (projectIds: string[], pinned: boolean) => void;
   onOpenSettings: () => void;
   version: string;
 }) {
   const activeProjects = projects.filter((project) => !project.archived);
   const archivedProjects = projects.filter((project) => project.archived);
-  const visibleProjects = showArchived ? projects : activeProjects;
+  const pinnedProjects = activeProjects.filter((project) => project.pinned);
+  const regularProjects = activeProjects.filter((project) => !project.pinned);
+  const projectGroups: Array<{
+    key: string;
+    label: string;
+    projects: ProjectSummary[];
+    pinned?: boolean;
+  }> = [
+    { key: 'pinned', label: '置顶项目', projects: pinnedProjects, pinned: true },
+    { key: 'regular', label: '项目', projects: regularProjects, pinned: false },
+    ...(showArchived ? [{ key: 'archived', label: '已归档', projects: archivedProjects }] : []),
+  ].filter((group) => group.projects.length > 0);
+  const [draggedProjectId, setDraggedProjectId] = useState<string>();
+  const [projectDropTarget, setProjectDropTarget] = useState<{
+    projectId: string;
+    position: 'before' | 'after';
+  }>();
   const projectTasks = useMemo(() => {
     const groups = new Map<string, TaskSummary[]>();
     for (const project of projects) {
@@ -3791,14 +3938,40 @@ function SidebarContent({
     return groups;
   }, [projects, tasks]);
 
+  function finishProjectDrag() {
+    setDraggedProjectId(undefined);
+    setProjectDropTarget(undefined);
+  }
+
+  function dropProject(groupProjects: ProjectSummary[], pinned: boolean, targetProjectId: string) {
+    if (!draggedProjectId || draggedProjectId === targetProjectId) {
+      finishProjectDrag();
+      return;
+    }
+    const reordered = groupProjects.filter((project) => project.id !== draggedProjectId);
+    const targetIndex = reordered.findIndex((project) => project.id === targetProjectId);
+    if (targetIndex < 0) {
+      finishProjectDrag();
+      return;
+    }
+    const draggedProject = groupProjects.find((project) => project.id === draggedProjectId);
+    if (!draggedProject) {
+      finishProjectDrag();
+      return;
+    }
+    const insertAt = targetIndex + (projectDropTarget?.position === 'after' ? 1 : 0);
+    reordered.splice(insertAt, 0, draggedProject);
+    onReorderProjects(
+      reordered.map((project) => project.id),
+      pinned,
+    );
+    finishProjectDrag();
+  }
+
   return (
     <div className="pa-sidebar-content">
       <div className="pa-brand">
-        <div className="pa-brand-mark" aria-hidden="true">
-          <span />
-          <span />
-          <span />
-        </div>
+        <img className="pa-brand-logo" src="/app-icon.png" alt="" aria-hidden="true" />
         <div>
           <strong>personal-agent</strong>
           <small>你真正的一览无余的私人助理</small>
@@ -3838,155 +4011,237 @@ function SidebarContent({
       </div>
 
       <div className="pa-project-list">
-        {visibleProjects.length === 0 ? (
+        {projectGroups.length === 0 ? (
           <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无项目" />
         ) : (
-          <ul className="pa-project-menu-list">
-            {visibleProjects.map((project) => (
-              <li className="pa-project-list-item" key={project.id}>
-                {renamingProjectId === project.id ? (
-                  <div className="pa-task-rename">
-                    <Input
-                      autoFocus
-                      maxLength={100}
-                      value={renameProjectName}
-                      onChange={(event) => onRenameProjectNameChange(event.target.value)}
-                      onPressEnter={() => onSaveProjectRename(project.id)}
-                      onKeyDown={(event) => {
-                        if (event.key === 'Escape') onCancelProjectRename();
-                      }}
-                    />
-                    <Button
-                      type="primary"
-                      icon={<CheckCircleFilled />}
-                      aria-label="保存项目名称"
-                      onClick={() => onSaveProjectRename(project.id)}
-                    />
-                  </div>
-                ) : (
-                  <>
-                    <div className={`pa-project-row${project.archived ? ' archived' : ''}`}>
-                      <button
-                        type="button"
-                        className="pa-project-collapse"
-                        disabled={busy || project.archived}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          onToggleProjectCollapse(project.id);
-                        }}
-                        aria-label={
-                          collapsedProjects.has(project.id)
-                            ? `展开项目 ${project.name} 的任务`
-                            : `折叠项目 ${project.name} 的任务`
-                        }
-                      >
-                        <CaretRightOutlined
-                          className={collapsedProjects.has(project.id) ? '' : 'expanded'}
-                        />
-                      </button>
-                      <button
-                        type="button"
-                        className="pa-project-main"
-                        disabled={busy || project.archived}
-                        onClick={() => onProjectChange(project.id)}
-                        title={project.rootPath}
-                      >
-                        <strong>{project.name}</strong>
-                      </button>
-                      <Dropdown
-                        trigger={['click']}
-                        menu={{
-                          items: [
-                            ...(project.archived
-                              ? [
-                                  {
-                                    key: 'restore',
-                                    icon: <ReloadOutlined />,
-                                    label: '恢复项目',
-                                  },
-                                ]
-                              : [
-                                  {
-                                    key: 'rename',
-                                    icon: <EditOutlined />,
-                                    label: '重命名',
-                                  },
-                                  {
-                                    key: 'archive',
-                                    icon: <DeleteOutlined />,
-                                    danger: true,
-                                    label: '归档',
-                                  },
-                                ]),
-                            {
-                              key: 'delete',
-                              icon: <DeleteOutlined />,
-                              danger: true,
-                              label: '彻底删除',
-                            },
-                          ],
-                          onClick: ({ key }) => {
-                            if (key === 'rename') onStartProjectRename(project);
-                            else if (key === 'archive') onArchiveProject(project);
-                            else if (key === 'restore') onRestoreProject(project.id);
-                            else if (key === 'delete') onDeleteProject(project);
-                          },
-                        }}
-                      >
-                        <Button
-                          type="text"
-                          size="small"
-                          icon={<MoreOutlined />}
-                          disabled={busy}
-                          aria-label={`项目 ${project.name} 的更多操作`}
-                        />
-                      </Dropdown>
-                      <Tooltip title="新建任务">
-                        <Button
-                          type="text"
-                          size="small"
-                          className="pa-project-add-task"
-                          icon={<PlusOutlined />}
-                          disabled={busy || project.archived}
-                          aria-label={`为项目 ${project.name} 新建任务`}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            onCreateTask(project.id);
+          projectGroups.map((group) => (
+            <section className="pa-project-group" key={group.key}>
+              <div className="pa-project-group-heading">
+                <span>
+                  {group.pinned === true && <PushpinFilled />}
+                  {group.label}
+                </span>
+                <small>{group.projects.length}</small>
+              </div>
+              <ul className="pa-project-menu-list">
+                {group.projects.map((project) => (
+                  <li
+                    className={`pa-project-list-item${
+                      draggedProjectId === project.id ? ' dragging' : ''
+                    }${
+                      projectDropTarget?.projectId === project.id
+                        ? ` drop-${projectDropTarget.position}`
+                        : ''
+                    }`}
+                    key={project.id}
+                    onDragOver={(event) => {
+                      if (
+                        group.pinned === undefined ||
+                        !draggedProjectId ||
+                        draggedProjectId === project.id ||
+                        projects.find((candidate) => candidate.id === draggedProjectId)?.pinned !==
+                          group.pinned
+                      ) {
+                        return;
+                      }
+                      event.preventDefault();
+                      event.dataTransfer.dropEffect = 'move';
+                      const projectRow = event.currentTarget.querySelector<HTMLElement>(
+                        ':scope > .pa-project-row',
+                      );
+                      const bounds =
+                        projectRow?.getBoundingClientRect() ??
+                        event.currentTarget.getBoundingClientRect();
+                      setProjectDropTarget({
+                        projectId: project.id,
+                        position:
+                          event.clientY < bounds.top + bounds.height / 2 ? 'before' : 'after',
+                      });
+                    }}
+                    onDrop={(event) => {
+                      if (group.pinned === undefined) return;
+                      event.preventDefault();
+                      dropProject(group.projects, group.pinned, project.id);
+                    }}
+                  >
+                    {renamingProjectId === project.id ? (
+                      <div className="pa-task-rename">
+                        <Input
+                          autoFocus
+                          maxLength={100}
+                          value={renameProjectName}
+                          onChange={(event) => onRenameProjectNameChange(event.target.value)}
+                          onPressEnter={() => onSaveProjectRename(project.id)}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Escape') onCancelProjectRename();
                           }}
                         />
-                      </Tooltip>
-                    </div>
-                    {!project.archived && !collapsedProjects.has(project.id) && (
-                      <div className="pa-project-tasks">
-                        {projectTasks.get(project.id)?.length ? (
-                          (projectTasks.get(project.id) ?? []).map((task) => (
-                            <TaskMenuItem
-                              key={task.id}
-                              task={task}
-                              activeTaskId={activeTaskId}
-                              busy={busy}
-                              renamingTaskId={renamingTaskId}
-                              renameTitle={renameTitle}
-                              onOpenTask={onOpenTask}
-                              onStartRename={onStartRename}
-                              onRenameTitleChange={onRenameTitleChange}
-                              onSaveRename={onSaveRename}
-                              onCancelRename={onCancelRename}
-                              onArchiveTask={onArchiveTask}
+                        <Button
+                          type="primary"
+                          icon={<CheckCircleFilled />}
+                          aria-label="保存项目名称"
+                          onClick={() => onSaveProjectRename(project.id)}
+                        />
+                      </div>
+                    ) : (
+                      <>
+                        <div className={`pa-project-row${project.archived ? ' archived' : ''}`}>
+                          {group.pinned !== undefined ? (
+                            <button
+                              type="button"
+                              className="pa-project-drag-handle"
+                              draggable={!busy}
+                              disabled={busy}
+                              title="拖动排序"
+                              aria-label={`拖动项目 ${project.name} 排序`}
+                              onDragStart={(event) => {
+                                setDraggedProjectId(project.id);
+                                setProjectDropTarget(undefined);
+                                event.dataTransfer.effectAllowed = 'move';
+                                event.dataTransfer.setData('text/plain', project.id);
+                              }}
+                              onDragEnd={finishProjectDrag}
+                            >
+                              <HolderOutlined />
+                            </button>
+                          ) : (
+                            <span className="pa-project-drag-placeholder" aria-hidden="true" />
+                          )}
+                          <button
+                            type="button"
+                            className="pa-project-collapse"
+                            disabled={busy || project.archived}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              onToggleProjectCollapse(project.id);
+                            }}
+                            aria-label={
+                              collapsedProjects.has(project.id)
+                                ? `展开项目 ${project.name} 的任务`
+                                : `折叠项目 ${project.name} 的任务`
+                            }
+                          >
+                            <CaretRightOutlined
+                              className={collapsedProjects.has(project.id) ? '' : 'expanded'}
                             />
-                          ))
-                        ) : (
-                          <div className="pa-project-tasks-empty">
-                            <Text type="secondary">暂无任务</Text>
+                          </button>
+                          <button
+                            type="button"
+                            className="pa-project-main"
+                            disabled={busy || project.archived}
+                            onClick={() => onProjectChange(project.id)}
+                            title={project.rootPath}
+                          >
+                            <strong>{project.name}</strong>
+                          </button>
+                          <Dropdown
+                            trigger={['click']}
+                            menu={{
+                              items: [
+                                ...(project.archived
+                                  ? [
+                                      {
+                                        key: 'restore',
+                                        icon: <ReloadOutlined />,
+                                        label: '恢复项目',
+                                      },
+                                    ]
+                                  : [
+                                      {
+                                        key: 'pin',
+                                        icon: project.pinned ? (
+                                          <PushpinFilled />
+                                        ) : (
+                                          <PushpinOutlined />
+                                        ),
+                                        label: project.pinned ? '取消置顶' : '置顶',
+                                      },
+                                      {
+                                        key: 'rename',
+                                        icon: <EditOutlined />,
+                                        label: '重命名',
+                                      },
+                                      {
+                                        key: 'archive',
+                                        icon: <DeleteOutlined />,
+                                        danger: true,
+                                        label: '归档',
+                                      },
+                                    ]),
+                                {
+                                  key: 'delete',
+                                  icon: <DeleteOutlined />,
+                                  danger: true,
+                                  label: '彻底删除',
+                                },
+                              ],
+                              onClick: ({ key }) => {
+                                if (key === 'pin') onSetProjectPinned(project.id, !project.pinned);
+                                else if (key === 'rename') onStartProjectRename(project);
+                                else if (key === 'archive') onArchiveProject(project);
+                                else if (key === 'restore') onRestoreProject(project.id);
+                                else if (key === 'delete') onDeleteProject(project);
+                              },
+                            }}
+                          >
+                            <Button
+                              type="text"
+                              size="small"
+                              icon={<MoreOutlined />}
+                              disabled={busy}
+                              aria-label={`项目 ${project.name} 的更多操作`}
+                            />
+                          </Dropdown>
+                          <Tooltip title="新建任务">
+                            <Button
+                              type="text"
+                              size="small"
+                              className="pa-project-add-task"
+                              icon={<PlusOutlined />}
+                              disabled={busy || project.archived}
+                              aria-label={`为项目 ${project.name} 新建任务`}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                onCreateTask(project.id);
+                              }}
+                            />
+                          </Tooltip>
+                        </div>
+                        {!project.archived && !collapsedProjects.has(project.id) && (
+                          <div className="pa-project-tasks">
+                            {projectTasks.get(project.id)?.length ? (
+                              (projectTasks.get(project.id) ?? []).map((task) => (
+                                <TaskMenuItem
+                                  key={task.id}
+                                  task={task}
+                                  activeTaskId={activeTaskId}
+                                  unread={unreadTaskIds.has(task.id)}
+                                  waitingAction={waitingActionTaskIds.has(task.id)}
+                                  busy={busy}
+                                  renamingTaskId={renamingTaskId}
+                                  renameTitle={renameTitle}
+                                  onOpenTask={onOpenTask}
+                                  onStartRename={onStartRename}
+                                  onRenameTitleChange={onRenameTitleChange}
+                                  onSaveRename={onSaveRename}
+                                  onCancelRename={onCancelRename}
+                                  onArchiveTask={onArchiveTask}
+                                />
+                              ))
+                            ) : (
+                              <div className="pa-project-tasks-empty">
+                                <Text type="secondary">暂无任务</Text>
+                              </div>
+                            )}
                           </div>
                         )}
-                      </div>
+                      </>
                     )}
-                  </>
-                )}
-              </li>
-            ))}
-          </ul>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ))
         )}
         {archivedProjects.length > 0 && (
           <Button
@@ -4021,6 +4276,8 @@ function SidebarContent({
 function TaskMenuItem({
   task,
   activeTaskId,
+  unread,
+  waitingAction,
   busy,
   renamingTaskId,
   renameTitle,
@@ -4033,6 +4290,8 @@ function TaskMenuItem({
 }: {
   task: TaskSummary;
   activeTaskId?: string;
+  unread: boolean;
+  waitingAction: boolean;
   busy: boolean;
   renamingTaskId?: string;
   renameTitle: string;
@@ -4076,6 +4335,18 @@ function TaskMenuItem({
               }`}
             >
               <strong>{task.title}</strong>
+              {waitingAction && (
+                <Tag color="orange" className="pa-task-waiting-tag">
+                  等待处理
+                </Tag>
+              )}
+              {unread && (
+                <span
+                  className="pa-task-unread-dot"
+                  aria-label={`${task.title} 有未读的完成消息`}
+                  title="任务已完成，点击查看"
+                />
+              )}
               {task.running && <Spin size="small" className="pa-task-running" />}
             </button>
             <Dropdown
@@ -4124,11 +4395,7 @@ function Welcome({
 }) {
   return (
     <section className="pa-welcome">
-      <div className="pa-welcome-symbol" aria-hidden="true">
-        <span />
-        <span />
-        <span />
-      </div>
+      <img className="pa-welcome-logo" src="/app-icon.png" alt="" aria-hidden="true" />
       <span className="pa-eyebrow">YOUR LOCAL AI AGENT</span>
       <Title level={1}>今天想一起完成什么？</Title>
       <Text type="secondary" className="pa-welcome-copy">
@@ -5523,7 +5790,9 @@ function Composer({
                   size="small"
                   icon={<CloseOutlined />}
                   aria-label={`移除图片 ${image.name}`}
-                  onClick={() => onImagesChange(images.filter((_, itemIndex) => itemIndex !== index))}
+                  onClick={() =>
+                    onImagesChange(images.filter((_, itemIndex) => itemIndex !== index))
+                  }
                 />
               </div>
             ))}
@@ -6230,7 +6499,8 @@ function GeneralSettingsPanel({
     apiFetch('/api/vision-settings')
       .then(async (response) => {
         const payload = (await response.json()) as VisionSettingsInfo & { error?: string };
-        if (!response.ok) throw new Error(payload.error ?? `读取视觉模型配置失败 (${response.status})`);
+        if (!response.ok)
+          throw new Error(payload.error ?? `读取视觉模型配置失败 (${response.status})`);
         return payload;
       })
       .then((payload) => {
@@ -6498,7 +6768,8 @@ function GeneralSettingsPanel({
     .filter((model) => model.provider === visionProvider)
     .map((model) => ({
       value: model.model,
-      label: model.displayName === model.model ? model.model : `${model.displayName} (${model.model})`,
+      label:
+        model.displayName === model.model ? model.model : `${model.displayName} (${model.model})`,
     }));
 
   return (
@@ -6699,11 +6970,7 @@ function GeneralSettingsPanel({
             style={{ maxWidth: 640 }}
           >
             <Form.Item label="启用视觉模型">
-              <Switch
-                checked={visionEnabled}
-                disabled={savingVision}
-                onChange={setVisionEnabled}
-              />
+              <Switch checked={visionEnabled} disabled={savingVision} onChange={setVisionEnabled} />
             </Form.Item>
             <Form.Item label="视觉供应商">
               <Select

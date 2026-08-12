@@ -25,7 +25,11 @@ test('parseClientMessage accepts image prompts and enforces attachment limits', 
   assert.throws(
     () =>
       parseClientMessage(
-        JSON.stringify({ type: 'prompt', text: 'x', images: [{ ...image, mediaType: 'text/plain' }] }),
+        JSON.stringify({
+          type: 'prompt',
+          text: 'x',
+          images: [{ ...image, mediaType: 'text/plain' }],
+        }),
       ),
     /支持的图片格式/,
   );
@@ -170,6 +174,27 @@ test('parseClientMessage validates project archive and rename commands', () => {
   assert.throws(
     () => parseClientMessage('{"type":"rename_project","projectId":"project-1"}'),
     /projectId 和 name/,
+  );
+  assert.deepEqual(
+    parseClientMessage('{"type":"set_project_pinned","projectId":" project-1 ","pinned":true}'),
+    { type: 'set_project_pinned', projectId: 'project-1', pinned: true },
+  );
+  assert.throws(
+    () => parseClientMessage('{"type":"set_project_pinned","projectId":"project-1"}'),
+    /pinned 必须是布尔值/,
+  );
+  assert.deepEqual(
+    parseClientMessage(
+      '{"type":"reorder_projects","projectIds":[" project-2 ","project-1"],"pinned":false}',
+    ),
+    { type: 'reorder_projects', projectIds: ['project-2', 'project-1'], pinned: false },
+  );
+  assert.throws(
+    () =>
+      parseClientMessage(
+        '{"type":"reorder_projects","projectIds":["project-1","project-1"],"pinned":true}',
+      ),
+    /不能重复/,
   );
 });
 

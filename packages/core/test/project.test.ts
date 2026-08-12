@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -134,6 +134,107 @@ test('projects can be archived, restored, renamed, and deleted', async () => {
     assert.equal(restored.getProject(beta.id)?.archived, false);
     assert.equal(restored.listProjects().length, 1);
     assert.equal(restored.listTasks(beta.id).length, 1);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('projects can be pinned and reordered with persistent group ordering', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'personal-agent-project-order-'));
+  const roots = [join(directory, 'alpha'), join(directory, 'beta'), join(directory, 'gamma')];
+  const storagePath = join(directory, 'state', 'projects.json');
+  await Promise.all(roots.map((root) => mkdir(root)));
+
+  try {
+    const manager = new ProjectManager(storagePath);
+    await manager.initialize();
+    const alpha = await manager.createProject({ name: 'Alpha', rootPath: roots[0]! });
+    const beta = await manager.createProject({ name: 'Beta', rootPath: roots[1]! });
+    const gamma = await manager.createProject({ name: 'Gamma', rootPath: roots[2]! });
+
+    assert.deepEqual(
+      manager.listProjects().map((project) => project.id),
+      [gamma.id, beta.id, alpha.id],
+    );
+
+    await manager.setProjectPinned(alpha.id, true);
+    await manager.setProjectPinned(gamma.id, true);
+    assert.deepEqual(
+      manager.listProjects().map((project) => project.id),
+      [gamma.id, alpha.id, beta.id],
+    );
+
+    await manager.reorderProjects([alpha.id, gamma.id], true);
+    assert.deepEqual(
+      manager.listProjects().map((project) => project.id),
+      [alpha.id, gamma.id, beta.id],
+    );
+    await assert.rejects(manager.reorderProjects([gamma.id], true), /排序列表与当前项目不一致/);
+
+    const restored = new ProjectManager(storagePath);
+    await restored.initialize();
+    assert.deepEqual(
+      restored.listProjects().map((project) => ({ id: project.id, pinned: project.pinned })),
+      [
+        { id: alpha.id, pinned: true },
+        { id: gamma.id, pinned: true },
+        { id: beta.id, pinned: false },
+      ],
+    );
+
+    await restored.archiveProject(alpha.id);
+    assert.equal(restored.getProject(alpha.id)?.pinned, false);
+    await restored.restoreProject(alpha.id);
+    assert.deepEqual(
+      restored.listProjects().map((project) => project.id),
+      [gamma.id, alpha.id, beta.id],
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('legacy project stores keep their newest-first order when sorting fields are absent', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'personal-agent-project-order-migration-'));
+  const storagePath = join(directory, 'projects.json');
+
+  try {
+    await writeFile(
+      storagePath,
+      JSON.stringify({
+        version: 1,
+        projects: [
+          {
+            id: 'project-oldest',
+            name: 'Oldest',
+            rootPath: directory,
+            archived: false,
+            createdAt: '2025-01-01T00:00:00.000Z',
+            updatedAt: '2025-01-01T00:00:00.000Z',
+          },
+          {
+            id: 'project-newest',
+            name: 'Newest',
+            rootPath: join(directory, 'newest'),
+            archived: false,
+            createdAt: '2025-02-01T00:00:00.000Z',
+            updatedAt: '2025-02-01T00:00:00.000Z',
+          },
+        ],
+        tasks: [],
+      }),
+      'utf-8',
+    );
+
+    const manager = new ProjectManager(storagePath);
+    await manager.initialize();
+    assert.deepEqual(
+      manager.listProjects().map((project) => ({ id: project.id, pinned: project.pinned })),
+      [
+        { id: 'project-newest', pinned: false },
+        { id: 'project-oldest', pinned: false },
+      ],
+    );
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

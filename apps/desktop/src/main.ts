@@ -25,6 +25,10 @@ const APP_USER_MODEL_ID = 'com.personal-agent.desktop';
 const SELECT_DIRECTORY_CHANNEL = 'desktop:select-directory';
 const TOGGLE_DEVTOOLS_CHANNEL = 'desktop:toggle-devtools';
 const OPEN_PATH_CHANNEL = 'desktop:open-path';
+const TASK_COMPLETION_NOTIFICATION_CHANNEL = 'desktop:task-completion-notification';
+const PERMISSION_REQUEST_NOTIFICATION_CHANNEL = 'desktop:permission-request-notification';
+const QUESTION_REQUEST_NOTIFICATION_CHANNEL = 'desktop:question-request-notification';
+const OPEN_TASK_REQUESTED_CHANNEL = 'desktop:open-task-requested';
 const mainDirectory = dirname(fileURLToPath(import.meta.url));
 
 // Preload 脚本缺失会导致 window.personalAgentDesktop 不可用
@@ -42,6 +46,7 @@ let tray: Tray | null = null;
 let closeWebServer: (() => Promise<void>) | undefined;
 let shutdownStarted = false;
 let quitRequested = false;
+const taskNotifications = new Set<Notification>();
 
 app.enableSandbox();
 app.setAppUserModelId(APP_USER_MODEL_ID);
@@ -96,6 +101,35 @@ function startDesktopApplication(): void {
     // shell.openPath 返回空字符串表示成功，否则返回错误信息
     const errorMessage = await shell.openPath(targetPath);
     return errorMessage || null;
+  });
+
+  ipcMain.handle(TASK_COMPLETION_NOTIFICATION_CHANNEL, (event, payload?: unknown) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents) return false;
+    const task = parseTaskNotification(payload);
+    if (!task) return false;
+    return showTaskNotification('任务已完成', `“${task.title}”已完成，点击查看。`, task.taskId);
+  });
+
+  ipcMain.handle(PERMISSION_REQUEST_NOTIFICATION_CHANNEL, (event, payload?: unknown) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents) return false;
+    const request = parsePermissionRequestNotification(payload);
+    if (!request) return false;
+    return showTaskNotification(
+      '任务等待处理',
+      `“${request.title}”需要审批 ${request.toolName} 权限，点击处理。`,
+      request.taskId,
+    );
+  });
+
+  ipcMain.handle(QUESTION_REQUEST_NOTIFICATION_CHANNEL, (event, payload?: unknown) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents) return false;
+    const task = parseTaskNotification(payload);
+    if (!task) return false;
+    return showTaskNotification(
+      '任务等待处理',
+      `“${task.title}”正在等待你的回答，点击处理。`,
+      task.taskId,
+    );
   });
 
   app.on('before-quit', (event) => {
@@ -366,6 +400,49 @@ function resolveDirectoryPickerDefaultPath(value: unknown): string {
     }
   }
   return app.getPath('documents');
+}
+
+function parseTaskNotification(value: unknown): { taskId: string; title: string } | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const payload = value as Record<string, unknown>;
+  if (typeof payload.taskId !== 'string' || !payload.taskId.trim()) return undefined;
+  const title = typeof payload.title === 'string' ? payload.title.trim() : '';
+  return {
+    taskId: payload.taskId.trim(),
+    title: (title || '后台任务').slice(0, 200),
+  };
+}
+
+function parsePermissionRequestNotification(
+  value: unknown,
+): { taskId: string; title: string; toolName: string } | undefined {
+  const task = parseTaskNotification(value);
+  if (!task) return undefined;
+  const payload = value as Record<string, unknown>;
+  const toolName = typeof payload.toolName === 'string' ? payload.toolName.trim() : '';
+  return {
+    ...task,
+    toolName: (toolName || '敏感操作').slice(0, 100),
+  };
+}
+
+function showTaskNotification(title: string, body: string, taskId: string): boolean {
+  if (!Notification.isSupported()) return false;
+  const notification = new Notification({ title, body, icon: getDesktopIconPath() });
+  const cleanup = () => taskNotifications.delete(notification);
+  taskNotifications.add(notification);
+  notification.once('close', cleanup);
+  notification.once('failed', cleanup);
+  notification.on('click', () => {
+    notification.close();
+    showMainWindow();
+    const window = mainWindow;
+    if (window && !window.isDestroyed()) {
+      window.webContents.send(OPEN_TASK_REQUESTED_CHANNEL, taskId);
+    }
+  });
+  notification.show();
+  return true;
 }
 
 function isApplicationUrl(value: string, applicationOrigin: string): boolean {

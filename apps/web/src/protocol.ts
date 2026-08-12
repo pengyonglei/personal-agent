@@ -74,6 +74,8 @@ export type ClientMessage =
   | { type: 'restore_project'; projectId: string }
   | { type: 'delete_project'; projectId: string }
   | { type: 'rename_project'; projectId: string; name: string }
+  | { type: 'set_project_pinned'; projectId: string; pinned: boolean }
+  | { type: 'reorder_projects'; projectIds: string[]; pinned: boolean }
   | { type: 'create_task'; projectId: string; permissionMode?: PermissionMode }
   | { type: 'rename_task'; taskId: string; title: string }
   | { type: 'open_task'; taskId: string }
@@ -141,6 +143,8 @@ export interface ProjectSummary {
   name: string;
   rootPath: string;
   archived: boolean;
+  pinned: boolean;
+  sortOrder: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -395,6 +399,34 @@ export function parseClientMessage(raw: string): ClientMessage {
         projectId: message.projectId.trim(),
         name: message.name.trim(),
       };
+    case 'set_project_pinned':
+      if (typeof message.projectId !== 'string' || !message.projectId.trim()) {
+        throw new Error('set_project_pinned.projectId 不能为空');
+      }
+      if (typeof message.pinned !== 'boolean') {
+        throw new Error('set_project_pinned.pinned 必须是布尔值');
+      }
+      return {
+        type: 'set_project_pinned',
+        projectId: message.projectId.trim(),
+        pinned: message.pinned,
+      };
+    case 'reorder_projects': {
+      if (
+        !Array.isArray(message.projectIds) ||
+        message.projectIds.some((projectId) => typeof projectId !== 'string' || !projectId.trim())
+      ) {
+        throw new Error('reorder_projects.projectIds 格式无效');
+      }
+      if (typeof message.pinned !== 'boolean') {
+        throw new Error('reorder_projects.pinned 必须是布尔值');
+      }
+      const projectIds = message.projectIds.map((projectId) => projectId.trim());
+      if (new Set(projectIds).size !== projectIds.length) {
+        throw new Error('reorder_projects.projectIds 不能重复');
+      }
+      return { type: 'reorder_projects', projectIds, pinned: message.pinned };
+    }
     case 'create_task':
       if (typeof message.projectId !== 'string' || !message.projectId.trim()) {
         throw new Error('create_task.projectId 不能为空');
@@ -526,8 +558,7 @@ function parsePromptImages(value: unknown): PromptImageInput[] {
     }
     const image = entry as Record<string, unknown>;
     const name = typeof image.name === 'string' ? image.name.trim() : '';
-    const mediaType =
-      typeof image.mediaType === 'string' ? image.mediaType.toLowerCase() : '';
+    const mediaType = typeof image.mediaType === 'string' ? image.mediaType.toLowerCase() : '';
     const data = typeof image.data === 'string' ? image.data : '';
     if (!name || name.length > 255) throw new Error(`prompt.images[${index}].name 无效`);
     if (!PROMPT_IMAGE_MEDIA_TYPES.has(mediaType as PromptImageInput['mediaType'])) {

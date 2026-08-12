@@ -950,6 +950,17 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
         sendProjectState();
         return;
       }
+      if (message.type === 'set_project_pinned') {
+        const project = await runtime.projects.setProjectPinned(message.projectId, message.pinned);
+        send({ type: 'project_changed', project: serializeProject(project) });
+        sendProjectState();
+        return;
+      }
+      if (message.type === 'reorder_projects') {
+        await runtime.projects.reorderProjects(message.projectIds, message.pinned);
+        sendProjectState();
+        return;
+      }
       if (message.type === 'create_task') {
         const task = await runtime.projects.createTask({
           projectId: message.projectId,
@@ -1659,12 +1670,16 @@ function serializeProject(project: {
   name: string;
   rootPath: string;
   archived?: boolean;
+  pinned?: boolean;
+  sortOrder?: number;
   createdAt: Date;
   updatedAt: Date;
 }): ProjectSummary {
   return {
     ...project,
     archived: project.archived === true,
+    pinned: project.pinned === true,
+    sortOrder: Number.isFinite(project.sortOrder) ? (project.sortOrder as number) : 0,
     createdAt: project.createdAt.toISOString(),
     updatedAt: project.updatedAt.toISOString(),
   };
