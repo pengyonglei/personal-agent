@@ -856,6 +856,25 @@ select {
   line-height: 1.72;
 }
 
+.pa-message-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.pa-message-images img {
+  display: block;
+  width: auto;
+  max-width: min(360px, 100%);
+  height: auto;
+  max-height: 280px;
+  object-fit: contain;
+  border: 1px solid var(--pa-border);
+  border-radius: 8px;
+  background: var(--pa-panel);
+}
+
 /* 任务完成后显示在消息内容底部的耗时 */
 .pa-message-duration {
   margin-top: 0.72em;
@@ -1302,6 +1321,97 @@ select {
 
 .pa-todo-item + .pa-todo-item {
   border-top: 1px solid var(--pa-border);
+}
+
+/* Frontend validation evidence card */
+.pa-validation-card {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--pa-accent), transparent 68%);
+  border-radius: 9px;
+  background: var(--pa-block-panel);
+}
+
+.pa-validation-card.failed,
+.pa-validation-card.infrastructure_error {
+  border-color: color-mix(in srgb, var(--pa-danger), transparent 48%);
+}
+
+.pa-validation-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pa-validation-summary strong {
+  flex: 1;
+  color: var(--pa-text);
+}
+
+.pa-validation-summary > span:last-child,
+.pa-validation-steps small,
+.pa-validation-vision {
+  color: var(--pa-muted);
+  font-size: 10px;
+}
+
+.pa-validation-card > p {
+  margin: 0;
+  color: var(--pa-muted);
+  font-size: 11px;
+}
+
+.pa-validation-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.pa-validation-steps > div {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  color: var(--pa-text);
+  font-size: 11px;
+}
+
+.pa-validation-steps > div.failed,
+.pa-validation-issues {
+  color: var(--pa-danger);
+}
+
+.pa-validation-issues {
+  margin: 0;
+  padding-left: 20px;
+  font-size: 10px;
+  white-space: pre-wrap;
+}
+
+.pa-validation-artifacts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.pa-validation-artifacts a {
+  display: flex;
+  max-width: 180px;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--pa-accent);
+  font-size: 10px;
+}
+
+.pa-validation-artifacts img {
+  width: 180px;
+  max-height: 120px;
+  border: 1px solid var(--pa-border);
+  border-radius: 6px;
+  object-fit: cover;
+  object-position: top;
 }
 
 .pa-todo-item:hover {
@@ -1932,6 +2042,44 @@ select {
   position: relative;
 }
 
+.pa-composer-images {
+  display: flex;
+  gap: 8px;
+  padding: 8px 12px 4px;
+  overflow-x: auto;
+}
+
+.pa-composer-image {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 92px) 26px;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 6px;
+  padding: 4px;
+  border: 1px solid var(--pa-border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--pa-panel), var(--pa-muted) 12%);
+}
+
+.pa-composer-image img {
+  width: 44px;
+  height: 44px;
+  object-fit: cover;
+  border-radius: 5px;
+}
+
+.pa-composer-image > span {
+  overflow: hidden;
+  color: var(--pa-text);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pa-composer-image .ant-btn {
+  color: var(--pa-faint);
+}
+
 /* 影子高亮层：与 TextArea 完全重叠，仅提供技能 chip 底色，不拦截交互 */
 .pa-composer-highlight {
   position: absolute;
@@ -2197,6 +2345,11 @@ select {
   grid-template-columns: minmax(140px, 1.4fr) minmax(110px, 0.8fr) minmax(110px, 0.8fr) 32px;
   gap: 8px;
   align-items: center;
+}
+
+.pa-model-list-ollama .pa-model-list-head,
+.pa-model-list-ollama .pa-model-row {
+  grid-template-columns: minmax(130px, 1.3fr) minmax(100px, 0.75fr) minmax(100px, 0.75fr) 68px 32px;
 }
 
 .pa-model-list-head {
@@ -2755,6 +2908,28 @@ select {
 /* Settings general panel */
 .pa-settings-general .pa-settings-heading {
   margin-bottom: 16px;
+}
+.pa-settings-general {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.pa-settings-general .pa-settings-heading {
+  margin-bottom: 0;
+}
+.pa-settings-card-description {
+  display: block;
+  margin: -2px 0 16px;
+  font-size: 12px;
+}
+.pa-inline-config-path {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--pa-text);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Settings prompts panel */

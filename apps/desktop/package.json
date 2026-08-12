@@ -13,6 +13,7 @@
     "build:production": "node scripts/build.mjs --production",
     "typecheck": "tsc --noEmit",
     "prepare:runtime": "pnpm exec turbo run build --filter=@personal-agent/web...",
+    "prepare:chromium": "node scripts/prepare-chromium.mjs",
     "start": "pnpm run prepare:runtime && pnpm run build && electron .",
     "package": "node scripts/release.mjs package",
     "make": "node scripts/release.mjs make",
@@ -25,7 +26,8 @@
     "clean": "node -e \"fs.rmSync('dist',{recursive:true,force:true});fs.rmSync('out',{recursive:true,force:true})\""
   },
   "dependencies": {
-    "electron-updater": "^6.8.9"
+    "electron-updater": "^6.8.9",
+    "playwright": "1.62.1"
   },
   "devDependencies": {
     "@personal-agent/web": "workspace:*",

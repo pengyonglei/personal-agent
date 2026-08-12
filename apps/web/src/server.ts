@@ -22,6 +22,7 @@ import {
   WebAgentRuntime,
   type ProviderSettingsInput,
   type RuntimeModelSettingsInput,
+  type VisionSettingsInput,
   type WebConversation,
 } from './runtime';
 import {
@@ -33,6 +34,12 @@ import {
 } from './protocol';
 import { BUILTIN_PROMPTS, PROMPT_KEYS } from './prompts';
 import { installSkillFromZip, SkillUploadError } from './skill-upload';
+import {
+  getValidationArtifactsRoot,
+  loadValidationConfig,
+  projectHash,
+  resolveValidationArtifact,
+} from '@personal-agent/validation';
 
 const UNTITLED_TASK_TITLE = '新任务';
 /** 批准计划后自动触发执行的内部提示（作为 user 消息写入历史，驱动模型开始执行已批准的计划）。 */
@@ -75,6 +82,8 @@ export interface WebServerOptions {
   fileChangesDirectory?: string;
   /** 标准技能上传目录。Defaults to ~/.personal-agent/skills */
   skillsDirectory?: string;
+  /** 验证配置路径。Defaults to ~/.personal-agent/validation.yaml */
+  validationConfigPath?: string;
   viteDev?: boolean;
 }
 
@@ -123,7 +132,8 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
   }
   const app = express();
   const server = createServer(app);
-  const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
+  // 图片以 base64 通过 prompt 消息发送；协议层仍会执行 4 张 / 单张 5 MB / 总计 10 MB 的硬限制。
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 * 1024 });
   let viteDevServer: ViteDevServer | undefined;
 
   app.disable('x-powered-by');
@@ -146,6 +156,40 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
       version: VERSION,
       runtime: info,
     });
+  });
+
+  app.get('/api/validation/artifacts/:projectHash/:runId/:artifactId', async (req, res) => {
+    if (!isAuthorized(req.headers.authorization, req.query.token, authToken)) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    try {
+      const project = runtime.projects
+        .listProjects({ includeArchived: true })
+        .find((candidate) => projectHash(candidate.rootPath) === req.params.projectHash);
+      const projectRoot = project?.rootPath ?? runtime.workingDirectory;
+      const validationConfig = await loadValidationConfig(
+        projectRoot,
+        options.validationConfigPath,
+      ).catch(() => null);
+      const configuredRoot = validationConfig?.artifacts.root;
+      const root = getValidationArtifactsRoot(
+        configuredRoot ? resolve(projectRoot, configuredRoot) : undefined,
+      );
+      const path = resolveValidationArtifact(
+        root,
+        req.params.projectHash,
+        req.params.runId,
+        req.params.artifactId,
+      );
+      if (!path) {
+        res.status(404).json({ error: 'Validation artifact not found.' });
+        return;
+      }
+      res.sendFile(path);
+    } catch (error) {
+      res.status(500).json({ error: formatError(error) });
+    }
   });
 
   app.get('/api/prompts', (req, res) => {
@@ -285,6 +329,31 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
       return;
     }
     res.json(runtime.getProviderSettings());
+  });
+
+  app.get('/api/vision-settings', (req, res) => {
+    if (!isAuthorized(req.headers.authorization, req.query.token, authToken)) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    res.json(runtime.getVisionSettings());
+  });
+
+  app.put('/api/vision-settings', async (req, res) => {
+    if (!isAuthorized(req.headers.authorization, req.query.token, authToken)) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    try {
+      await runtime.configureVisionSettings(parseVisionSettings(req.body));
+      const settings = runtime.getVisionSettings();
+      const runtimeInfo = runtime.getRuntimeInfo();
+      // 视觉开关/模型属于运行时能力，保存后立即推送到所有已连接页面。
+      broadcast({ type: 'runtime_updated', runtime: runtimeInfo });
+      res.json({ ...settings, runtime: runtimeInfo });
+    } catch (error) {
+      res.status(400).json({ error: formatError(error) });
+    }
   });
 
   app.post('/api/provider-settings', async (req, res) => {
@@ -943,7 +1012,8 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
             const task = runtime.projects.getTask(routedTaskId);
             if (task?.title === UNTITLED_TASK_TITLE) {
               // 先用截断标题立即重命名（不阻塞首条消息），再用 LLM 意图总结精炼。
-              const fallbackTitle = deriveTaskTitle(message.text);
+              const titleInput = message.text || '图片分析';
+              const fallbackTitle = deriveTaskTitle(titleInput);
               const renamed = await runtime.projects.renameTask(routedTaskId, fallbackTitle);
               // 必须带上 running/model：客户端用 task_renamed 覆盖任务条目，
               // 缺 model 会导致任务模型选择回退为全局默认（deepseek-v4-flash）。
@@ -954,7 +1024,7 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
                   model: `${conversation.providerInstance.providerId}:${conversation.providerInstance.getModel()}`,
                 }),
               });
-              void refineTaskTitleWithLlm(conversation, routedTaskId, fallbackTitle, message.text);
+              void refineTaskTitleWithLlm(conversation, routedTaskId, fallbackTitle, titleInput);
             }
           }
           // Run the agent loop WITHOUT blocking the message queue: while a task
@@ -962,7 +1032,7 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
           // must stay responsive so other tasks can be opened and run in
           // parallel. Each conversation guards its own prompt concurrency.
           void conversation
-            .runPrompt(message.text)
+            .runPrompt({ text: message.text, images: message.images ?? [] })
             .then(async () => {
               if (routedTaskId) await runtime.projects.touchTask(routedTaskId);
               // 执行期间若有模型被下线：任务结束后自动摘除下线模型（不打断执行，
@@ -1384,6 +1454,7 @@ function parseProviderSettings(value: unknown): ProviderSettingsInput {
       const model = entry as Record<string, unknown>;
       const contextWindow = model.contextWindow;
       const maxOutputTokens = model.maxOutputTokens;
+      const imageInput = model.imageInput;
       if (
         typeof model.id !== 'string' ||
         !model.id.trim() ||
@@ -1397,7 +1468,8 @@ function parseProviderSettings(value: unknown): ProviderSettingsInput {
           (typeof maxOutputTokens !== 'number' ||
             !Number.isInteger(maxOutputTokens) ||
             maxOutputTokens < 1 ||
-            maxOutputTokens > 10_000_000))
+            maxOutputTokens > 10_000_000)) ||
+        (imageInput !== undefined && typeof imageInput !== 'boolean')
       ) {
         throw new Error('models 格式无效。');
       }
@@ -1408,6 +1480,34 @@ function parseProviderSettings(value: unknown): ProviderSettingsInput {
     result.thinkingEffort = parseReasoningEffort(input.thinkingEffort);
   }
   return result;
+}
+
+function parseVisionSettings(value: unknown): VisionSettingsInput {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('视觉模型配置格式无效。');
+  }
+  const input = value as Record<string, unknown>;
+  if (typeof input.enabled !== 'boolean') throw new Error('enabled 格式无效。');
+  if (typeof input.prompt !== 'string') throw new Error('prompt 格式无效。');
+  if (
+    input.provider !== undefined &&
+    input.provider !== 'anthropic' &&
+    input.provider !== 'openai' &&
+    input.provider !== 'ollama' &&
+    input.provider !== 'deepseek' &&
+    input.provider !== 'volcano'
+  ) {
+    throw new Error('不支持的视觉模型供应商。');
+  }
+  if (input.model !== undefined && typeof input.model !== 'string') {
+    throw new Error('model 格式无效。');
+  }
+  return {
+    enabled: input.enabled,
+    provider: input.provider as VisionSettingsInput['provider'],
+    model: input.model,
+    prompt: input.prompt,
+  };
 }
 
 function parseProviderId(value: string): ProviderSettingsInput['provider'] {

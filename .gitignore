@@ -11,6 +11,7 @@ apps/desktop/build/*
 !apps/desktop/build/icon.png
 !apps/desktop/build/license.txt
 out/
+.playwright-browsers/
 .turbo/
 .cache/
 coverage/

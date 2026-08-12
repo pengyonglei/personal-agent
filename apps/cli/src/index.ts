@@ -1,6 +1,11 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
-import { loadConfig, loadPromptSettings, mergeCliFlags, type StatsConfig } from '@personal-agent/config';
+import {
+  loadConfig,
+  loadPromptSettings,
+  mergeCliFlags,
+  type StatsConfig,
+} from '@personal-agent/config';
 import { ProviderRegistry, type LLMProvider } from '@personal-agent/provider';
 import {
   AgentLoop,
@@ -16,6 +21,7 @@ import {
 } from '@personal-agent/core';
 import {
   BaseTool,
+  closeBrowserSession,
   describeShell,
   registerBuiltinTools,
   setDefaultShellPreference,
@@ -23,6 +29,7 @@ import {
   type ToolContext,
   type ToolResult,
 } from '@personal-agent/tool';
+import { FrontendValidationGate } from '@personal-agent/validation';
 import {
   createLogger,
   setLogLevel,
@@ -46,6 +53,12 @@ import {
 } from '@personal-agent/stats';
 import { MCPClientManager } from '@personal-agent/mcp';
 import { PluginLoader, parseSkillReferences } from '@personal-agent/plugin';
+import {
+  runFrontendValidation,
+  VALIDATION_CONFIG_PATH,
+  validationExitCode,
+  type ValidationProfileName,
+} from '@personal-agent/validation';
 import * as readline from 'node:readline';
 
 const log = createLogger('cli');
@@ -106,6 +119,41 @@ function buildPricingMap(provider: { getModelList?: () => ModelInfo[] }): Pricin
 // ---------------------------------------------------------------------------
 
 const program = new Command();
+
+program
+  .command('validate')
+  .description('Validate a local frontend project with Playwright')
+  .option('--profile <profile>', 'Validation profile: quick or full', 'quick')
+  .option(
+    '-c, --config <path>',
+    `Validation config path (default: ${VALIDATION_CONFIG_PATH})`,
+  )
+  .option('--json', 'Print the full machine-readable validation report')
+  .action(async (options: { profile: string; config?: string; json?: boolean }) => {
+    if (options.profile !== 'quick' && options.profile !== 'full') {
+      console.error(`Unknown validation profile: ${options.profile}. Use quick or full.`);
+      process.exitCode = 2;
+      return;
+    }
+    const result = await runFrontendValidation({
+      workingDirectory: process.cwd(),
+      configPath: options.config,
+      profile: options.profile as ValidationProfileName,
+      onProgress: options.json ? undefined : (message) => console.log(`[validate] ${message}`),
+    });
+    if (options.json) {
+      console.log(JSON.stringify(result, null, 2));
+    } else {
+      console.log(result.summary);
+      for (const issue of result.issues) {
+        console.error(
+          `- [${issue.source}] ${issue.scenario ? `${issue.scenario}: ` : ''}${issue.message}`,
+        );
+      }
+      console.log(`Artifacts: ${result.artifactDirectory}`);
+    }
+    process.exitCode = validationExitCode(result.status);
+  });
 
 program
   .name('personal-agent')
@@ -250,11 +298,10 @@ program
             contextAssembler.addSection({
               name: 'automatic-memory-context',
               priority: 6,
-              content: (promptOverrides?.['memory-inject-cli'] ??
-                '## Remembered Context (auto-injected from memory)\n\n${memory}\n\nUse this context when relevant to the user\'s request.').replace(
-                '${memory}',
-                () => context,
-              ),
+              content: (
+                promptOverrides?.['memory-inject-cli'] ??
+                "## Remembered Context (auto-injected from memory)\n\n${memory}\n\nUse this context when relevant to the user's request."
+              ).replace('${memory}', () => context),
             });
           }
         } catch {
@@ -273,11 +320,10 @@ program
           name: 'active-plugin-skills',
           priority: 7,
           content: skills
-            .map(
-              (skill) =>
-                (promptOverrides?.['skills-inject-cli'] ?? '## Skill: ${name}\n\n${content}')
-                  .replaceAll('${name}', () => skill.name)
-                  .replaceAll('${content}', () => skill.content),
+            .map((skill) =>
+              (promptOverrides?.['skills-inject-cli'] ?? '## Skill: ${name}\n\n${content}')
+                .replaceAll('${name}', () => skill.name)
+                .replaceAll('${content}', () => skill.content),
             )
             .join('\n\n'),
         });
@@ -362,6 +408,7 @@ program
     );
     const planEngine = new PlanModeEngine();
     const planModeState: PlanModeState = { active: false };
+    const frontendValidationGate = new FrontendValidationGate();
 
     // Interactive ask_user wiring: readline fallback by default; TUI mode
     // replaces this with an ink QuestionCard bridge (see runTuiMode).
@@ -430,6 +477,10 @@ program
           input,
         });
         const result = await toolExecutor.executeWithPermission(name, input, toolCtx, true);
+        for (const path of result.metadata?.fileModified ?? []) {
+          frontendValidationGate.recordFile(path);
+        }
+        if (name === 'frontend_validate') frontendValidationGate.recordValidation(result.success);
         await pluginLoader.dispatchHook('on_tool_result', {
           sessionId: session.getSessionId(),
           toolName: name,
@@ -446,6 +497,10 @@ program
           return true;
         }
         return promptUserPermission(toolName, params);
+      },
+      drainPendingUserMessages: () => {
+        const followup = frontendValidationGate.requiredFollowup();
+        return followup ? [followup] : [];
       },
     });
 
@@ -555,6 +610,7 @@ When the user is satisfied, they will use /exit-plan to leave plan mode. Then yo
         sessionId: session.getSessionId(),
       });
       await subAgentManager.cancelAll();
+      await closeBrowserSession(session.getSessionId());
       await mcpManager.disconnectAll();
       await provider.dispose();
       process.exit(0);
@@ -582,6 +638,7 @@ When the user is satisfied, they will use /exit-plan to leave plan mode. Then yo
             sessionId: session.getSessionId(),
           });
           await subAgentManager.cancelAll();
+          await closeBrowserSession(session.getSessionId());
           await mcpManager.disconnectAll();
         },
       });
@@ -634,6 +691,7 @@ When the user is satisfied, they will use /exit-plan to leave plan mode. Then yo
               sessionId: session.getSessionId(),
             });
             await subAgentManager.cancelAll();
+            await closeBrowserSession(session.getSessionId());
             await mcpManager.disconnectAll();
             await provider.dispose();
             rl.close();
@@ -673,6 +731,7 @@ When the user is satisfied, they will use /exit-plan to leave plan mode. Then yo
         sessionId: session.getSessionId(),
       });
       await subAgentManager.cancelAll();
+      await closeBrowserSession(session.getSessionId());
       await mcpManager.disconnectAll();
       await provider.dispose();
       process.exit(0);
@@ -1290,16 +1349,14 @@ When the user is satisfied with the plan, they will use /exit-plan to leave plan
         ctx.contextAssembler.addSection({
           name: 'plan-execution',
           priority: 5,
-          content:
-            (ctx.promptOverrides?.['plan-execution-cli'] ??
-              `## Approved Plan
+          content: (
+            ctx.promptOverrides?.['plan-execution-cli'] ??
+            `## Approved Plan
 
 ${'${plan}'}
 
-Execute this plan in dependency order. Call update_plan_step before starting each step and again when it completes, fails, or is skipped.`).replace(
-              '${plan}',
-              () => formatPlan(approvedPlan),
-            ),
+Execute this plan in dependency order. Call update_plan_step before starting each step and again when it completes, fails, or is skipped.`
+          ).replace('${plan}', () => formatPlan(approvedPlan)),
         });
       }
       return {
@@ -1420,4 +1477,4 @@ function timeAgo(date: Date): string {
 // Entry point
 // ---------------------------------------------------------------------------
 
-program.parse();
+await program.parseAsync();

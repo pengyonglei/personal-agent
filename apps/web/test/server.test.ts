@@ -339,6 +339,179 @@ test('remote listening requires an explicit access token', async () => {
   await assert.rejects(createWebServer({ host: '0.0.0.0', port: 0 }), /PERSONAL_AGENT_WEB_TOKEN/);
 });
 
+test('global vision settings only expose configured ImageInput models', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'personal-agent-web-vision-'));
+  const configPath = join(directory, 'config.yaml');
+  await writeFile(
+    configPath,
+    [
+      'providers:',
+      '  active: openai',
+      '  openai:',
+      '    apiKey: test-local-key',
+      '    defaultModel: gpt-4o',
+      '    models: [gpt-4o, gpt-4o-mini]',
+      'vision:',
+      '  enabled: false',
+      '  prompt: 检查页面布局',
+      'memory:',
+      '  enabled: false',
+      'plugins:',
+      '  enabled: false',
+      'mcp:',
+      '  servers: []',
+    ].join('\n'),
+    'utf8',
+  );
+  await mkdir(join(directory, '.personal-agent'));
+  await writeFile(
+    join(directory, '.personal-agent', 'config.yaml'),
+    ['vision:', '  enabled: true', '  provider: deepseek', '  model: ignored-project-model'].join(
+      '\n',
+    ),
+    'utf8',
+  );
+  const instance = await createWebServer({
+    host: '127.0.0.1',
+    port: 0,
+    workingDirectory: directory,
+    configPath,
+    projectStoragePath: join(directory, 'projects.json'),
+  });
+
+  try {
+    const settingsResponse = await fetch(
+      `http://127.0.0.1:${instance.port}/api/vision-settings`,
+    );
+    assert.equal(settingsResponse.status, 200);
+    const settings = (await settingsResponse.json()) as {
+      enabled: boolean;
+      prompt: string;
+      models: Array<{ provider: string; model: string }>;
+    };
+    assert.equal(settings.enabled, false);
+    assert.equal(settings.prompt, '检查页面布局');
+    assert.deepEqual(settings.models, [
+      {
+        provider: 'openai',
+        providerName: 'OpenAI (GPT)',
+        model: 'gpt-4o',
+        displayName: 'GPT-4o',
+      },
+    ]);
+
+    const configureOllamaResponse = await fetch(
+      `http://127.0.0.1:${instance.port}/api/provider-settings`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: 'ollama',
+          activate: false,
+          baseURL: 'http://localhost:11434',
+          defaultModel: 'qwen2.5vl:7b',
+          models: [
+            { id: 'qwen2.5vl:7b', imageInput: true },
+            { id: 'qwen3:8b', imageInput: false },
+          ],
+        }),
+      },
+    );
+    assert.equal(configureOllamaResponse.status, 200);
+    const configuredOllama = (await configureOllamaResponse.json()) as {
+      settings: {
+        providers: Record<string, { models: Array<string | { id: string; imageInput?: boolean }> }>;
+      };
+    };
+    assert.deepEqual(configuredOllama.settings.providers.ollama.models, [
+      { id: 'qwen2.5vl:7b', imageInput: true },
+      { id: 'qwen3:8b', imageInput: false },
+    ]);
+
+    const refreshedVisionResponse = await fetch(
+      `http://127.0.0.1:${instance.port}/api/vision-settings`,
+    );
+    assert.equal(refreshedVisionResponse.status, 200);
+    const refreshedVision = (await refreshedVisionResponse.json()) as {
+      models: Array<{ provider: string; model: string }>;
+    };
+    assert.deepEqual(refreshedVision.models, [
+      {
+        provider: 'openai',
+        providerName: 'OpenAI (GPT)',
+        model: 'gpt-4o',
+        displayName: 'GPT-4o',
+      },
+      {
+        provider: 'ollama',
+        providerName: 'Ollama',
+        model: 'qwen2.5vl:7b',
+        displayName: 'qwen2.5vl:7b',
+      },
+    ]);
+
+    const saveResponse = await fetch(
+      `http://127.0.0.1:${instance.port}/api/vision-settings`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          enabled: true,
+          provider: 'openai',
+          model: 'gpt-4o',
+          prompt: '重点检查遮挡和文本裁切',
+        }),
+      },
+    );
+    assert.equal(saveResponse.status, 200);
+    const saved = (await saveResponse.json()) as {
+      enabled: boolean;
+      provider: string;
+      model: string;
+      prompt: string;
+      runtime: { visionReady: boolean };
+    };
+    assert.deepEqual(
+      {
+        enabled: saved.enabled,
+        provider: saved.provider,
+        model: saved.model,
+        prompt: saved.prompt,
+      },
+      {
+        enabled: true,
+        provider: 'openai',
+        model: 'gpt-4o',
+        prompt: '重点检查遮挡和文本裁切',
+      },
+    );
+    const persisted = await readFile(configPath, 'utf8');
+    assert.match(persisted, /vision:\s+[\s\S]*enabled: true/);
+    assert.match(persisted, /model: gpt-4o/);
+    assert.match(persisted, /apiKey: test-local-key/);
+    assert.equal(saved.runtime.visionReady, true, '视觉设置保存响应应立即返回最新运行时能力');
+
+    const unsupportedResponse = await fetch(
+      `http://127.0.0.1:${instance.port}/api/vision-settings`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          enabled: true,
+          provider: 'openai',
+          model: 'gpt-4o-mini',
+          prompt: '检查页面布局',
+        }),
+      },
+    );
+    assert.equal(unsupportedResponse.status, 400);
+    assert.match(await unsupportedResponse.text(), /不支持图片输入/);
+  } finally {
+    await instance.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('archiving the active project switches the workspace to another project', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'personal-agent-web-archive-'));
   const configPath = join(directory, 'config.yaml');

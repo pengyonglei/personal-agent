@@ -41,3 +41,12 @@ export {
   ASK_USER_MAX_OPTIONS,
 } from './tools/web';
 export { registerBuiltinTools } from './register';
+export {
+  BrowserOpenTool,
+  BrowserSnapshotTool,
+  BrowserActTool,
+  BrowserScreenshotTool,
+  BrowserCloseTool,
+  FrontendValidateTool,
+  closeBrowserSession,
+} from './tools/browser';

@@ -32,6 +32,9 @@ extraResources:
     to: client
   - from: build/icon.ico
     to: tray-icon.ico
+  # Fixed Playwright browser revision used by frontend validation.
+  - from: .playwright-browsers
+    to: playwright-browsers
 
 win:
   executableName: PersonalAgent

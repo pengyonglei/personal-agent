@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { ProviderFeature } from '@personal-agent/shared';
 import { OllamaProvider } from '../src/ollama';
 
 test('OllamaProvider parses native NDJSON streaming responses and tool calls', async () => {
@@ -86,4 +87,55 @@ test('OllamaProvider parses native NDJSON streaming responses and tool calls', a
     assert.equal(end.stopReason, 'tool_use');
     assert.deepEqual(end.usage, { inputTokens: 12, outputTokens: 4 });
   }
+});
+
+test('OllamaProvider exposes configured image input capability and sends image data', async () => {
+  let requestBody: Record<string, unknown> | undefined;
+  const fetchMock: typeof fetch = async (_input, init) => {
+    requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return Response.json({
+      model: 'qwen2.5vl:7b',
+      message: { role: 'assistant', content: '{"passed":true,"summary":"ok"}' },
+      done: true,
+      done_reason: 'stop',
+    });
+  };
+  const provider = new OllamaProvider('qwen2.5vl:7b', 'http://ollama.test', fetchMock, [
+    { id: 'qwen2.5vl:7b', imageInput: true },
+    'qwen3:8b',
+  ]);
+
+  assert.equal(
+    provider
+      .getModelList()
+      .find((model) => model.id === 'qwen2.5vl:7b')
+      ?.features.includes(ProviderFeature.ImageInput),
+    true,
+  );
+  assert.equal(
+    provider
+      .getModelList()
+      .find((model) => model.id === 'qwen3:8b')
+      ?.features.includes(ProviderFeature.ImageInput),
+    false,
+  );
+  assert.equal(provider.supportsFeature(ProviderFeature.ImageInput), true);
+
+  await provider.chat([
+    {
+      role: 'user',
+      content: [
+        { type: 'text', text: 'Review this screenshot.' },
+        { type: 'image', source: { data: 'aW1hZ2U=', mediaType: 'image/png' } },
+      ],
+    },
+  ]);
+
+  assert.deepEqual(requestBody?.messages, [
+    {
+      role: 'user',
+      content: 'Review this screenshot.',
+      images: ['aW1hZ2U='],
+    },
+  ]);
 });

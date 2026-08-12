@@ -14,6 +14,17 @@ import type {
 
 export type PermissionMode = 'allow' | 'ask' | 'approval';
 
+export const MAX_PROMPT_IMAGES = 4;
+export const MAX_PROMPT_IMAGE_BYTES = 5 * 1024 * 1024;
+export const MAX_PROMPT_IMAGE_TOTAL_BYTES = 10 * 1024 * 1024;
+
+export interface PromptImageInput {
+  name: string;
+  mediaType: 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif';
+  /** 不含 data URL 前缀的 base64 数据。 */
+  data: string;
+}
+
 /**
  * Token usage of the current conversation relative to the active model's
  * total context window.
@@ -32,7 +43,7 @@ export interface ContextUsage {
 }
 
 export type ClientMessage =
-  | { type: 'prompt'; text: string; taskId?: string }
+  | { type: 'prompt'; text: string; images?: PromptImageInput[]; taskId?: string }
   | {
       /** 把消息「插入」到正在执行的任务循环内，作为用户的补充消息引导模型思考方向（任务空闲时等价于 prompt 直接执行）。 */
       type: 'inject_user_message';
@@ -98,6 +109,7 @@ export interface RuntimeInfo {
     provider: string;
     providerName: string;
     reasoningSupported: boolean;
+    imageInputSupported: boolean;
     reasoningEffort: ReasoningEffort;
     reasoningOptions: ReasoningEffort[];
   }>;
@@ -109,6 +121,8 @@ export interface RuntimeInfo {
   standaloneSkills: number;
   mcpServers: Array<{ name: string; connected: boolean; toolCount: number }>;
   memoryEnabled: boolean;
+  /** 全局视觉模型已启用、已选择且当前仍可用。 */
+  visionReady: boolean;
 }
 
 export interface SessionSummary {
@@ -282,12 +296,13 @@ export function parseClientMessage(raw: string): ClientMessage {
   const message = value as Record<string, unknown>;
   switch (message.type) {
     case 'prompt':
-      if (typeof message.text !== 'string' || !message.text.trim()) {
-        throw new Error('prompt.text 不能为空');
-      }
+      if (typeof message.text !== 'string') throw new Error('prompt.text 必须是字符串');
+      const images = parsePromptImages(message.images);
+      if (!message.text.trim() && images.length === 0) throw new Error('prompt 不能为空');
       return {
         type: 'prompt',
         text: message.text.trim(),
+        ...(images.length > 0 ? { images } : {}),
         taskId: parseOptionalTaskId(message),
       };
     case 'inject_user_message':
@@ -488,6 +503,58 @@ export function parseClientMessage(raw: string): ClientMessage {
     default:
       throw new Error(`不支持的消息类型: ${String(message.type)}`);
   }
+}
+
+const PROMPT_IMAGE_MEDIA_TYPES = new Set<PromptImageInput['mediaType']>([
+  'image/png',
+  'image/jpeg',
+  'image/webp',
+  'image/gif',
+]);
+
+function parsePromptImages(value: unknown): PromptImageInput[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new Error('prompt.images 必须是数组');
+  if (value.length > MAX_PROMPT_IMAGES) {
+    throw new Error(`一次最多上传 ${MAX_PROMPT_IMAGES} 张图片`);
+  }
+
+  let totalBytes = 0;
+  return value.map((entry, index) => {
+    if (!entry || typeof entry !== 'object') {
+      throw new Error(`prompt.images[${index}] 格式无效`);
+    }
+    const image = entry as Record<string, unknown>;
+    const name = typeof image.name === 'string' ? image.name.trim() : '';
+    const mediaType =
+      typeof image.mediaType === 'string' ? image.mediaType.toLowerCase() : '';
+    const data = typeof image.data === 'string' ? image.data : '';
+    if (!name || name.length > 255) throw new Error(`prompt.images[${index}].name 无效`);
+    if (!PROMPT_IMAGE_MEDIA_TYPES.has(mediaType as PromptImageInput['mediaType'])) {
+      throw new Error(`prompt.images[${index}] 不是支持的图片格式`);
+    }
+    if (
+      !data ||
+      data.length % 4 !== 0 ||
+      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(data)
+    ) {
+      throw new Error(`prompt.images[${index}].data 不是有效的 base64`);
+    }
+    const padding = data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0;
+    const bytes = (data.length / 4) * 3 - padding;
+    if (bytes > MAX_PROMPT_IMAGE_BYTES) {
+      throw new Error(`图片 ${name} 超过 5 MB 限制`);
+    }
+    totalBytes += bytes;
+    if (totalBytes > MAX_PROMPT_IMAGE_TOTAL_BYTES) {
+      throw new Error('图片总大小超过 10 MB 限制');
+    }
+    return {
+      name,
+      mediaType: mediaType as PromptImageInput['mediaType'],
+      data,
+    };
+  });
 }
 
 function parseOptionalTaskId(message: Record<string, unknown>): string | undefined {

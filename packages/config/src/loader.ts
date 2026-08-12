@@ -42,7 +42,13 @@ export function loadConfig(options: ConfigLoadOptions = {}): AppConfig {
   // Layer 2: Project config
   const projectPath = resolve(cwd, '.personal-agent', 'config.yaml');
   if (existsSync(projectPath)) {
-    config = mergeConfig(config, loadYamlFile(projectPath));
+    const projectConfig = loadYamlFile(projectPath) as Partial<AppConfig> & {
+      vision?: unknown;
+    };
+    // The visual review model is intentionally global. A repository config
+    // must not silently change the provider/model (or its billing behavior).
+    delete projectConfig.vision;
+    config = mergeConfig(config, projectConfig);
   }
 
   // Layer 3: Explicit config path

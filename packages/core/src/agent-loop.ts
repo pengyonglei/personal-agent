@@ -61,6 +61,10 @@ export interface AgentLoopConfig {
 
 export interface ModelCallDebugStart {
   callId: string;
+  /** 调用阶段；未设置时表示主 Agent 模型调用。 */
+  kind?: 'agent' | 'vision';
+  /** 面向用户的阶段名称，例如“图片视觉识别”。 */
+  label?: string;
   turnNumber: number;
   provider: string;
   model: string;
@@ -133,7 +137,10 @@ export class AgentLoop {
    * @param userInput 用户的输入消息文本
    * @returns 异步可迭代的 AgentEvent 事件流（消费方通过 for await 逐事件处理）
    */
-  async *run(userInput: string): AsyncIterable<AgentEvent> {
+  async *run(
+    userInput: string | UnifiedContentBlock[],
+    displayContent?: string | UnifiedContentBlock[],
+  ): AsyncIterable<AgentEvent> {
     // ---- 1. 重置本次运行的状态 ----
     // 确保同一 AgentLoop 实例可以安全地多次调用 run()，互不干扰
     this.turnCount = 0;
@@ -150,9 +157,20 @@ export class AgentLoop {
 
     // ---- 2. 将用户消息写入对话历史 ----
     // 该消息会在后续的上下文组装中被一起发送给模型
-    this.config.contextAssembler.addMessage({ role: 'user', content: userInput });
+    this.config.contextAssembler.addMessage({
+      role: 'user',
+      content: userInput,
+      ...(displayContent === undefined ? {} : { displayContent }),
+    });
 
-    log.info(`Starting agent loop for: "${userInput.slice(0, 100)}..."`);
+    const inputSummary =
+      typeof userInput === 'string'
+        ? userInput
+        : userInput
+            .filter((block) => block.type === 'text')
+            .map((block) => block.text)
+            .join('\n');
+    log.info(`Starting agent loop for: "${inputSummary.slice(0, 100)}..."`);
 
     try {
       // 上一轮因注入消息而延续循环的标志（详见 message_end 分支）
@@ -263,7 +281,7 @@ export class AgentLoop {
           model: provider.getModel(),
           startedAt: new Date(callStartedAt).toISOString(),
           request: {
-            messages,
+            messages: sanitizeMessagesForDebug(messages),
             tools: effectiveTools,
             options: { ...this.config.streamOptions },
           },
@@ -673,6 +691,30 @@ export class AgentLoop {
       log.warn(`Model call end hook failed: ${formatError(error)}`);
     }
   }
+}
+
+/** Debug/统计保留消息结构，但不复制 UI 展示元数据和图片 base64。 */
+function sanitizeMessagesForDebug(messages: UnifiedMessage[]): UnifiedMessage[] {
+  return messages.map((message) => {
+    const { displayContent: _displayContent, ...rest } = message;
+    return {
+      ...rest,
+      content:
+        typeof message.content === 'string'
+          ? message.content
+          : message.content.map((block) =>
+              block.type === 'image'
+                ? {
+                    ...block,
+                    source: {
+                      ...block.source,
+                      data: `[base64 已省略，${Math.round((block.source.data.length * 3) / 4)} bytes]`,
+                    },
+                  }
+                : block,
+            ),
+    };
+  });
 }
 
 function createAssistantContent(text: string, thinking: string): string | UnifiedContentBlock[] {

@@ -24,6 +24,12 @@ export interface ToolContext {
   onProgress?: (message: string) => void;
   /** Interactive question handler (ask_user). Absent in non-interactive contexts. */
   askUser?: (question: UserQuestion, signal?: AbortSignal) => Promise<UserAnswer>;
+  /** Optional independent ImageInput model used by frontend screenshot review. */
+  reviewImage?: (input: {
+    screenshotPath: string;
+    scenario: string;
+    prompt: string;
+  }) => Promise<{ passed: boolean; summary: string }>;
 }
 
 export interface Tool {

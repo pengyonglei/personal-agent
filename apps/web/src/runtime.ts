@@ -5,6 +5,7 @@ import {
   removeProviderSettings,
   resolveWritableConfigPath,
   saveProviderSettings,
+  saveVisionSettings,
   type AppConfig,
   type ModelConfig,
   type ProviderId,
@@ -20,6 +21,8 @@ import {
   createMemoryTools,
   createPlanTools,
   formatPlan,
+  type ModelCallDebugEnd,
+  type ModelCallDebugStart,
   type Plan,
 } from '@personal-agent/core';
 import { MCPClientManager } from '@personal-agent/mcp';
@@ -28,6 +31,7 @@ import { FileSystemMemoryStore } from '@personal-agent/memory';
 import { PluginLoader, parseSkillReferences, type Skill } from '@personal-agent/plugin';
 import {
   AnthropicProvider,
+  FakeValidationProvider,
   DeepSeekProvider,
   normalizeDeepSeekModel,
   OllamaProvider,
@@ -51,6 +55,7 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import {
   describeShell,
+  closeBrowserSession,
   registerBuiltinTools,
   setDefaultShellPreference,
   type PermissionManager,
@@ -61,18 +66,31 @@ import {
 import type {
   ContextUsage,
   PermissionMode,
+  PromptImageInput,
   RuntimeInfo,
   ServerMessage,
   SessionSummary,
 } from './protocol';
+import { prepareUserPromptInput } from './vision-input';
 import { planToMarkdown, type PlanDoc } from './plan-doc';
 import { PlanStore } from './plan-store';
 import { FileChangeStore } from './file-change-store';
+import { FrontendValidationGate } from '@personal-agent/validation';
 
 const log = createLogger('web-runtime');
 /** Reserved output tokens used by TokenBudget (must stay in sync with its default). */
 const TOKEN_BUDGET_RESERVED_OUTPUT = 8192;
-const SAFE_TOOLS = ['read_file', 'list_directory', 'glob', 'grep', 'todo_write', 'ask_user'];
+const SAFE_TOOLS = [
+  'read_file',
+  'list_directory',
+  'glob',
+  'grep',
+  'todo_write',
+  'ask_user',
+  'browser_snapshot',
+  'browser_screenshot',
+  'browser_close',
+];
 const PLAN_MODE_TOOLS = new Set([
   'read_file',
   'list_directory',
@@ -127,6 +145,23 @@ export interface ProviderSettingsInfo {
       reasoningSupported: boolean;
     }
   >;
+}
+
+export interface VisionSettingsInput {
+  enabled: boolean;
+  provider?: ProviderId;
+  model?: string;
+  prompt: string;
+}
+
+export interface VisionSettingsInfo extends VisionSettingsInput {
+  configPath: string;
+  models: Array<{
+    provider: ProviderId;
+    providerName: string;
+    model: string;
+    displayName: string;
+  }>;
 }
 
 export class WebAgentRuntime {
@@ -295,6 +330,12 @@ export class WebAgentRuntime {
 
     try {
       this.providerRegistry = await ProviderRegistry.fromConfig(this.config);
+      if (process.env.PERSONAL_AGENT_FAKE_PROVIDER === '1') {
+        const fake = new FakeValidationProvider();
+        await fake.initialize();
+        this.providerRegistry.register(fake);
+        this.providerRegistry.setActive(fake.providerId);
+      }
       this.provider =
         this.providerRegistry.getActiveProviderId() !== null
           ? this.providerRegistry.getActive()
@@ -429,6 +470,7 @@ export class WebAgentRuntime {
             provider: provider.providerId,
             providerName: provider.displayName,
             reasoningSupported,
+            imageInputSupported: model.features.includes(ProviderFeature.ImageInput),
             reasoningEffort: reasoningSupported
               ? resolveProviderReasoningEffort(providerId, this.config.providers[providerId])
               : 'off',
@@ -456,6 +498,14 @@ export class WebAgentRuntime {
       standaloneSkills: this.pluginLoader.getStandaloneSkills().length,
       mcpServers: this.mcpManager.listServers(),
       memoryEnabled: this.memoryStore !== null,
+      visionReady:
+        this.config.vision.enabled &&
+        Boolean(this.config.vision.provider && this.config.vision.model) &&
+        this.getEligibleVisionModels().some(
+          (candidate) =>
+            candidate.provider === this.config.vision.provider &&
+            candidate.model === this.config.vision.model,
+        ),
     };
   }
 
@@ -494,6 +544,79 @@ export class WebAgentRuntime {
       configPath: resolveWritableConfigPath(this.configPath),
       providers,
     };
+  }
+
+  getVisionSettings(): VisionSettingsInfo {
+    return {
+      enabled: this.config.vision.enabled,
+      provider: this.config.vision.provider,
+      model: this.config.vision.model,
+      prompt: this.config.vision.prompt,
+      configPath: resolveWritableConfigPath(this.configPath),
+      models: this.getEligibleVisionModels(),
+    };
+  }
+
+  async configureVisionSettings(input: VisionSettingsInput): Promise<void> {
+    const prompt = input.prompt.trim();
+    const model = input.model?.trim();
+    if (!prompt) throw new Error('视觉审查提示词不能为空。');
+    if (prompt.length > 4000) throw new Error('视觉审查提示词不能超过 4000 个字符。');
+    if (Boolean(input.provider) !== Boolean(model)) {
+      throw new Error('视觉供应商和模型必须同时选择。');
+    }
+    if (input.enabled && (!input.provider || !model)) {
+      throw new Error('启用视觉审查前必须选择支持图片输入的模型。');
+    }
+    if (
+      input.provider &&
+      model &&
+      !this.getEligibleVisionModels().some(
+        (candidate) => candidate.provider === input.provider && candidate.model === model,
+      )
+    ) {
+      throw new Error('所选模型未配置、已不可用或不支持图片输入。');
+    }
+
+    const next = {
+      enabled: input.enabled,
+      provider: input.provider,
+      model,
+      prompt,
+    };
+    await saveVisionSettings(next, this.configPath);
+    this.config.vision = next;
+  }
+
+  private getEligibleVisionModels(): VisionSettingsInfo['models'] {
+    const providers = this.providerRegistry?.listAll() ?? [];
+    return providers.flatMap((provider) => {
+      if (!isProviderId(provider.providerId)) return [];
+      const providerId = provider.providerId;
+      const configured = this.config.providers[providerId];
+      const defaults = getProviderDefaults(providerId);
+      const allowed = new Set(
+        normalizeModelList(
+          configured?.models ?? defaults.models,
+          configured?.defaultModel ?? defaults.defaultModel,
+        ).map((entry) =>
+          normalizeProviderModel(providerId, typeof entry === 'string' ? entry : entry.id),
+        ),
+      );
+      return provider
+        .getModelList()
+        .filter(
+          (model) =>
+            allowed.has(normalizeProviderModel(providerId, model.id)) &&
+            model.features.includes(ProviderFeature.ImageInput),
+        )
+        .map((model) => ({
+          provider: providerId,
+          providerName: provider.displayName,
+          model: model.id,
+          displayName: model.displayName,
+        }));
+    });
   }
 
   async configureProvider(input: ProviderSettingsInput): Promise<void> {
@@ -580,6 +703,7 @@ export class WebAgentRuntime {
     this.providerRegistry = nextRegistry;
     this.provider = nextProvider;
     this.initializationError = undefined;
+    await this.clearInvalidVisionSelection();
 
     // 编辑/新建 provider 信息不影响任何会话：只作废旧实例池（之后新建的
     // 会话会用到新配置），现有会话保持各自的模型实例与选择不变，让用户
@@ -630,9 +754,23 @@ export class WebAgentRuntime {
     this.initializationError = nextProvider
       ? undefined
       : '未配置 LLM Provider。请在设置中添加一个模型供应商。';
+    await this.clearInvalidVisionSelection();
 
     await this.invalidateProviderInstances(providerId, nextProvider);
     await previousRegistry?.disposeAll();
+  }
+
+  private async clearInvalidVisionSelection(): Promise<void> {
+    const vision = this.config.vision;
+    if (!vision.enabled || !vision.provider || !vision.model) return;
+    const valid = this.getEligibleVisionModels().some(
+      (candidate) => candidate.provider === vision.provider && candidate.model === vision.model,
+    );
+    if (valid) return;
+    vision.enabled = false;
+    vision.provider = undefined;
+    vision.model = undefined;
+    await saveVisionSettings(vision, this.configPath);
   }
 
   async configureRuntimeModel(input: RuntimeModelSettingsInput): Promise<void> {
@@ -1036,8 +1174,14 @@ export class WebAgentRuntime {
       workingDirectory: conversation.workingDirectory,
       signal,
       askUser: (question, questionSignal) => conversation.askUser(question, questionSignal),
+      reviewImage: this.config.vision.enabled
+        ? (reviewInput) => this.reviewValidationImage(conversation.workingDirectory, reviewInput)
+        : undefined,
     };
     const result = await this.toolExecutor.executeWithPermission(name, input, context, true);
+    if (name === 'frontend_validate') {
+      conversation.recordFrontendValidation(result.success);
+    }
     await this.pluginLoader.dispatchHook('on_tool_result', {
       sessionId: conversation.sessionId,
       toolName: name,
@@ -1052,6 +1196,75 @@ export class WebAgentRuntime {
       }
     }
     return result;
+  }
+
+  private async reviewValidationImage(
+    _workingDirectory: string,
+    input: { screenshotPath: string; scenario: string; prompt: string },
+  ): Promise<{ passed: boolean; summary: string }> {
+    const vision = this.config.vision;
+    const provider = await this.getConfiguredVisionProvider();
+    const image = (await readFile(input.screenshotPath)).toString('base64');
+    const response = await provider.chat(
+      [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: `${vision.prompt}\nScenario: ${input.scenario}\nReturn JSON only: {"passed":boolean,"summary":string}`,
+            },
+            { type: 'image', source: { data: image, mediaType: 'image/png' } },
+          ],
+        },
+      ],
+      [],
+      { jsonMode: true, maxTokens: 600 },
+    );
+    const text = response.content
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text)
+      .join('\n');
+    const parsed = JSON.parse(text) as { passed?: unknown; summary?: unknown };
+    if (typeof parsed.passed !== 'boolean' || typeof parsed.summary !== 'string') {
+      throw new Error('Visual model returned an invalid review payload.');
+    }
+    return { passed: parsed.passed, summary: parsed.summary };
+  }
+
+  /** 返回全局视觉模型实例，并在配置失效时给出面向用户的明确错误。 */
+  private async getConfiguredVisionProvider(): Promise<LLMProvider> {
+    const vision = this.config.vision;
+    if (!vision.enabled) {
+      throw new Error('视觉模型未启用，请前往“设置 → 通用 → 视觉模型”启用。');
+    }
+    if (!vision.provider || !vision.model) {
+      throw new Error('尚未配置视觉模型，请前往“设置 → 通用 → 视觉模型”完成配置。');
+    }
+    const eligible = this.getEligibleVisionModels().some(
+      (candidate) => candidate.provider === vision.provider && candidate.model === vision.model,
+    );
+    if (!eligible) {
+      throw new Error('已配置的视觉模型不可用或未标记为支持图片输入，请检查供应商模型配置。');
+    }
+    return this.getProviderForTask(vision.provider, vision.model);
+  }
+
+  async prepareUserPrompt(
+    conversation: WebConversation,
+    input: { text: string; images: PromptImageInput[] },
+    cleanedText: string,
+  ) {
+    return prepareUserPromptInput({
+      text: cleanedText,
+      displayText: input.text,
+      images: input.images,
+      currentProvider: conversation.providerInstance,
+      visionEnabled: this.config.vision.enabled,
+      getVisionProvider: () => this.getConfiguredVisionProvider(),
+      onModelCallStart: (call) => conversation.recordModelCallStart(call),
+      onModelCallEnd: (call) => conversation.recordModelCallEnd(call),
+    });
   }
 
   /** write_file / edit_file 执行前读取目标文件内容（不存在视为空文件）。 */
@@ -1209,6 +1422,8 @@ export class WebConversation {
    * 吸取（drainPendingUserMessages）写入历史；空闲时注入等价于直接执行。
    */
   private injectedUserMessages: string[] = [];
+  /** Smart post-edit gate: visible frontend changes must carry validation evidence. */
+  private readonly frontendValidationGate = new FrontendValidationGate();
 
   get providerInstance(): LLMProvider {
     return this.provider;
@@ -1216,6 +1431,17 @@ export class WebConversation {
 
   getEffectiveReasoningEffort(): ReasoningEffort {
     return this.reasoningEffortOverride ?? this.runtime.getReasoningEffort();
+  }
+
+  /** 统一记录并推送主模型和视觉预处理模型的 Debug 调用。 */
+  recordModelCallStart(call: ModelCallDebugStart): void {
+    this.statsRecorder?.onModelCallStart(call);
+    this.emit({ type: 'llm_call_start', call });
+  }
+
+  recordModelCallEnd(call: ModelCallDebugEnd): void {
+    this.statsRecorder?.onModelCallEnd(call);
+    this.emit({ type: 'llm_call_end', call });
   }
 
   /** Switch this task's provider/effort and rebuild the agent loop. */
@@ -1269,16 +1495,19 @@ export class WebConversation {
     this.publishContextUsage();
   }
 
-  async runPrompt(input: string): Promise<void> {
+  async runPrompt(input: string | { text: string; images: PromptImageInput[] }): Promise<void> {
     if (this.closed) throw new Error('Conversation is closed');
     if (this.busy) throw new Error('Agent 正在处理上一条消息');
 
     this.busy = true;
     this.emit({ type: 'busy', busy: true });
     try {
-      await this.runtime.dispatchUserInput(this, input);
-      const cleanedInput = await this.runtime.injectPromptContext(this, input);
-      for await (const event of this.agentLoop.run(cleanedInput)) {
+      const normalizedInput =
+        typeof input === 'string' ? { text: input, images: [] as PromptImageInput[] } : input;
+      await this.runtime.dispatchUserInput(this, normalizedInput.text);
+      const cleanedInput = await this.runtime.injectPromptContext(this, normalizedInput.text);
+      const prepared = await this.runtime.prepareUserPrompt(this, normalizedInput, cleanedInput);
+      for await (const event of this.agentLoop.run(prepared.modelContent, prepared.displayContent)) {
         this.forwardAgentEvent(event);
       }
       this.session.replaceMessages(this.context.getHistory());
@@ -1313,6 +1542,11 @@ export class WebConversation {
   /** 记录本次任务执行中修改的文件（执行结束后随 run_changes 消息推送）。 */
   recordFileChange(path: string, oldContent: string, newContent: string): void {
     this.pendingFileChanges.push({ path, oldContent, newContent });
+    this.frontendValidationGate.recordFile(path);
+  }
+
+  recordFrontendValidation(success: boolean): void {
+    this.frontendValidationGate.recordValidation(success);
   }
 
   /** 把本次执行收集到的文件修改推送给前端（一次用户请求的修改清单）。
@@ -1388,6 +1622,8 @@ export class WebConversation {
   drainInjectedUserMessages(): string[] {
     const pending = this.injectedUserMessages;
     this.injectedUserMessages = [];
+    const validation = this.frontendValidationGate.requiredFollowup();
+    if (validation) pending.push(validation);
     return pending;
   }
 
@@ -1632,6 +1868,7 @@ Execute in dependency order and use update_plan_step to report progress.`
     this.interrupt();
     if (!this.busy) await this.checkpoint();
     await this.runtime.dispatchSessionEnd(this);
+    await closeBrowserSession(this.sessionId);
     this.runtime.detachConversation(this);
   }
 
@@ -1691,12 +1928,10 @@ Execute in dependency order and use update_plan_step to report progress.`
         reasoningEffort: this.getEffectiveReasoningEffort(),
       },
       onModelCallStart: (call) => {
-        this.statsRecorder?.onModelCallStart(call);
-        this.emit({ type: 'llm_call_start', call });
+        this.recordModelCallStart(call);
       },
       onModelCallEnd: (call) => {
-        this.statsRecorder?.onModelCallEnd(call);
-        this.emit({ type: 'llm_call_end', call });
+        this.recordModelCallEnd(call);
         // 每次模型请求结束立即刷新“已使用上下文”：即使一次任务执行中
         // 会循环调用多次模型，UI 上的 token 数也能实时更新。
         if (call.status === 'completed' && call.response.usage) {
@@ -1870,6 +2105,16 @@ function getProviderDefaults(provider: ProviderId): {
         thinkingEffort: 'off',
       };
   }
+}
+
+function isProviderId(value: string): value is ProviderId {
+  return (
+    value === 'anthropic' ||
+    value === 'openai' ||
+    value === 'ollama' ||
+    value === 'deepseek' ||
+    value === 'volcano'
+  );
 }
 
 function supportsRuntimeReasoning(providerId: ProviderId, model?: ModelInfo): boolean {

@@ -80,6 +80,7 @@ import {
   MoreOutlined,
   OrderedListOutlined,
   PlayCircleOutlined,
+  PictureOutlined,
   PlusOutlined,
   QuestionCircleOutlined,
   ReloadOutlined,
@@ -120,6 +121,12 @@ import type {
   ServerMessage,
   StoredFileChangeBatch,
   TaskSummary,
+} from '../../src/protocol';
+import {
+  MAX_PROMPT_IMAGES,
+  MAX_PROMPT_IMAGE_BYTES,
+  MAX_PROMPT_IMAGE_TOTAL_BYTES,
+  type PromptImageInput,
 } from '../../src/protocol';
 import { assistantResponseId } from './timeline';
 import type { PlanDoc } from './plan-doc';
@@ -174,6 +181,7 @@ interface MessageTimelineItem {
   kind: 'message';
   role: 'user' | 'assistant' | 'system';
   text: string;
+  images?: Array<{ name: string; src: string }>;
   time: string;
   streaming?: boolean;
   error?: boolean;
@@ -268,6 +276,8 @@ const PLAN_STATUS_TAG_COLORS: Record<string, string> = {
 
 interface ModelCallTrace {
   callId: string;
+  kind?: 'agent' | 'vision';
+  label?: string;
   turnNumber: number;
   provider: string;
   model: string;
@@ -299,6 +309,7 @@ interface ProviderModelRow {
   id: string;
   contextWindow?: number;
   maxOutputTokens?: number;
+  imageInput?: boolean;
 }
 
 interface ProviderFormValues {
@@ -331,6 +342,20 @@ interface ProviderSettingsInfo {
       reasoningSupported: boolean;
     }
   >;
+}
+
+interface VisionSettingsInfo {
+  enabled: boolean;
+  provider?: ProviderId;
+  model?: string;
+  prompt: string;
+  configPath: string;
+  models: Array<{
+    provider: ProviderId;
+    providerName: string;
+    model: string;
+    displayName: string;
+  }>;
 }
 
 interface DirectoryEntryInfo {
@@ -578,9 +603,7 @@ function AppearanceHost() {
   useEffect(() => {
     let cancelled = false;
     apiFetch('/api/web-config')
-      .then((response) =>
-        response.ok ? (response.json() as Promise<WebConfigPayload>) : null,
-      )
+      .then((response) => (response.ok ? (response.json() as Promise<WebConfigPayload>) : null))
       .then((payload) => {
         if (cancelled || !payload) return;
         setColorMode(payload.theme);
@@ -616,7 +639,12 @@ function AppearanceHost() {
     if (!themeLoaded) return;
     const snapshot = { theme: colorMode, light: accentColors.light, dark: accentColors.dark };
     const last = lastSavedRef.current;
-    if (last && last.theme === snapshot.theme && last.light === snapshot.light && last.dark === snapshot.dark) {
+    if (
+      last &&
+      last.theme === snapshot.theme &&
+      last.light === snapshot.light &&
+      last.dark === snapshot.dark
+    ) {
       return;
     }
     const timer = setTimeout(() => {
@@ -741,6 +769,7 @@ function AgentWorkspace({
   const [activeTurnId, setActiveTurnId] = useState<string>();
   const [turnNavLeft, setTurnNavLeft] = useState(30);
   const [prompt, setPrompt] = useState('');
+  const [promptImages, setPromptImages] = useState<PromptImageInput[]>([]);
   const [starterItems, setStarterItems] = useState<StarterPrompt[]>(starterPrompts);
 
   // 右侧侧边栏：宽度（可拖拽调宽，持久化到 localStorage）
@@ -816,6 +845,7 @@ function AgentWorkspace({
   const pendingTaskDraftRef = useRef<{
     projectId: string;
     prompt?: string;
+    images?: PromptImageInput[];
     permissionMode?: PermissionMode;
     taskModel?: { provider: string; model: string };
     planMode?: boolean;
@@ -1260,7 +1290,7 @@ function AgentWorkspace({
     (
       role: MessageTimelineItem['role'],
       text: string,
-      options: Pick<MessageTimelineItem, 'streaming' | 'error'> = {},
+      options: Pick<MessageTimelineItem, 'streaming' | 'error' | 'images'> = {},
     ) => {
       const item: MessageTimelineItem = {
         id: nextId(role),
@@ -1433,6 +1463,7 @@ function AgentWorkspace({
           for (const historyMessage of incoming.messages) {
             if (historyMessage.role === 'system') continue;
             const text = extractMessageText(historyMessage);
+            const images = extractMessageImages(historyMessage);
             const thinking = extractMessageThinking(historyMessage);
             if (historyMessage.role === 'user') {
               restored.push({
@@ -1440,6 +1471,7 @@ function AgentWorkspace({
                 kind: 'message',
                 role: 'user',
                 text,
+                images,
                 time: currentTime(),
               });
               groupAssistantIndex = -1;
@@ -1598,10 +1630,11 @@ function AgentWorkspace({
           }));
           rememberActiveTask(incoming.task.id);
           if (
-            pendingTaskDraftRef.current?.prompt &&
+            (pendingTaskDraftRef.current?.prompt || pendingTaskDraftRef.current?.images?.length) &&
             pendingTaskDraftRef.current.projectId === incoming.task.projectId
           ) {
-            const initialPrompt = pendingTaskDraftRef.current.prompt;
+            const initialPrompt = pendingTaskDraftRef.current.prompt ?? '';
+            const initialImages = pendingTaskDraftRef.current.images ?? [];
             const draftTaskModel = pendingTaskDraftRef.current.taskModel;
             const draftPlanMode = pendingTaskDraftRef.current.planMode;
             pendingTaskDraftRef.current = undefined;
@@ -1619,9 +1652,18 @@ function AgentWorkspace({
             if (draftPlanMode) {
               send({ type: 'set_plan_mode', enabled: true, taskId: incoming.task.id });
             }
-            appendMessage('user', initialPrompt);
-            if (send({ type: 'prompt', text: initialPrompt, taskId: incoming.task.id }))
+            appendMessage('user', initialPrompt, { images: promptImagesForTimeline(initialImages) });
+            if (
+              send({
+                type: 'prompt',
+                text: initialPrompt,
+                images: initialImages,
+                taskId: incoming.task.id,
+              })
+            ) {
               setPrompt('');
+              setPromptImages([]);
+            }
           }
           requestAnimationFrame(() =>
             document.querySelector<HTMLTextAreaElement>('#prompt-input')?.focus(),
@@ -1688,7 +1730,16 @@ function AgentWorkspace({
           setSelectedModelCallId(incoming.call.callId);
           break;
         }
-        case 'llm_call_end':
+        case 'llm_call_end': {
+          const eventTaskId = incoming.taskId ?? stateRef.current.activeTaskId;
+          if (eventTaskId && eventTaskId !== stateRef.current.activeTaskId) {
+            const data = taskDataRef.current[eventTaskId] ?? emptyTaskSnapshot();
+            data.modelCalls = data.modelCalls.map((call) =>
+              call.callId === incoming.call.callId ? { ...call, ...incoming.call } : call,
+            );
+            taskDataRef.current[eventTaskId] = data;
+            break;
+          }
           setModelCalls((current) => {
             const next: ModelCallTrace[] = current.map((call) =>
               call.callId === incoming.call.callId ? { ...call, ...incoming.call } : call,
@@ -1697,6 +1748,7 @@ function AgentWorkspace({
             return next;
           });
           break;
+        }
         case 'thinking_delta': {
           const eventTaskId = incoming.taskId ?? stateRef.current.activeTaskId;
           if (eventTaskId && eventTaskId !== stateRef.current.activeTaskId) {
@@ -2381,20 +2433,38 @@ function AgentWorkspace({
     });
   }
 
-  function submitPrompt(value = prompt.trim()) {
+  function submitPrompt(value = prompt.trim(), images = promptImages) {
     const text = value.trim();
     const hasDraft = Boolean(pendingTaskDraftRef.current);
     if (
-      !text ||
+      (!text && images.length === 0) ||
       !stateRef.current.connected ||
       !stateRef.current.configured ||
       stateRef.current.creatingTask
     ) {
       return;
     }
+    if (images.length > 0) {
+      const selectedModel = parseRuntimeModelSelectValue(taskModelOptionValue);
+      const modelInfo = findRuntimeModel(
+        stateRef.current.runtime,
+        selectedModel?.provider,
+        selectedModel?.model,
+      );
+      if (!modelInfo?.imageInputSupported && !stateRef.current.runtime?.visionReady) {
+        messageApi.warning(
+          '当前模型不支持图片输入，请先在“设置 → 通用 → 视觉模型”中启用并配置视觉模型。',
+        );
+        return;
+      }
+    }
     // 任务执行中：不直接发送，消息进入排队队列（当前任务结束后自动按序执行，
     // 也可在输入框上方的队列浮窗中手动「插入」到当前执行循环）。
     if (!hasDraft && stateRef.current.busy) {
+      if (images.length > 0) {
+        messageApi.warning('任务执行中暂不支持图片排队，请等待当前任务完成后再发送。');
+        return;
+      }
       enqueueQueuedMessage(text);
       return;
     }
@@ -2402,7 +2472,7 @@ function AgentWorkspace({
     setSelectedModelCallId(undefined);
     const pendingTaskDraft = pendingTaskDraftRef.current;
     if (pendingTaskDraft) {
-      pendingTaskDraftRef.current = { ...pendingTaskDraft, prompt: text };
+      pendingTaskDraftRef.current = { ...pendingTaskDraft, prompt: text, images };
       patchState({ creatingTask: true });
       if (
         !send({
@@ -2417,8 +2487,11 @@ function AgentWorkspace({
       return;
     }
     followOutputRef.current = true;
-    appendMessage('user', text);
-    if (send({ type: 'prompt', text, taskId: stateRef.current.activeTaskId })) setPrompt('');
+    appendMessage('user', text, { images: promptImagesForTimeline(images) });
+    if (send({ type: 'prompt', text, images, taskId: stateRef.current.activeTaskId })) {
+      setPrompt('');
+      setPromptImages([]);
+    }
   }
 
   function discardTaskDraft() {
@@ -2884,7 +2957,7 @@ function AgentWorkspace({
   );
 
   return (
-    <Layout className="pa-shell">
+    <Layout className="pa-shell" data-testid="personal-agent-app">
       {desktop ? (
         <Sider width={280} className="pa-sidebar">
           {sidebarContent}
@@ -2940,6 +3013,7 @@ function AgentWorkspace({
               <Button
                 icon={colorMode === 'light' ? <SunOutlined /> : <MoonOutlined />}
                 onClick={onToggleColorMode}
+                data-testid="theme-toggle"
               >
                 <span className="pa-button-label">{colorMode === 'light' ? '浅色' : '深色'}</span>
               </Button>
@@ -3059,6 +3133,7 @@ function AgentWorkspace({
           <Composer
             rootPath={rootPath}
             prompt={prompt}
+            images={promptImages}
             enabled={composerEnabled}
             skills={availableSkills}
             busy={state.busy}
@@ -3092,6 +3167,7 @@ function AgentWorkspace({
             executionLabel={executionLabel}
             queuedMessages={queuedMessages}
             onPromptChange={setPrompt}
+            onImagesChange={setPromptImages}
             onSubmit={submitPrompt}
             onRemoveQueued={removeQueuedMessage}
             onInjectQueued={injectQueuedMessage}
@@ -3166,7 +3242,7 @@ function AgentWorkspace({
       ) : (
         <Drawer
           placement="right"
-          width={Math.min(inspectorWidth, Math.round(window.innerWidth * 0.92))}
+          size={Math.min(inspectorWidth, Math.round(window.innerWidth * 0.92))}
           open={state.inspectorOpen}
           onClose={() => patchState({ inspectorOpen: false })}
           className="pa-inspector pa-inspector-drawer"
@@ -3297,6 +3373,7 @@ function AgentWorkspace({
 
       <Modal
         title="设置"
+        data-testid="settings-dialog"
         open={providerModalOpen}
         onCancel={() => setProviderModalOpen(false)}
         footer={null}
@@ -3345,6 +3422,9 @@ function AgentWorkspace({
                   accentColors={accentColors}
                   onAccentColorsChange={onAccentColorsChange}
                   onResetAccent={onResetAccent}
+                  onRuntimeChange={(runtime) =>
+                    patchState({ runtime, configured: runtime.configured })
+                  }
                 />
               </section>
             )}
@@ -3501,15 +3581,24 @@ function AgentWorkspace({
                   </Form.Item>
                   <Form.Item
                     label="可选模型"
-                    extra="为每个模型配置总上下文长度与输出长度（单位 token）；留空使用内置默认值。"
+                    extra={
+                      selectedProvider === 'ollama'
+                        ? '为每个模型配置 token 限制；视觉模型请开启“图片输入”，开启后可在通用设置中选作视觉模型。'
+                        : '为每个模型配置总上下文长度与输出长度（单位 token）；留空使用内置默认值。'
+                    }
                   >
                     <Form.List name="models">
                       {(fields, { add, remove }) => (
-                        <div className="pa-model-list">
+                        <div
+                          className={`pa-model-list${
+                            selectedProvider === 'ollama' ? ' pa-model-list-ollama' : ''
+                          }`}
+                        >
                           <div className="pa-model-list-head">
                             <span>模型 ID</span>
                             <span>上下文长度</span>
                             <span>输出长度</span>
+                            {selectedProvider === 'ollama' && <span>图片输入</span>}
                             <span />
                           </div>
                           {fields.map((field) => (
@@ -3540,6 +3629,14 @@ function AgentWorkspace({
                                   style={{ width: '100%' }}
                                 />
                               </Form.Item>
+                              {selectedProvider === 'ollama' && (
+                                <Form.Item
+                                  name={[field.name, 'imageInput']}
+                                  valuePropName="checked"
+                                >
+                                  <Switch aria-label="支持图片输入" />
+                                </Form.Item>
+                              )}
                               <Button
                                 type="text"
                                 danger
@@ -3558,6 +3655,7 @@ function AgentWorkspace({
                                 id: '',
                                 contextWindow: undefined,
                                 maxOutputTokens: undefined,
+                                imageInput: false,
                               })
                             }
                           >
@@ -3909,6 +4007,7 @@ function SidebarContent({
             type="text"
             icon={<SettingOutlined />}
             aria-label="打开设置"
+            data-testid="open-settings"
             onClick={() => onOpenSettings()}
           >
             设置
@@ -4067,13 +4166,16 @@ function TurnNavigation({
   return (
     <nav className="pa-turn-nav" style={{ left }} aria-label="对话轮次导航">
       {turns.map((turn, index) => {
-        const preview = turn.text.replace(/\s+/g, ' ').trim() || '（空消息）';
+        const preview =
+          turn.text.replace(/\s+/g, ' ').trim() ||
+          turn.images?.map((image) => image.name).join('、') ||
+          '（空消息）';
         return (
           <button
             key={turn.id}
             type="button"
             className={`pa-turn-nav-item${turn.id === activeId ? ' active' : ''}`}
-            aria-label={`跳到第 ${index + 1} 轮：${turn.text}`}
+            aria-label={`跳到第 ${index + 1} 轮：${preview}`}
             onClick={() => onSelect(turn.id)}
           >
             <span className="pa-turn-nav-tip" role="tooltip">
@@ -4254,6 +4356,10 @@ function TimelineEntry({
     !system &&
     (Boolean(item.turns?.length) || Boolean(item.thinking) || Boolean(item.tools?.length));
   const copyUserMessage = (): void => {
+    if (!item.text.trim()) {
+      messageApi.info('这条消息只包含图片，没有可复制的文字。');
+      return;
+    }
     void copyTextToClipboard(item.text)
       .then(() => messageApi.success('用户输入已复制'))
       .catch(() => messageApi.error('复制失败，请手动选择文本'));
@@ -4278,12 +4384,30 @@ function TimelineEntry({
           streaming={Boolean(item.streaming)}
         />
       )}
-      {(messageText || item.text || user || system || (cards && cards.length > 0) ||
+      {(messageText ||
+        item.text ||
+        user ||
+        system ||
+        (cards && cards.length > 0) ||
         (!user && !system && typeof item.durationMs === 'number')) && (
         <div
           className={`pa-message-content${item.streaming && (messageText || item.text) ? ' streaming' : ''}`}
         >
-          {system ? item.text : <MarkdownContent text={messageText || item.text} />}
+          {user && item.images && item.images.length > 0 && (
+            <div className="pa-message-images">
+              {item.images.map((image, index) => (
+                <img
+                  key={`${image.name}-${index}`}
+                  src={image.src}
+                  alt={image.name}
+                  title={image.name}
+                />
+              ))}
+            </div>
+          )}
+          {system
+            ? item.text
+            : (messageText || item.text) && <MarkdownContent text={messageText || item.text} />}
           {!user && cards && cards.length > 0 && (
             <div className="pa-message-cards">
               {cards.map((card) => {
@@ -4329,12 +4453,9 @@ function TimelineEntry({
               })}
             </div>
           )}
-          {!user &&
-            !system &&
-            !item.streaming &&
-            typeof item.durationMs === 'number' && (
-              <div className="pa-message-duration">耗时：{formatElapsedChinese(item.durationMs)}</div>
-            )}
+          {!user && !system && !item.streaming && typeof item.durationMs === 'number' && (
+            <div className="pa-message-duration">耗时：{formatElapsedChinese(item.durationMs)}</div>
+          )}
         </div>
       )}
       {user && (
@@ -4566,8 +4687,79 @@ function ThinkingTool({ tool }: { tool: ToolTimelineItem }) {
       {askQuestion && <pre className="pa-tool-command">{askQuestion}</pre>}
       {tool.name === 'todo_write' && parseTodoTasks(tool) ? (
         <TodoTaskList tool={tool} />
+      ) : tool.metadata?.validation ? (
+        <FrontendValidationCard tool={tool} />
       ) : (
         <pre className="pa-tool-output">{tool.output}</pre>
+      )}
+    </div>
+  );
+}
+
+function FrontendValidationCard({ tool }: { tool: ToolTimelineItem }) {
+  const validation = tool.metadata?.validation;
+  if (!validation) return null;
+  const passed = validation.status === 'passed';
+  const artifactUrl = (id: string) => {
+    const token = new URLSearchParams(window.location.search).get('token');
+    const path = `/api/validation/artifacts/${encodeURIComponent(validation.projectHash)}/${encodeURIComponent(validation.runId)}/${encodeURIComponent(id)}`;
+    return token ? `${path}?token=${encodeURIComponent(token)}` : path;
+  };
+  return (
+    <div
+      className={`pa-validation-card ${validation.status}`}
+      data-testid="frontend-validation-card"
+    >
+      <div className="pa-validation-summary">
+        {passed ? <CheckCircleFilled /> : <BugOutlined />}
+        <strong>
+          {passed
+            ? '前端验证通过'
+            : validation.status === 'failed'
+              ? '前端验证失败'
+              : '验证环境异常'}
+        </strong>
+        <Tag color={passed ? 'success' : 'error'}>{validation.profile}</Tag>
+        <span>{validation.durationMs} ms</span>
+      </div>
+      <p>{validation.summary}</p>
+      <div className="pa-validation-steps">
+        {validation.steps.map((step, index) => (
+          <div key={`${index}-${step.name}`} className={step.status}>
+            {step.status === 'passed' ? <CheckCircleOutlined /> : <BugOutlined />}
+            <span>{step.name}</span>
+            <small>{step.durationMs} ms</small>
+          </div>
+        ))}
+      </div>
+      {validation.issues.length > 0 && (
+        <ul className="pa-validation-issues">
+          {validation.issues.map((issue, index) => (
+            <li key={`${index}-${issue.message}`}>
+              [{issue.source}] {issue.scenario ? `${issue.scenario}: ` : ''}
+              {issue.message}
+            </li>
+          ))}
+        </ul>
+      )}
+      {tool.metadata?.artifacts && tool.metadata.artifacts.length > 0 && (
+        <div className="pa-validation-artifacts">
+          {tool.metadata.artifacts.map((artifact) =>
+            artifact.kind === 'screenshot' ? (
+              <a key={artifact.id} href={artifactUrl(artifact.id)} target="_blank" rel="noreferrer">
+                <img src={artifactUrl(artifact.id)} alt={artifact.name} />
+                <span>{artifact.name}</span>
+              </a>
+            ) : (
+              <a key={artifact.id} href={artifactUrl(artifact.id)} target="_blank" rel="noreferrer">
+                {artifact.kind}: {artifact.name}
+              </a>
+            ),
+          )}
+        </div>
+      )}
+      {validation.vision.status === 'skipped' && validation.vision.reason && (
+        <small className="pa-validation-vision">视觉审查已降级：{validation.vision.reason}</small>
       )}
     </div>
   );
@@ -4780,6 +4972,7 @@ function AskUserCard({
 function Composer({
   rootPath,
   prompt,
+  images,
   enabled,
   skills,
   busy,
@@ -4802,6 +4995,7 @@ function Composer({
   executionLabel,
   queuedMessages,
   onPromptChange,
+  onImagesChange,
   onSubmit,
   onRemoveQueued,
   onInjectQueued,
@@ -4818,6 +5012,7 @@ function Composer({
 }: {
   rootPath: string;
   prompt: string;
+  images: PromptImageInput[];
   enabled: boolean;
   skills: SkillInfo[];
   busy: boolean;
@@ -4841,6 +5036,7 @@ function Composer({
   /** 当前任务的排队消息（任务执行中 Enter 入队，展示在输入框上方浮窗）。 */
   queuedMessages: QueuedMessage[];
   onPromptChange: (prompt: string) => void;
+  onImagesChange: (images: PromptImageInput[]) => void;
   onSubmit: (prompt?: string) => void;
   /** 删除一条排队消息。 */
   onRemoveQueued: (id: string) => void;
@@ -4857,7 +5053,9 @@ function Composer({
   onTaskModelChange: (value: string) => void;
   onReasoningChange: (effort: ReasoningEffort) => void;
 }) {
+  const { message: messageApi } = AntApp.useApp();
   const textAreaRef = useRef<TextAreaRef | null>(null);
+  const imageInputRef = useRef<HTMLInputElement | null>(null);
   /** 影子高亮层（与 TextArea 重叠，滚动同步）。 */
   const highlightRef = useRef<HTMLDivElement | null>(null);
   /** Markdown 工具栏是否展开（默认收起）。 */
@@ -4866,6 +5064,65 @@ function Composer({
   const [previewMode, setPreviewMode] = useState(false);
   /** `/` 技能选择菜单是否打开。 */
   const [skillMenuOpen, setSkillMenuOpen] = useState(false);
+
+  const selectImages = async (files: FileList | File[] | null): Promise<void> => {
+    if (!files?.length) return;
+    const candidates = Array.from(files);
+    if (images.length + candidates.length > MAX_PROMPT_IMAGES) {
+      messageApi.error(`一次最多上传 ${MAX_PROMPT_IMAGES} 张图片。`);
+      return;
+    }
+    const unsupported = candidates.find(
+      (file) => !['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(file.type),
+    );
+    if (unsupported) {
+      messageApi.error(`${unsupported.name} 不是支持的图片格式（PNG、JPEG、WebP、GIF）。`);
+      return;
+    }
+    const oversized = candidates.find((file) => file.size > MAX_PROMPT_IMAGE_BYTES);
+    if (oversized) {
+      messageApi.error(`${oversized.name} 超过 5 MB 限制。`);
+      return;
+    }
+    const totalBytes =
+      promptImagesByteLength(images) + candidates.reduce((total, file) => total + file.size, 0);
+    if (totalBytes > MAX_PROMPT_IMAGE_TOTAL_BYTES) {
+      messageApi.error('图片总大小不能超过 10 MB。');
+      return;
+    }
+    try {
+      const next = await Promise.all(candidates.map(readPromptImage));
+      onImagesChange([...images, ...next]);
+    } catch (error) {
+      messageApi.error(`读取图片失败：${formatError(error)}`);
+    }
+  };
+
+  /**
+   * 兼容用户提出的 Ctrl+C 图片粘贴习惯：仅在输入框没有选中文字时尝试读取
+   * 剪贴板图片；标准 Ctrl+V 仍由 onPaste 处理，普通文字复制行为不受影响。
+   */
+  const pasteClipboardImagesOnCopyShortcut = async (): Promise<void> => {
+    if (!navigator.clipboard?.read) return;
+    try {
+      const clipboardItems = await navigator.clipboard.read();
+      const files: File[] = [];
+      for (const item of clipboardItems) {
+        for (const type of item.types.filter((candidate) => candidate.startsWith('image/'))) {
+          const blob = await item.getType(type);
+          const extension = type.split('/')[1]?.replace('jpeg', 'jpg') || 'png';
+          files.push(
+            new File([blob], `clipboard-${Date.now()}-${files.length + 1}.${extension}`, {
+              type,
+            }),
+          );
+        }
+      }
+      if (files.length > 0) await selectImages(files);
+    } catch {
+      // 浏览器未授予剪贴板读取权限时保持标准 Ctrl+C 行为，不额外打扰用户。
+    }
+  };
 
   /** 取 TextArea 原生元素（用于读写光标/选区）。 */
   const textareaElement = (): HTMLTextAreaElement | null =>
@@ -5255,6 +5512,23 @@ function Composer({
             </Tooltip>
           </div>
         )}
+        {images.length > 0 && (
+          <div className="pa-composer-images" data-testid="prompt-image-list">
+            {images.map((image, index) => (
+              <div className="pa-composer-image" key={`${image.name}-${index}`}>
+                <img src={promptImageSrc(image)} alt={image.name} />
+                <span title={image.name}>{image.name}</span>
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<CloseOutlined />}
+                  aria-label={`移除图片 ${image.name}`}
+                  onClick={() => onImagesChange(images.filter((_, itemIndex) => itemIndex !== index))}
+                />
+              </div>
+            ))}
+          </div>
+        )}
         {previewMode ? (
           <div className="pa-composer-preview pa-message-content">
             {prompt.trim() ? (
@@ -5271,6 +5545,7 @@ function Composer({
             <TextArea
               ref={textAreaRef}
               id="prompt-input"
+              data-testid="prompt-input"
               value={prompt}
               disabled={!enabled || creatingTask || Boolean(pendingQuestion)}
               autoSize={{ minRows: 2, maxRows: 8 }}
@@ -5280,12 +5555,28 @@ function Composer({
                 // 输入任意位置出现 / 前缀即尝试打开技能菜单（渲染时按光标位置过滤）
                 setSkillMenuOpen(event.target.value.includes('/'));
               }}
+              onPaste={(event) => {
+                const pastedImages = Array.from(event.clipboardData.items)
+                  .filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
+                  .map((item) => item.getAsFile())
+                  .filter((file): file is File => Boolean(file));
+                if (pastedImages.length === 0) return;
+                event.preventDefault();
+                void selectImages(pastedImages);
+              }}
               onScroll={(event) => {
                 if (highlightRef.current) {
                   highlightRef.current.scrollTop = event.currentTarget.scrollTop;
                 }
               }}
               onKeyDown={(event) => {
+                if (
+                  (event.ctrlKey || event.metaKey) &&
+                  event.key.toLowerCase() === 'c' &&
+                  event.currentTarget.selectionStart === event.currentTarget.selectionEnd
+                ) {
+                  void pasteClipboardImagesOnCopyShortcut();
+                }
                 if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
                   event.preventDefault();
                   setSkillMenuOpen(false);
@@ -5298,6 +5589,35 @@ function Composer({
         )}
         <div className="pa-composer-bottom">
           <div className="pa-composer-left">
+            <input
+              ref={imageInputRef}
+              type="file"
+              hidden
+              multiple
+              accept="image/png,image/jpeg,image/webp,image/gif"
+              data-testid="prompt-image-input"
+              onChange={(event) => {
+                void selectImages(event.currentTarget.files);
+                event.currentTarget.value = '';
+              }}
+            />
+            <Tooltip
+              title={
+                busy
+                  ? '请等待当前任务完成后再添加图片'
+                  : '添加图片（Ctrl+V 粘贴，也兼容输入框内 Ctrl+C）'
+              }
+            >
+              <Button
+                type="text"
+                size="small"
+                icon={<PictureOutlined />}
+                disabled={!enabled || busy || creatingTask || Boolean(pendingQuestion)}
+                aria-label="添加图片"
+                data-testid="add-prompt-image"
+                onClick={() => imageInputRef.current?.click()}
+              />
+            </Tooltip>
             <Select
               value={permissionMode}
               options={permissionOptions}
@@ -5379,8 +5699,9 @@ function Composer({
                 shape="circle"
                 icon={<SendOutlined />}
                 loading={creatingTask}
-                disabled={!enabled || creatingTask || !prompt.trim()}
+                disabled={!enabled || creatingTask || (!prompt.trim() && images.length === 0)}
                 aria-label="发送消息"
+                data-testid="send-message"
                 onClick={() => onSubmit()}
               />
             </Tooltip>
@@ -5445,7 +5766,7 @@ function ModelDebugModal({
                 onClick={() => onSelectCall(call.callId)}
               >
                 <span className="pa-debug-call-item-title">
-                  <strong>第 {index + 1} 次调用</strong>
+                  <strong>{call.label ?? `第 ${index + 1} 次调用`}</strong>
                   <Tag color={modelCallStatusColor(call.status)}>
                     {modelCallStatusLabel(call.status)}
                   </Tag>
@@ -5454,7 +5775,7 @@ function ModelDebugModal({
                   {call.provider} · {call.model}
                 </span>
                 <small>
-                  Turn {call.turnNumber}
+                  {call.kind === 'vision' ? '视觉预处理' : `Turn ${call.turnNumber}`}
                   {call.durationMs === undefined ? '' : ` · ${call.durationMs} ms`}
                 </small>
               </button>
@@ -5462,6 +5783,10 @@ function ModelDebugModal({
           </aside>
           <section className="pa-debug-detail">
             <div className="pa-debug-metadata">
+              <div>
+                <span>阶段</span>
+                <strong>{selectedCall.label ?? '主 Agent 调用'}</strong>
+              </div>
               <div>
                 <span>Provider</span>
                 <strong>{selectedCall.provider}</strong>
@@ -5855,12 +6180,14 @@ function GeneralSettingsPanel({
   accentColors,
   onAccentColorsChange,
   onResetAccent,
+  onRuntimeChange,
 }: {
   colorMode: ColorMode;
   onToggleColorMode: () => void;
   accentColors: AccentColors;
   onAccentColorsChange: (colors: AccentColors) => void;
   onResetAccent: () => void;
+  onRuntimeChange: (runtime: RuntimeInfo) => void;
 }) {
   const { message: messageApi } = AntApp.useApp();
   const [recordPayloads, setRecordPayloads] = useState<boolean | null>(null);
@@ -5873,6 +6200,12 @@ function GeneralSettingsPanel({
   const [savingMemoryEnabled, setSavingMemoryEnabled] = useState(false);
   const [memoryMaxEntries, setMemoryMaxEntries] = useState<number | null>(null);
   const [savingMemoryMaxEntries, setSavingMemoryMaxEntries] = useState(false);
+  const [visionSettings, setVisionSettings] = useState<VisionSettingsInfo | null>(null);
+  const [visionEnabled, setVisionEnabled] = useState(false);
+  const [visionProvider, setVisionProvider] = useState<ProviderId>();
+  const [visionModel, setVisionModel] = useState<string>();
+  const [visionPrompt, setVisionPrompt] = useState('');
+  const [savingVision, setSavingVision] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -5883,6 +6216,30 @@ function GeneralSettingsPanel({
       })
       .then((payload) => {
         if (!cancelled) setRecordPayloads(payload.recordPayloads);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) messageApi.error(err instanceof Error ? err.message : String(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [messageApi]);
+
+  useEffect(() => {
+    let cancelled = false;
+    apiFetch('/api/vision-settings')
+      .then(async (response) => {
+        const payload = (await response.json()) as VisionSettingsInfo & { error?: string };
+        if (!response.ok) throw new Error(payload.error ?? `读取视觉模型配置失败 (${response.status})`);
+        return payload;
+      })
+      .then((payload) => {
+        if (cancelled) return;
+        setVisionSettings(payload);
+        setVisionEnabled(payload.enabled);
+        setVisionProvider(payload.provider);
+        setVisionModel(payload.model);
+        setVisionPrompt(payload.prompt);
       })
       .catch((err: unknown) => {
         if (!cancelled) messageApi.error(err instanceof Error ? err.message : String(err));
@@ -6085,6 +6442,65 @@ function GeneralSettingsPanel({
     }
   }
 
+  async function saveVisionSettingsForm() {
+    const prompt = visionPrompt.trim();
+    if (!prompt) {
+      messageApi.warning('请输入视觉审查提示词。');
+      return;
+    }
+    if (visionEnabled && (!visionProvider || !visionModel)) {
+      messageApi.warning('启用视觉模型前请选择供应商和模型。');
+      return;
+    }
+    setSavingVision(true);
+    try {
+      const response = await apiFetch('/api/vision-settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          enabled: visionEnabled,
+          provider: visionEnabled ? visionProvider : undefined,
+          model: visionEnabled ? visionModel : undefined,
+          prompt,
+        }),
+      });
+      const payload = (await response.json()) as VisionSettingsInfo & {
+        runtime?: RuntimeInfo;
+        error?: string;
+      };
+      if (!response.ok) throw new Error(payload.error ?? `保存失败 (${response.status})`);
+      setVisionSettings(payload);
+      setVisionEnabled(payload.enabled);
+      setVisionProvider(payload.provider);
+      setVisionModel(payload.model);
+      setVisionPrompt(payload.prompt);
+      // REST 响应直接回写，避免等待 WebSocket 广播时仍使用旧的 visionReady。
+      if (payload.runtime) {
+        onRuntimeChange(payload.runtime);
+      }
+      messageApi.success('视觉模型配置已保存');
+    } catch (err) {
+      messageApi.error(`保存失败: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setSavingVision(false);
+    }
+  }
+
+  const visionProviders = Array.from(
+    new Map(
+      (visionSettings?.models ?? []).map((model) => [
+        model.provider,
+        { value: model.provider, label: providerLabels[model.provider] ?? model.providerName },
+      ]),
+    ).values(),
+  );
+  const visionModels = (visionSettings?.models ?? [])
+    .filter((model) => model.provider === visionProvider)
+    .map((model) => ({
+      value: model.model,
+      label: model.displayName === model.model ? model.model : `${model.displayName} (${model.model})`,
+    }));
+
   return (
     <div className="pa-settings-general">
       <div className="pa-settings-heading">
@@ -6267,6 +6683,93 @@ function GeneralSettingsPanel({
             />
           </Form.Item>
         </Form>
+      </Card>
+      <Card size="small" title="视觉模型" data-testid="vision-settings-card">
+        <Text type="secondary" className="pa-settings-card-description">
+          全局用于前端截图审查，以及当前任务模型不支持图片时的用户图片识别。这里只显示已配置且支持图片输入的模型。
+        </Text>
+        {!visionSettings ? (
+          <Spin size="small" />
+        ) : (
+          <Form
+            layout="horizontal"
+            colon
+            labelAlign="left"
+            labelCol={{ flex: '220px' }}
+            style={{ maxWidth: 640 }}
+          >
+            <Form.Item label="启用视觉模型">
+              <Switch
+                checked={visionEnabled}
+                disabled={savingVision}
+                onChange={setVisionEnabled}
+              />
+            </Form.Item>
+            <Form.Item label="视觉供应商">
+              <Select
+                aria-label="视觉供应商"
+                value={visionProvider}
+                disabled={savingVision || visionProviders.length === 0}
+                placeholder="选择已配置的模型供应商"
+                options={visionProviders}
+                onChange={(provider: ProviderId) => {
+                  setVisionProvider(provider);
+                  const firstModel = visionSettings.models.find(
+                    (candidate) => candidate.provider === provider,
+                  );
+                  setVisionModel(firstModel?.model);
+                }}
+              />
+            </Form.Item>
+            <Form.Item label="视觉模型">
+              <Select
+                aria-label="视觉模型"
+                value={visionModel}
+                disabled={savingVision || !visionProvider || visionModels.length === 0}
+                placeholder="选择支持图片输入的模型"
+                options={visionModels}
+                onChange={setVisionModel}
+              />
+            </Form.Item>
+            {visionProviders.length === 0 && (
+              <Form.Item label=" " colon={false}>
+                <Alert
+                  type="warning"
+                  showIcon
+                  message="暂无可用视觉模型"
+                  description="请先在“模型提供商”中配置支持图片输入的供应商和模型。"
+                />
+              </Form.Item>
+            )}
+            <Form.Item
+              label="审查提示词"
+              extra={`${visionPrompt.length}/4000，用于描述需要重点检查的视觉问题。`}
+            >
+              <Input.TextArea
+                aria-label="视觉审查提示词"
+                value={visionPrompt}
+                maxLength={4000}
+                autoSize={{ minRows: 3, maxRows: 8 }}
+                disabled={savingVision}
+                onChange={(event) => setVisionPrompt(event.target.value)}
+              />
+            </Form.Item>
+            <Form.Item label="保存位置">
+              <code className="pa-inline-config-path" title={visionSettings.configPath}>
+                {visionSettings.configPath}
+              </code>
+            </Form.Item>
+            <Form.Item label=" " colon={false}>
+              <Button
+                type="primary"
+                loading={savingVision}
+                onClick={() => void saveVisionSettingsForm()}
+              >
+                保存视觉模型配置
+              </Button>
+            </Form.Item>
+          </Form>
+        )}
       </Card>
     </div>
   );
@@ -7236,11 +7739,57 @@ function updateTurnTool(
 }
 
 function extractMessageText(message: UnifiedMessage): string {
-  if (typeof message.content === 'string') return message.content;
-  return message.content
+  const content = message.displayContent ?? message.content;
+  if (typeof content === 'string') return content;
+  return content
     .filter((block) => block.type === 'text')
     .map((block) => block.text)
     .join('\n');
+}
+
+function extractMessageImages(message: UnifiedMessage): MessageTimelineItem['images'] {
+  const content = message.displayContent ?? message.content;
+  if (typeof content === 'string') return undefined;
+  const images = content
+    .filter((block) => block.type === 'image')
+    .map((block, index) => ({
+      name: block.name || `用户图片 ${index + 1}`,
+      src: `data:${block.source.mediaType};base64,${block.source.data}`,
+    }));
+  return images.length > 0 ? images : undefined;
+}
+
+function promptImageSrc(image: PromptImageInput): string {
+  return `data:${image.mediaType};base64,${image.data}`;
+}
+
+function promptImagesForTimeline(
+  images: PromptImageInput[],
+): NonNullable<MessageTimelineItem['images']> {
+  return images.map((image) => ({ name: image.name, src: promptImageSrc(image) }));
+}
+
+function promptImagesByteLength(images: PromptImageInput[]): number {
+  return images.reduce((total, image) => {
+    const padding = image.data.endsWith('==') ? 2 : image.data.endsWith('=') ? 1 : 0;
+    return total + (image.data.length / 4) * 3 - padding;
+  }, 0);
+}
+
+async function readPromptImage(file: File): Promise<PromptImageInput> {
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error ?? new Error('文件读取失败'));
+    reader.readAsDataURL(file);
+  });
+  const separator = dataUrl.indexOf(',');
+  if (separator < 0) throw new Error('图片数据格式无效');
+  return {
+    name: file.name || `clipboard-${Date.now()}.${file.type.split('/')[1] || 'png'}`,
+    mediaType: file.type as PromptImageInput['mediaType'],
+    data: dataUrl.slice(separator + 1),
+  };
 }
 
 function extractMessageThinking(message: UnifiedMessage): string {
@@ -7402,11 +7951,12 @@ function parseModelRows(rows: ProviderModelRow[]): Array<string | ProviderModelR
     const id = (row?.id ?? '').trim();
     if (!id || seen.has(id)) continue;
     seen.add(id);
-    if (row.contextWindow || row.maxOutputTokens) {
+    if (row.contextWindow || row.maxOutputTokens || row.imageInput) {
       models.push({
         id,
         contextWindow: row.contextWindow,
         maxOutputTokens: row.maxOutputTokens,
+        imageInput: row.imageInput || undefined,
       });
     } else {
       models.push(id);
@@ -7418,11 +7968,12 @@ function parseModelRows(rows: ProviderModelRow[]): Array<string | ProviderModelR
 function modelConfigListToRows(models: Array<string | ProviderModelRow>): ProviderModelRow[] {
   return models.map((model) =>
     typeof model === 'string'
-      ? { id: model }
+      ? { id: model, imageInput: false }
       : {
           id: model.id,
           contextWindow: model.contextWindow,
           maxOutputTokens: model.maxOutputTokens,
+          imageInput: model.imageInput ?? false,
         },
   );
 }

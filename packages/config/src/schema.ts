@@ -15,6 +15,8 @@ export const modelConfigSchema = z.object({
   contextWindow: z.number().int().min(1024).max(10_000_000).optional(),
   /** Maximum output (completion) length in tokens. */
   maxOutputTokens: z.number().int().min(1).max(10_000_000).optional(),
+  /** Whether this model accepts image content blocks. */
+  imageInput: z.boolean().optional(),
 });
 
 const providerConfigSchema = z.object({
@@ -107,6 +109,17 @@ const statsConfigSchema = z.object({
   retentionDays: z.number().int().min(0).default(90),
 });
 
+export const DEFAULT_VISION_PROMPT =
+  '检查布局错位、文本裁切、元素重叠、关键操作不可见和主题异常。';
+
+/** 全局视觉审查模型配置，由 Web 设置面板管理。 */
+const visionConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  provider: z.enum(['anthropic', 'openai', 'ollama', 'deepseek', 'volcano']).optional(),
+  model: z.string().min(1).max(256).optional(),
+  prompt: z.string().min(1).max(4000).default(DEFAULT_VISION_PROMPT),
+});
+
 export const appConfigSchema = z.object({
   providers: z
     .object({
@@ -149,6 +162,7 @@ export const appConfigSchema = z.object({
   tui: tuiConfigSchema.default({}),
   web: webConfigSchema.default({}),
   stats: statsConfigSchema.default({}),
+  vision: visionConfigSchema.default({}),
   memory: z
     .object({
       enabled: z.boolean().default(true),
@@ -176,5 +190,6 @@ export type ModelConfig = z.infer<typeof modelConfigSchema>;
 export type WebConfig = z.infer<typeof webConfigSchema>;
 export type ToolSandboxConfig = z.infer<typeof sandboxSchema>;
 export type StatsConfig = z.infer<typeof statsConfigSchema>;
+export type VisionConfig = z.infer<typeof visionConfigSchema>;
 export type PermissionRuleConfig = z.infer<typeof permissionRuleSchema>;
 export type MCPServerConfig = z.infer<typeof mcpServerConfigSchema>;

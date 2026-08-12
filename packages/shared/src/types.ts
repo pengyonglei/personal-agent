@@ -9,6 +9,11 @@ export type MessageRole = 'system' | 'user' | 'assistant' | 'tool';
 export interface UnifiedMessage {
   role: MessageRole;
   content: string | UnifiedContentBlock[];
+  /**
+   * 原始用户输入，仅用于界面回放。当不支持图片的模型需要先经过视觉模型转写时，
+   * content 保存真正发送给文本模型的内容，displayContent 保留用户输入的文字和图片。
+   */
+  displayContent?: string | UnifiedContentBlock[];
   name?: string; // for tool-role messages: which tool produced this
   toolCallId?: string; // for tool-role messages: which tool_call is this the result for
   toolCalls?: UnifiedToolCall[]; // for assistant messages: tool calls the assistant requested
@@ -48,6 +53,8 @@ export interface ToolResultContentBlock {
 
 export interface ImageContentBlock {
   type: 'image';
+  /** 原始附件名，仅用于界面展示，Provider 会忽略该字段。 */
+  name?: string;
   source: {
     data: string; // base64
     mediaType: string;
@@ -129,13 +136,7 @@ export interface ToolCallEnd {
 }
 
 export type StopReason =
-  | 'end_turn'
-  | 'max_tokens'
-  | 'stop_sequence'
-  | 'tool_use'
-  | 'interrupted'
-  | 'refusal'
-  | 'unknown';
+  'end_turn' | 'max_tokens' | 'stop_sequence' | 'tool_use' | 'interrupted' | 'refusal' | 'unknown';
 
 export interface UsageInfo {
   inputTokens: number;
@@ -188,6 +189,38 @@ export interface ToolContext {
   onProgress?: (message: string) => void;
 }
 
+export interface ToolArtifactReference {
+  id: string;
+  kind: 'screenshot' | 'trace' | 'log' | 'report' | 'dom';
+  name: string;
+  mimeType: string;
+  size: number;
+}
+
+export interface FrontendValidationSummary {
+  runId: string;
+  projectHash: string;
+  profile: 'quick' | 'full';
+  status: 'passed' | 'failed' | 'infrastructure_error';
+  summary: string;
+  durationMs: number;
+  steps: Array<{
+    name: string;
+    status: 'passed' | 'failed' | 'skipped';
+    durationMs: number;
+    error?: string;
+  }>;
+  issues: Array<{
+    source: string;
+    message: string;
+    scenario?: string;
+  }>;
+  vision: {
+    status: 'passed' | 'failed' | 'skipped';
+    reason?: string;
+  };
+}
+
 export interface ToolResult {
   success: boolean;
   content: string;
@@ -200,6 +233,10 @@ export interface ToolResult {
     interrupted?: boolean;
     /** Structured tasks from todo_write, so UIs can render icons instead of plain text. */
     tasks?: Array<{ status: string; subject: string }>;
+    /** Safe artifact identifiers resolved through the validation artifact API. */
+    artifacts?: ToolArtifactReference[];
+    /** Structured frontend validation evidence for CLI and UI renderers. */
+    validation?: FrontendValidationSummary;
   };
 }
 
@@ -273,7 +310,13 @@ export type AgentEvent =
   | { type: 'turn_start'; turnNumber: number }
   | { type: 'assistant_thinking_delta'; thinkingDelta: string; turnNumber: number }
   | { type: 'assistant_text_delta'; textDelta: string; turnNumber: number }
-  | { type: 'tool_call_start'; toolName: string; toolCallId: string; arguments: Record<string, unknown>; turnNumber: number }
+  | {
+      type: 'tool_call_start';
+      toolName: string;
+      toolCallId: string;
+      arguments: Record<string, unknown>;
+      turnNumber: number;
+    }
   | { type: 'tool_call_progress'; toolCallId: string; content: string; turnNumber: number }
   | { type: 'tool_call_end'; toolCallId: string; result: ToolResult; turnNumber: number }
   | { type: 'permission_request'; toolName: string; params: Record<string, unknown> }

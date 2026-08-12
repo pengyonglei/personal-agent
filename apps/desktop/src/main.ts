@@ -132,6 +132,10 @@ function startDesktopApplication(): void {
 async function createDesktopWindow(): Promise<void> {
   if (mainWindow) return;
 
+  if (app.isPackaged) {
+    process.env.PLAYWRIGHT_BROWSERS_PATH = join(process.resourcesPath, 'playwright-browsers');
+  }
+
   // desktop shares ~/.personal-agent/ with CLI/web: config.yaml, projects.json,
   // sessions and everything else live under the same root directory.
   const dataDirectory = join(app.getPath('home'), '.personal-agent');

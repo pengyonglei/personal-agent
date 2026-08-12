@@ -137,6 +137,7 @@ function buildEnv() {
 }
 
 async function buildRuntime() {
+  await runPnpm(['run', 'prepare:chromium'], {});
   await runPnpm(['run', 'prepare:runtime'], {});
   await runPnpm(['run', 'build:production'], {});
 }
@@ -166,7 +167,9 @@ function printUploadInstructions(version) {
   console.log('');
   console.log('========================================================');
   console.log('构建完成。请将以下 3 个产物上传到 Gitee Release：');
-  console.log('  Release 地址：https://gitee.com/pengyonglei/personal-agent/releases/new?tag=latest');
+  console.log(
+    '  Release 地址：https://gitee.com/pengyonglei/personal-agent/releases/new?tag=latest',
+  );
   console.log('  （每次发版都更新同一个 tag=latest 的 Release 附件）');
   console.log('');
   console.log(`  1. 安装包    ${setupExe}`);

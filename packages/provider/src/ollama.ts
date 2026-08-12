@@ -51,7 +51,10 @@ export class OllamaProvider extends BaseLLMProvider {
     super(defaultModel);
     this.baseURL = baseURL.replace(/\/+$/, '');
     this.fetchFn = fetchFn;
-    this.models = [createModelInfo(defaultModel)];
+    const defaultConfig = configuredModels.find(
+      (entry): entry is ModelConfig => typeof entry !== 'string' && entry.id.trim() === defaultModel,
+    );
+    this.models = [createModelInfo(defaultModel, defaultConfig)];
     this.addConfiguredModels(configuredModels, createModelInfo);
   }
 
@@ -203,11 +206,11 @@ export class OllamaProvider extends BaseLLMProvider {
   }
 
   supportsFeature(feature: ProviderFeature): boolean {
-    return [
-      ProviderFeature.Streaming,
-      ProviderFeature.ToolCalling,
-      ProviderFeature.ParallelToolCalls,
-    ].includes(feature);
+    return Boolean(
+      this.models
+        .find((model) => model.id === this.currentModel)
+        ?.features.includes(feature),
+    );
   }
 
   async dispose(): Promise<void> {
@@ -217,16 +220,21 @@ export class OllamaProvider extends BaseLLMProvider {
 }
 
 function toOllamaMessage(message: UnifiedMessage): Record<string, unknown> {
+  const blocks = typeof message.content === 'string' ? [] : message.content;
   const result: Record<string, unknown> = {
     role: message.role,
     content:
       typeof message.content === 'string'
         ? message.content
-        : message.content
+        : blocks
             .filter((block) => block.type === 'text')
             .map((block) => block.text)
             .join('\n'),
   };
+  const images = blocks
+    .filter((block) => block.type === 'image')
+    .map((block) => block.source.data);
+  if (images.length > 0) result.images = images;
   if (message.name) result.tool_name = message.name;
   if (message.toolCalls?.length) {
     result.tool_calls = message.toolCalls.map((call) => ({
@@ -266,17 +274,19 @@ function parseToolArguments(value: unknown): Record<string, unknown> {
 }
 
 function createModelInfo(name: string, config?: ModelConfig): ModelInfo {
+  const features = [
+    ProviderFeature.Streaming,
+    ProviderFeature.ToolCalling,
+    ProviderFeature.ParallelToolCalls,
+  ];
+  if (config?.imageInput) features.push(ProviderFeature.ImageInput);
   return {
     id: name,
     displayName: name,
     provider: 'ollama',
     contextWindow: config?.contextWindow ?? 128_000,
     maxOutputTokens: config?.maxOutputTokens ?? 32_768,
-    features: [
-      ProviderFeature.Streaming,
-      ProviderFeature.ToolCalling,
-      ProviderFeature.ParallelToolCalls,
-    ],
+    features,
   };
 }
 

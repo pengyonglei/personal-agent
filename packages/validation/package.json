@@ -1,8 +1,8 @@
 {
-  "name": "@personal-agent/tool",
+  "name": "@personal-agent/validation",
   "version": "0.2.0",
   "private": false,
-  "description": "Tool execution system for personal-agent",
+  "description": "Local frontend validation engine for personal-agent",
   "files": [
     "dist"
   ],
@@ -20,9 +20,6 @@
       "require": "./dist/index.js"
     }
   },
-  "publishConfig": {
-    "access": "public"
-  },
   "scripts": {
     "build": "tsup src/index.ts --format esm,cjs --dts --clean",
     "test": "tsx --test test/*.test.ts",
@@ -31,16 +28,12 @@
     "clean": "node -e \"fs.rmSync('dist',{recursive:true,force:true})\""
   },
   "dependencies": {
-    "@personal-agent/config": "workspace:*",
-    "@personal-agent/shared": "workspace:*",
-    "@personal-agent/validation": "workspace:*",
-    "fast-glob": "^3.3.0",
-    "strip-ansi": "^7.1.0",
-    "diff": "^7.0.0"
+    "playwright": "1.62.1",
+    "yaml": "2.9.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "@types/diff": "^7.0.0",
+    "tsx": "^4.19.0",
     "tsup": "^8.3.0",
     "typescript": "^5.7.0"
   }

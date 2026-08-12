@@ -145,6 +145,28 @@ test('injected user messages are drained at the next turn and carried into the m
   assert.equal(done.totalTurns, 2);
 });
 
+test('transformed model content keeps separate original display content in history', async () => {
+  const provider = new FakeProvider(() => finalAnswerStream('完成'));
+  const loop = createLoop(provider, () => []);
+  const modelContent = '用户问题\n\n视觉模型提取：截图错误 E1001';
+  const displayContent = [
+    { type: 'text' as const, text: '用户问题' },
+    {
+      type: 'image' as const,
+      name: 'error.png',
+      source: { data: 'aW1hZ2U=', mediaType: 'image/png' },
+    },
+  ];
+
+  for await (const _event of loop.run(modelContent, displayContent)) {
+    // consume the loop
+  }
+
+  const userMessage = provider.calls[0]?.find((message) => message.role === 'user');
+  assert.equal(userMessage?.content, modelContent);
+  assert.deepEqual(userMessage?.displayContent, displayContent);
+});
+
 test('injection arriving during the final end_turn keeps the loop running instead of finishing', async () => {
   const injected: string[] = [];
   let callCount = 0;

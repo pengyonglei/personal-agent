@@ -3,6 +3,14 @@ import { ReadFileTool, WriteFileTool, EditFileTool, ListDirectoryTool } from './
 import { BashTool } from './tools/shell';
 import { GlobTool, GrepTool } from './tools/search';
 import { WebFetchTool, WebSearchTool, TodoWriteTool, AskUserTool } from './tools/web';
+import {
+  BrowserActTool,
+  BrowserCloseTool,
+  BrowserOpenTool,
+  BrowserScreenshotTool,
+  BrowserSnapshotTool,
+  FrontendValidateTool,
+} from './tools/browser';
 import type { ShellPreference } from './shell-resolver';
 
 /**
@@ -41,6 +49,13 @@ export function registerBuiltinTools(options?: {
     // Utility tools
     new TodoWriteTool(),
     new AskUserTool(),
+    // Local frontend validation
+    new BrowserOpenTool(),
+    new BrowserSnapshotTool(),
+    new BrowserActTool(),
+    new BrowserScreenshotTool(),
+    new BrowserCloseTool(),
+    new FrontendValidateTool(),
   ];
 
   for (const tool of tools) {

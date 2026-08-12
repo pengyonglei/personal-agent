@@ -12,6 +12,39 @@ test('parseClientMessage validates and normalizes prompts', () => {
   assert.throws(() => parseClientMessage('not-json'), /JSON/);
 });
 
+test('parseClientMessage accepts image prompts and enforces attachment limits', () => {
+  const image = {
+    name: 'screen.png',
+    mediaType: 'image/png',
+    data: Buffer.from('fake image').toString('base64'),
+  };
+  assert.deepEqual(
+    parseClientMessage(JSON.stringify({ type: 'prompt', text: '', images: [image] })),
+    { type: 'prompt', text: '', images: [image], taskId: undefined },
+  );
+  assert.throws(
+    () =>
+      parseClientMessage(
+        JSON.stringify({ type: 'prompt', text: 'x', images: [{ ...image, mediaType: 'text/plain' }] }),
+      ),
+    /支持的图片格式/,
+  );
+  assert.throws(
+    () =>
+      parseClientMessage(
+        JSON.stringify({ type: 'prompt', text: 'x', images: [{ ...image, data: 'not-base64' }] }),
+      ),
+    /base64/,
+  );
+  assert.throws(
+    () =>
+      parseClientMessage(
+        JSON.stringify({ type: 'prompt', text: 'x', images: Array(5).fill(image) }),
+      ),
+    /最多上传 4 张/,
+  );
+});
+
 test('parseClientMessage validates inject_user_message', () => {
   assert.deepEqual(
     parseClientMessage('{"type":"inject_user_message","text":"  注意测试  ","taskId":" task-1 "}'),

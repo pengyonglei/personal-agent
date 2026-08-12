@@ -1,5 +1,12 @@
 export { loadConfig, mergeCliFlags, type ConfigLoadOptions, type CliFlags } from './loader';
-export { appConfigSchema, type AppConfig, type ModelConfig, type StatsConfig } from './schema';
+export {
+  appConfigSchema,
+  DEFAULT_VISION_PROMPT,
+  type AppConfig,
+  type ModelConfig,
+  type StatsConfig,
+  type VisionConfig,
+} from './schema';
 export { DEFAULT_CONFIG } from './defaults';
 export {
   PROVIDER_IDS,
@@ -24,3 +31,4 @@ export {
   type ToolsShellPreference,
 } from './tools-settings';
 export { saveWebSettings, type WebSettingsUpdate } from './web-settings';
+export { saveVisionSettings, type VisionSettingsUpdate } from './vision-settings';
