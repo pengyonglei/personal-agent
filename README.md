@@ -294,7 +294,7 @@ providers:
   deepseek:
     baseURL: https://api.deepseek.com
     defaultModel: deepseek-v4-flash
-    # 思考强度：off | low | medium | high | max
+    # 思考强度：off | low | high | max（medium 不支持，按 low 处理）
     thinkingEffort: high
 
   volcano:

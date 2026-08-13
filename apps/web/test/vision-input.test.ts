@@ -93,6 +93,10 @@ test('text-only current model receives text merged with global vision extraction
   assert.equal(prepared.displayContent?.[0]?.type, 'text');
   assert.equal(prepared.displayContent?.[1]?.type, 'image');
   assert.equal(vision.calls.length, 1);
+  assert.equal(vision.calls[0]?.[0]?.role, 'system');
+  assert.match(String(vision.calls[0]?.[0]?.content), /图片信息提取器/);
+  assert.equal(vision.calls[0]?.[1]?.role, 'user');
+  assert.doesNotMatch(String(vision.calls[0]?.[1]?.content), /图片信息提取器/);
   assert.equal(debugStarts[0]?.kind, 'vision');
   assert.equal(debugStarts[0]?.label, '图片视觉识别');
   assert.match(JSON.stringify(debugStarts[0]?.request), /base64 已省略/);

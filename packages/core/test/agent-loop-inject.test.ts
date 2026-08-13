@@ -241,3 +241,45 @@ test('unhandled injected messages fall back into history when maxTurns is exhaus
   );
   assert.equal(injected.length, 0, '注入队列应被清空');
 });
+
+test('pending system instruction keeps the loop running at end_turn without polluting history', async () => {
+  // 模拟「前端验证要求」这类系统级待办：指令不进历史，但会延续循环
+  let instructionPending = true;
+  let callCount = 0;
+  const provider = new FakeProvider(() => {
+    callCount += 1;
+    // 第二次调用开始前视为模型已处理指令（真实场景中由工具执行清除要求）
+    if (callCount === 2) instructionPending = false;
+    return finalAnswerStream(`第 ${callCount} 次回答`);
+  });
+  const assembler = new ContextAssembler({
+    workingDirectory: 'C:\\work',
+    platform: 'win32 x64',
+    shell: 'powershell',
+    model: 'fake-model',
+    provider: 'fake',
+    mode: 'chat',
+  });
+  const loop = new AgentLoop({
+    provider,
+    contextAssembler: assembler,
+    tokenBudget: new TokenBudget(100_000, 8192),
+    toolDefinitions: [{ name: 'read_file', description: 'Read a file' } as never],
+    maxTurns: 10,
+    executeTool: async (): Promise<ToolResult> => ({ success: true, content: 'file content' }),
+    drainPendingUserMessages: () => [],
+    hasPendingInstruction: () => instructionPending,
+  });
+
+  const events: AgentEvent[] = [];
+  for await (const event of loop.run('请分析项目')) {
+    events.push(event);
+  }
+
+  assert.equal(provider.calls.length, 2, '待办指令存在时循环应延续一轮，指令完成后结束');
+  // 系统指令绝不写入对话历史（历史中只有初始 user 消息与两条 assistant 回复）
+  const roles = assembler.getHistory().map((message) => message.role);
+  assert.deepEqual(roles, ['user', 'assistant', 'assistant'], '指令不应作为消息写入历史');
+  const done = events.filter((event) => event.type === 'done');
+  assert.equal(done.length, 1, '最终应只产出一次 done 事件');
+});

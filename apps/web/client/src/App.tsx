@@ -43,6 +43,7 @@ import zhCN from 'antd/es/locale/zh_CN';
 import type { TextAreaRef } from 'antd/es/input/TextArea';
 import {
   AppstoreOutlined,
+  ArrowDownOutlined,
   BarChartOutlined,
   BoldOutlined,
   BugOutlined,
@@ -67,11 +68,14 @@ import {
   FontSizeOutlined,
   FolderAddOutlined,
   FolderOpenOutlined,
+  GlobalOutlined,
   HolderOutlined,
   InboxOutlined,
   InfoCircleOutlined,
   ItalicOutlined,
+  LeftOutlined,
   LinkOutlined,
+  LockOutlined,
   LoadingOutlined,
   MenuOutlined,
   MenuUnfoldOutlined,
@@ -87,6 +91,7 @@ import {
   PushpinOutlined,
   QuestionCircleOutlined,
   ReloadOutlined,
+  RightOutlined,
   RobotOutlined,
   SendOutlined,
   SettingOutlined,
@@ -149,6 +154,17 @@ import {
   computeLineDiff,
   toUnifiedDiffText,
 } from './file-diff';
+import {
+  appendBrowserActivity,
+  browserSessionState,
+  describeBrowserAction,
+  isBrowserTool,
+  parseBrowserSnapshot,
+  resolveBrowserSessionId,
+  screenshotFromResult,
+  updateBrowserActivity,
+  type BrowserActivityItem,
+} from './browser-activity';
 
 const { Header, Content, Sider } = Layout;
 const { Text, Title } = Typography;
@@ -272,9 +288,10 @@ interface QueuedMessage {
   time: string;
 }
 
-/** 右侧侧边栏的 Tab：第一个「概要」固定不可删除，其余为可关闭的计划文档/文件差异 Tab。 */
+/** 右侧侧边栏的 Tab：前两个固定不可删除（概要 / 浏览器），其余为可关闭的计划文档/文件差异 Tab。 */
 type InspectorTab =
   | { key: string; title: string; kind: 'overview' }
+  | { key: string; title: string; kind: 'browser' }
   | { key: string; title: string; kind: 'plan-doc'; docId: string }
   | { key: string; title: string; kind: 'file-diff'; changeId: string };
 
@@ -305,6 +322,8 @@ interface ModelCallTrace {
 interface TaskViewSnapshot {
   timeline: TimelineItem[];
   modelCalls: ModelCallTrace[];
+  /** 浏览器工具活动流（侧边栏「浏览器」Tab 展示，随任务切换快照保存/恢复）。 */
+  browserActivity: BrowserActivityItem[];
   busy: boolean;
   contextUsage?: ContextUsage;
   planActive: boolean;
@@ -761,6 +780,7 @@ function AgentWorkspace({
   const { message: messageApi, modal } = AntApp.useApp();
   const screens = Grid.useBreakpoint();
   const desktop = Boolean(screens.md);
+  const desktopShell = Boolean(window.personalAgentDesktop);
   const [state, setState] = useState(initialState);
   const stateRef = useRef(state);
   const socketRef = useRef<WebSocket | null>(null);
@@ -791,9 +811,10 @@ function AgentWorkspace({
     inspectorWidthRef.current = inspectorWidth;
     localStorage.setItem('personal-agent-inspector-width', String(inspectorWidth));
   }, [inspectorWidth]);
-  // 侧边栏 Tab：第一个「概要」固定不可删除，其余为可关闭的计划文档 Tab
+  // 侧边栏 Tab：前两个「概要」「浏览器」固定不可删除，其余为可关闭的计划文档 Tab
   const [inspectorTabs, setInspectorTabs] = useState<InspectorTab[]>([
     { key: 'overview', title: '概要', kind: 'overview' },
+    { key: 'browser', title: '浏览器', kind: 'browser' },
   ]);
   const inspectorTabsRef = useRef(inspectorTabs);
   useEffect(() => {
@@ -882,6 +903,9 @@ function AgentWorkspace({
   const [statsModalOpen, setStatsModalOpen] = useState(false);
   const [modelCalls, setModelCalls] = useState<ModelCallTrace[]>([]);
   const modelCallsRef = useRef<ModelCallTrace[]>([]);
+  // 浏览器工具活动流（侧边栏「浏览器」固定 Tab 实时展示）
+  const [browserActivity, setBrowserActivity] = useState<BrowserActivityItem[]>([]);
+  const browserActivityRef = useRef<BrowserActivityItem[]>([]);
   const [selectedModelCallId, setSelectedModelCallId] = useState<string>();
   const [rememberPermission, setRememberPermission] = useState(false);
   const [renamingTaskId, setRenamingTaskId] = useState<string>();
@@ -906,7 +930,6 @@ function AgentWorkspace({
   const [providerForm] = Form.useForm<ProviderFormValues>();
   const selectedProvider = Form.useWatch('provider', providerForm);
   const providerModels = Form.useWatch('models', providerForm) ?? ([] as ProviderModelRow[]);
-  const executionLabel = useExecutionTimer(state.busy);
 
   const patchState = useCallback(
     (patch: Partial<WorkspaceState> | ((current: WorkspaceState) => Partial<WorkspaceState>)) => {
@@ -932,6 +955,7 @@ function AgentWorkspace({
   const emptyTaskSnapshot = (): TaskViewSnapshot => ({
     timeline: [],
     modelCalls: [],
+    browserActivity: [],
     busy: false,
     contextUsage: undefined,
     planActive: false,
@@ -956,6 +980,7 @@ function AgentWorkspace({
     taskDataRef.current[taskId] = {
       timeline: timelineRef.current,
       modelCalls: modelCallsRef.current,
+      browserActivity: browserActivityRef.current,
       busy: stateRef.current.busy,
       contextUsage: stateRef.current.contextUsage,
       planActive: stateRef.current.planActive,
@@ -978,6 +1003,8 @@ function AgentWorkspace({
         setTimeline([]);
         setModelCalls([]);
         modelCallsRef.current = [];
+        browserActivityRef.current = [];
+        setBrowserActivity([]);
         setSelectedModelCallId(undefined);
         setQueuedMessages([]);
         activeResponseSequenceRef.current = 0;
@@ -1000,6 +1027,8 @@ function AgentWorkspace({
       setTimeline(data.timeline);
       setModelCalls(data.modelCalls);
       modelCallsRef.current = data.modelCalls;
+      browserActivityRef.current = data.browserActivity;
+      setBrowserActivity(data.browserActivity);
       setSelectedModelCallId(undefined);
       // 队列随任务切换：展示目标任务自己的排队消息
       setQueuedMessages(queuedByTaskRef.current[taskId] ?? []);
@@ -1129,8 +1158,9 @@ function AgentWorkspace({
     [patchState],
   );
 
-  /** 关闭侧边栏 Tab（「概要」固定不可删除）；关闭激活 Tab 后切回「概要」。 */
+  /** 关闭侧边栏 Tab（「概要」「浏览器」固定不可删除）；关闭激活 Tab 后切回「概要」。 */
   const removeInspectorTab = useCallback((key: string) => {
+    if (key === 'browser') return;
     setInspectorTabs((current) => current.filter((tab) => tab.key !== key));
     if (activeInspectorTabRef.current === key) setActiveInspectorTab('overview');
   }, []);
@@ -1508,6 +1538,9 @@ function AgentWorkspace({
           setCompressing(false);
           setModelCalls([]);
           modelCallsRef.current = [];
+          // 浏览器活动是运行时状态（不落盘）：历史重放时清空，避免跨任务/刷新后残留。
+          browserActivityRef.current = [];
+          setBrowserActivity([]);
           setSelectedModelCallId(undefined);
           let restored: TimelineItem[] = [];
           const restoredToolOwners = new Map<string, number>();
@@ -1875,6 +1908,19 @@ function AgentWorkspace({
         }
         case 'tool_start': {
           const eventTaskId = incoming.taskId ?? stateRef.current.activeTaskId;
+          const browserItem: BrowserActivityItem | undefined = isBrowserTool(incoming.toolName)
+            ? {
+                id: incoming.toolCallId,
+                toolName: incoming.toolName,
+                status: 'running',
+                time: currentTimeWithSeconds(),
+                summary: describeBrowserAction(incoming.toolName, incoming.arguments),
+                url:
+                  incoming.toolName === 'browser_open' && typeof incoming.arguments.url === 'string'
+                    ? incoming.arguments.url
+                    : undefined,
+              }
+            : undefined;
           if (eventTaskId && eventTaskId !== stateRef.current.activeTaskId) {
             const data = taskDataRef.current[eventTaskId] ?? emptyTaskSnapshot();
             data.timeline = updateAssistantTurn(
@@ -1894,8 +1940,20 @@ function AgentWorkspace({
                 }),
               }),
             );
+            if (browserItem) {
+              data.browserActivity = appendBrowserActivity(data.browserActivity, browserItem);
+            }
             taskDataRef.current[eventTaskId] = data;
             break;
+          }
+          if (browserItem) {
+            const next = appendBrowserActivity(browserActivityRef.current, browserItem);
+            browserActivityRef.current = next;
+            setBrowserActivity(next);
+            if (desktopShell) {
+              setActiveInspectorTab('browser');
+              patchState({ inspectorOpen: true });
+            }
           }
           updateTimeline((items) =>
             updateAssistantTurn(
@@ -1955,6 +2013,25 @@ function AgentWorkspace({
         }
         case 'tool_end': {
           const eventTaskId = incoming.taskId ?? stateRef.current.activeTaskId;
+          // tool_end 不含 toolName：按 toolCallId 从浏览器活动流中反查是否属于浏览器工具。
+          const buildBrowserPatch = (): Partial<BrowserActivityItem> => {
+            const snapshot = incoming.result.success
+              ? parseBrowserSnapshot(incoming.result.content)
+              : null;
+            return {
+              status: incoming.result.metadata?.interrupted
+                ? 'interrupted'
+                : incoming.result.success
+                  ? 'success'
+                  : 'failed',
+              duration: incoming.result.metadata?.duration,
+              error: incoming.result.success ? undefined : incoming.result.error,
+              url: snapshot?.url,
+              title: snapshot?.title,
+              text: snapshot?.text,
+              screenshot: screenshotFromResult(incoming.result),
+            };
+          };
           if (eventTaskId && eventTaskId !== stateRef.current.activeTaskId) {
             const data = taskDataRef.current[eventTaskId] ?? emptyTaskSnapshot();
             data.timeline = updateAssistantTurn(
@@ -1978,8 +2055,24 @@ function AgentWorkspace({
                 })),
               }),
             );
+            if (data.browserActivity.some((item) => item.id === incoming.toolCallId)) {
+              data.browserActivity = updateBrowserActivity(
+                data.browserActivity,
+                incoming.toolCallId,
+                buildBrowserPatch(),
+              );
+            }
             taskDataRef.current[eventTaskId] = data;
             break;
+          }
+          if (browserActivityRef.current.some((item) => item.id === incoming.toolCallId)) {
+            const next = updateBrowserActivity(
+              browserActivityRef.current,
+              incoming.toolCallId,
+              buildBrowserPatch(),
+            );
+            browserActivityRef.current = next;
+            setBrowserActivity(next);
           }
           updateTimeline((items) =>
             updateAssistantTurn(
@@ -2448,6 +2541,7 @@ function AgentWorkspace({
 
   const activeProject = state.projects.find((project) => project.id === state.activeProjectId);
   const activeTask = state.tasks.find((task) => task.id === state.activeTaskId);
+  const browserSessionId = resolveBrowserSessionId(state.sessionId, activeTask?.sessionId);
   const rootPath = activeProject?.rootPath ?? state.runtime?.workingDirectory ?? '当前工作区';
   const workspaceTitle = draftTaskProjectId
     ? '新任务'
@@ -2491,7 +2585,7 @@ function AgentWorkspace({
   const runtimeModels = buildRuntimeModelGroups(state.runtime);
   const runtimeReasoningOptions: ReasoningEffort[] =
     activeRuntimeModel?.reasoningOptions ??
-    (state.runtime?.reasoningSupported ? ['off', 'high', 'max'] : ['off']);
+    (state.runtime?.reasoningSupported ? ['off', 'low', 'high', 'max'] : ['off']);
 
   function createNewTask(projectId?: string) {
     if (stateRef.current.creatingTask) return;
@@ -3034,48 +3128,79 @@ function AgentWorkspace({
   const availableProviders = (Object.keys(providerLabels) as ProviderId[]).filter(
     (provider) => !providerSettings?.providers[provider].configured,
   );
+  // 是否有浏览器工具正在执行（侧边栏「浏览器」Tab 标签上的实时指示点）
+  const browserRunning = browserActivity.some((item) => item.status === 'running');
+  const browserValidationAvailable =
+    desktopShell && state.runtime?.browserValidationEnabled === true;
+  // 非桌面端或浏览器验证关闭时不展示浏览器 Tab。
+  const activeInspectorTabKey =
+    !browserValidationAvailable && activeInspectorTab === 'browser'
+      ? 'overview'
+      : activeInspectorTab;
+  useEffect(() => {
+    if (!browserValidationAvailable && activeInspectorTab === 'browser') {
+      setActiveInspectorTab('overview');
+    }
+  }, [activeInspectorTab, browserValidationAvailable]);
 
-  /** 右侧侧边栏面板：第一个固定 Tab「概要」（运行详情），其余为可关闭的计划文档 Tab。 */
+  /** 右侧侧边栏面板：前两个固定 Tab「概要」「浏览器」（浏览器 Tab 仅桌面版），其余为可关闭的计划文档 Tab。 */
   const inspectorPanel = (
     <div className="pa-right-sidebar-panel">
       <Tabs
         type="editable-card"
         hideAdd
         size="small"
-        activeKey={activeInspectorTab}
+        activeKey={activeInspectorTabKey}
         onChange={setActiveInspectorTab}
         onEdit={(key, action) => {
           if (action === 'remove' && typeof key === 'string') removeInspectorTab(key);
         }}
-        items={inspectorTabs.map((tab) => ({
-          key: tab.key,
-          closable: tab.kind !== 'overview',
-          label:
-            tab.kind === 'overview' ? (
-              '概要'
-            ) : (
-              <span className="pa-doc-tab-label" title={tab.title}>
-                {tab.kind === 'plan-doc' ? <FileTextOutlined /> : <DiffOutlined />}
-                <span>{tab.title}</span>
-              </span>
-            ),
-          children:
-            tab.kind === 'overview' ? (
-              <Inspector
-                state={state}
-                activeProject={activeProject}
-                activeTask={activeTask}
-                rootPath={rootPath}
-                onApprovePlan={() =>
-                  send({ type: 'approve_plan', taskId: stateRef.current.activeTaskId })
-                }
-              />
-            ) : tab.kind === 'plan-doc' ? (
-              <PlanDocViewer doc={planDocs[tab.docId]} />
-            ) : (
-              <FileDiffViewer change={fileChanges[tab.changeId]} />
-            ),
-        }))}
+        items={inspectorTabs
+          // 浏览器 Tab 仅在桌面版且已开启浏览器验证时存在。
+          .filter((tab) => browserValidationAvailable || tab.kind !== 'browser')
+          .map((tab) => ({
+            key: tab.key,
+            closable: tab.kind !== 'overview' && tab.kind !== 'browser',
+            label:
+              tab.kind === 'overview' ? (
+                '概要'
+              ) : tab.kind === 'browser' ? (
+                <span className="pa-doc-tab-label" title="浏览器">
+                  <GlobalOutlined />
+                  <span>浏览器</span>
+                  {browserRunning && (
+                    <span className="pa-browser-tab-live" aria-label="浏览器活动中" />
+                  )}
+                </span>
+              ) : (
+                <span className="pa-doc-tab-label" title={tab.title}>
+                  {tab.kind === 'plan-doc' ? <FileTextOutlined /> : <DiffOutlined />}
+                  <span>{tab.title}</span>
+                </span>
+              ),
+            children:
+              tab.kind === 'overview' ? (
+                <Inspector
+                  state={state}
+                  activeProject={activeProject}
+                  activeTask={activeTask}
+                  rootPath={rootPath}
+                  onApprovePlan={() =>
+                    send({ type: 'approve_plan', taskId: stateRef.current.activeTaskId })
+                  }
+                />
+              ) : tab.kind === 'browser' ? (
+                <BrowserViewer
+                  activity={browserActivity}
+                  sessionId={browserSessionId}
+                  visible={state.inspectorOpen && activeInspectorTabKey === 'browser'}
+                />
+              ) : tab.kind === 'plan-doc' ? (
+                <PlanDocViewer doc={planDocs[tab.docId]} />
+              ) : (
+                <FileDiffViewer change={fileChanges[tab.changeId]} />
+              ),
+          }))}
       />
     </div>
   );
@@ -3183,7 +3308,7 @@ function AgentWorkspace({
               className="pa-config-alert"
               type="warning"
               showIcon
-              message="还需要配置模型"
+              title="还需要配置模型"
               description={
                 state.runtime.initializationError || '选择 Provider、模型并保存后即可开始对话。'
               }
@@ -3248,14 +3373,9 @@ function AgentWorkspace({
             </div>
           </div>
 
-          {showScrollButton && (
-            <Button className="pa-scroll-latest" onClick={scrollToLatest}>
-              ↓ 最新消息
-            </Button>
-          )}
-
           <Composer
-            rootPath={rootPath}
+            showScrollButton={showScrollButton}
+            onScrollToLatest={scrollToLatest}
             prompt={prompt}
             images={promptImages}
             enabled={composerEnabled}
@@ -3288,7 +3408,6 @@ function AgentWorkspace({
             onTaskModelChange={changeTaskModel}
             runtimeReasoningOptions={runtimeReasoningOptions}
             runtimeDisabled={runtimeDisabled}
-            executionLabel={executionLabel}
             queuedMessages={queuedMessages}
             onPromptChange={setPrompt}
             onImagesChange={setPromptImages}
@@ -3795,14 +3914,14 @@ function AgentWorkspace({
                       label="默认思考强度"
                       extra={
                         selectedProvider === 'deepseek'
-                          ? 'DeepSeek 的 low/medium 等价于 high，因此仅展示有效档位。'
+                          ? 'DeepSeek 支持 off / low / high / max；medium 不支持，将按 low 处理。'
                           : '火山方舟仅深度思考模型（如 doubao-seed-thinking）支持思考，普通模型请选择「关闭」。'
                       }
                     >
                       <Select
                         options={getReasoningOptions(
                           selectedProvider === 'deepseek'
-                            ? ['off', 'high', 'max']
+                            ? ['off', 'low', 'high', 'max']
                             : ['off', 'low', 'medium', 'high'],
                         )}
                       />
@@ -4451,6 +4570,9 @@ function Welcome({
   );
 }
 
+/** 轮次导航最多显示的轮次数：仅展示最近 N 轮，更早的轮次不再显示。 */
+const MAX_TURN_NAV_TURNS = 30;
+
 function TurnNavigation({
   turns,
   activeId,
@@ -4462,9 +4584,14 @@ function TurnNavigation({
   onSelect: (turnId: string) => void;
   left?: number;
 }) {
+  // 限制导航条数量：只显示最近 MAX_TURN_NAV_TURNS 轮；
+  // 序号仍按真实轮次计算（如「第 35 轮」），避免截断后提示错位。
+  const offset = Math.max(0, turns.length - MAX_TURN_NAV_TURNS);
+  const visibleTurns = offset > 0 ? turns.slice(offset) : turns;
   return (
     <nav className="pa-turn-nav" style={{ left }} aria-label="对话轮次导航">
-      {turns.map((turn, index) => {
+      {visibleTurns.map((turn, index) => {
+        const turnNumber = offset + index + 1;
         const preview =
           turn.text.replace(/\s+/g, ' ').trim() ||
           turn.images?.map((image) => image.name).join('、') ||
@@ -4474,11 +4601,11 @@ function TurnNavigation({
             key={turn.id}
             type="button"
             className={`pa-turn-nav-item${turn.id === activeId ? ' active' : ''}`}
-            aria-label={`跳到第 ${index + 1} 轮：${preview}`}
+            aria-label={`跳到第 ${turnNumber} 轮：${preview}`}
             onClick={() => onSelect(turn.id)}
           >
             <span className="pa-turn-nav-tip" role="tooltip">
-              <span className="pa-turn-nav-tip-index">第 {index + 1} 轮</span>
+              <span className="pa-turn-nav-tip-index">第 {turnNumber} 轮</span>
               <span className="pa-turn-nav-tip-text">{preview}</span>
             </span>
           </button>
@@ -4986,7 +5113,7 @@ function ThinkingTool({ tool }: { tool: ToolTimelineItem }) {
       {askQuestion && <pre className="pa-tool-command">{askQuestion}</pre>}
       {tool.name === 'todo_write' && parseTodoTasks(tool) ? (
         <TodoTaskList tool={tool} />
-      ) : tool.metadata?.validation ? (
+      ) : tool.name === 'frontend_validate' && tool.metadata?.validation ? (
         <FrontendValidationCard tool={tool} />
       ) : (
         <pre className="pa-tool-output">{tool.output}</pre>
@@ -5000,7 +5127,7 @@ function FrontendValidationCard({ tool }: { tool: ToolTimelineItem }) {
   if (!validation) return null;
   const passed = validation.status === 'passed';
   const artifactUrl = (id: string) => {
-    const token = new URLSearchParams(window.location.search).get('token');
+    const token = currentAuthToken();
     const path = `/api/validation/artifacts/${encodeURIComponent(validation.projectHash)}/${encodeURIComponent(validation.runId)}/${encodeURIComponent(id)}`;
     return token ? `${path}?token=${encodeURIComponent(token)}` : path;
   };
@@ -5269,7 +5396,8 @@ function AskUserCard({
 }
 
 function Composer({
-  rootPath,
+  showScrollButton,
+  onScrollToLatest,
   prompt,
   images,
   enabled,
@@ -5291,7 +5419,6 @@ function Composer({
   runtimeModels,
   runtimeReasoningOptions,
   runtimeDisabled,
-  executionLabel,
   queuedMessages,
   onPromptChange,
   onImagesChange,
@@ -5309,7 +5436,9 @@ function Composer({
   onTaskModelChange,
   onReasoningChange,
 }: {
-  rootPath: string;
+  /** 是否显示「滚动到最新消息」悬浮按钮（由对话区滚动状态驱动）。 */
+  showScrollButton: boolean;
+  onScrollToLatest: () => void;
   prompt: string;
   images: PromptImageInput[];
   enabled: boolean;
@@ -5331,7 +5460,6 @@ function Composer({
   runtimeModels: RuntimeModelGroup[];
   runtimeReasoningOptions: ReasoningEffort[];
   runtimeDisabled: boolean;
-  executionLabel?: string;
   /** 当前任务的排队消息（任务执行中 Enter 入队，展示在输入框上方浮窗）。 */
   queuedMessages: QueuedMessage[];
   onPromptChange: (prompt: string) => void;
@@ -5363,6 +5491,22 @@ function Composer({
   const [previewMode, setPreviewMode] = useState(false);
   /** `/` 技能选择菜单是否打开。 */
   const [skillMenuOpen, setSkillMenuOpen] = useState(false);
+  /** 「+」附件菜单（图片上传 / 计划模式）是否打开。 */
+  const [plusMenuOpen, setPlusMenuOpen] = useState(false);
+
+  /** 「+」附件菜单打开时：点击菜单与触发按钮之外的区域关闭。 */
+  useEffect(() => {
+    if (!plusMenuOpen) return;
+    const onPointerDown = (event: MouseEvent) => {
+      const target = event.target as HTMLElement;
+      if (target.closest('.pa-plus-floating') || target.closest('[data-testid="add-attachment"]')) {
+        return;
+      }
+      setPlusMenuOpen(false);
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    return () => document.removeEventListener('mousedown', onPointerDown);
+  }, [plusMenuOpen]);
 
   const selectImages = async (files: FileList | File[] | null): Promise<void> => {
     if (!files?.length) return;
@@ -5668,13 +5812,64 @@ function Composer({
           </div>
         </div>
       )}
-      <div className="pa-composer">
-        <Tooltip title={rootPath} placement="topLeft">
-          <div className="pa-composer-path">
-            <Badge status="success" />
-            <span>{rootPath}</span>
-          </div>
+      {showScrollButton && (
+        <Tooltip title="滚动到最新消息">
+          <Button
+            className="pa-scroll-latest"
+            icon={<ArrowDownOutlined />}
+            aria-label="滚动到最新消息"
+            onClick={onScrollToLatest}
+          />
         </Tooltip>
+      )}
+      {plusMenuOpen && (
+        <div className="pa-plus-floating">
+          <div className="pa-plus-menu" role="menu" aria-label="添加内容">
+            <button
+              type="button"
+              role="menuitem"
+              className="pa-plus-menu-item"
+              data-testid="plus-menu-image"
+              onClick={() => {
+                setPlusMenuOpen(false);
+                imageInputRef.current?.click();
+              }}
+            >
+              <PictureOutlined />
+              <span>图片上传</span>
+            </button>
+            <div className="pa-plus-menu-divider" aria-hidden="true" />
+            <div
+              className="pa-plus-menu-item"
+              role="menuitem"
+              aria-label="计划模式"
+              onClick={() => {
+                if (enabled && !busy && !creatingTask) {
+                  setPlusMenuOpen(false);
+                  onPlanModeChange(!planActive);
+                }
+              }}
+            >
+              <FileTextOutlined />
+              <div className="pa-plus-menu-plan-row">
+                <span className="pa-plus-menu-label">计划模式</span>
+                <span className="pa-plus-menu-plan-desc">先制定方案，确认后再执行</span>
+                <Switch
+                  size="small"
+                  checked={planActive}
+                  disabled={!enabled || busy || creatingTask}
+                  onClick={(checked, event) => event.stopPropagation()}
+                  onChange={(checked) => {
+                    setPlusMenuOpen(false);
+                    onPlanModeChange(checked);
+                  }}
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      <div className="pa-composer">
         <div className="pa-md-toolbar">
           <div className="pa-md-toolbar-left">
             <Button
@@ -5902,23 +6097,15 @@ function Composer({
                 event.currentTarget.value = '';
               }}
             />
-            <Tooltip
-              title={
-                busy
-                  ? '请等待当前任务完成后再添加图片'
-                  : '添加图片（Ctrl+V 粘贴，也兼容输入框内 Ctrl+C）'
-              }
-            >
-              <Button
-                type="text"
-                size="small"
-                icon={<PictureOutlined />}
-                disabled={!enabled || busy || creatingTask || Boolean(pendingQuestion)}
-                aria-label="添加图片"
-                data-testid="add-prompt-image"
-                onClick={() => imageInputRef.current?.click()}
-              />
-            </Tooltip>
+            <Button
+              type="text"
+              size="small"
+              icon={<PlusOutlined />}
+              disabled={!enabled || busy || creatingTask || Boolean(pendingQuestion)}
+              aria-label="添加附件"
+              data-testid="add-attachment"
+              onClick={() => setPlusMenuOpen((open) => !open)}
+            />
             <Select
               value={permissionMode}
               options={permissionOptions}
@@ -5927,15 +6114,11 @@ function Composer({
               aria-label="设置工具权限"
               onChange={(value: PermissionMode) => onPermissionModeChange(value)}
             />
-            <Segmented
-              value={planActive ? 'plan' : 'execute'}
-              disabled={!enabled || busy || creatingTask}
-              options={[
-                { value: 'execute', label: '执行' },
-                { value: 'plan', label: '计划' },
-              ]}
-              onChange={(value) => onPlanModeChange(value === 'plan')}
-            />
+            {planActive && (
+              <Tag color="processing" icon={<FileTextOutlined />} className="pa-plan-tag">
+                计划
+              </Tag>
+            )}
             <Tooltip
               title={
                 <ContextUsagePanel
@@ -5987,10 +6170,35 @@ function Composer({
                 onChange={(value: ReasoningEffort) => onReasoningChange(value)}
               />
             )}
-            {executionLabel && <span className="pa-execution-timer">{executionLabel}</span>}
             {busy && (
               <Tooltip title="停止生成">
-                <Button danger shape="circle" icon={<StopOutlined />} onClick={onStop} />
+                <button
+                  type="button"
+                  className="pa-stop-btn"
+                  aria-label="停止生成"
+                  data-testid="stop-generating"
+                  onClick={onStop}
+                >
+                  <svg
+                    className="pa-stop-icon"
+                    viewBox="0 0 24 24"
+                    width="13"
+                    height="13"
+                    fill="none"
+                    aria-hidden="true"
+                    focusable="false"
+                  >
+                    <rect
+                      x="6.2"
+                      y="6.2"
+                      width="11.6"
+                      height="11.6"
+                      rx="2.2"
+                      stroke="currentColor"
+                      strokeWidth="2.4"
+                    />
+                  </svg>
+                </button>
               </Tooltip>
             )}
             {/* 发送按钮始终存在：任务执行中点击会把消息加入排队队列（不直接发送） */}
@@ -6050,7 +6258,7 @@ function ModelDebugModal({
       <Alert
         type="info"
         showIcon
-        message="这里展示当前这次用户请求触发的实际模型调用；数据仅保存在当前页面内存中，且不包含 API Key。"
+        title="这里展示当前这次用户请求触发的实际模型调用；数据仅保存在当前页面内存中，且不包含 API Key。"
       />
       {selectedCall ? (
         <div className="pa-debug-layout">
@@ -6109,7 +6317,7 @@ function ModelDebugModal({
                 </strong>
               </div>
             </div>
-            {selectedCall.error && <Alert type="error" showIcon message={selectedCall.error} />}
+            {selectedCall.error && <Alert type="error" showIcon title={selectedCall.error} />}
             <div className="pa-debug-json-grid">
               <DebugJsonPanel
                 title="请求入参"
@@ -6248,7 +6456,7 @@ function StatsModal({ open, onClose }: { open: boolean; onClose: () => void }) {
       <Alert
         type="info"
         showIcon
-        message="统计来自本地 SQLite 数据库 ~/.personal-agent/stats/model-requests.db；是否保存请求入参/出参由设置中的「统计模型请求入参/出参」开关控制。"
+        title="统计来自本地 SQLite 数据库 ~/.personal-agent/stats/model-requests.db；是否保存请求入参/出参由设置中的「统计模型请求入参/出参」开关控制。"
       />
       <Space className="pa-stats-toolbar">
         <Select
@@ -6273,12 +6481,12 @@ function StatsModal({ open, onClose }: { open: boolean; onClose: () => void }) {
         </Button>
       </Space>
       {error ? (
-        <Alert type="error" showIcon message={error} />
+        <Alert type="error" showIcon title={error} />
       ) : data && data.available === false ? (
         <Alert
           type="warning"
           showIcon
-          message="模型统计当前不可用"
+          title="模型统计当前不可用"
           description="当前运行环境缺少 node:sqlite（需要 Node.js >= 22.13），或统计数据库初始化失败。"
         />
       ) : data && data.summary ? (
@@ -6495,6 +6703,8 @@ function GeneralSettingsPanel({
   const [saving, setSaving] = useState(false);
   const [maxTurns, setMaxTurns] = useState<number | null>(null);
   const [savingMaxTurns, setSavingMaxTurns] = useState(false);
+  const [browserValidationEnabled, setBrowserValidationEnabled] = useState<boolean | null>(null);
+  const [savingBrowserValidation, setSavingBrowserValidation] = useState(false);
   const [shell, setShell] = useState<'auto' | 'powershell' | 'bash' | null>(null);
   const [savingShell, setSavingShell] = useState(false);
   const [memoryEnabled, setMemoryEnabled] = useState<boolean | null>(null);
@@ -6559,12 +6769,14 @@ function GeneralSettingsPanel({
         return response.json() as Promise<{
           maxTurns: number;
           shell: 'auto' | 'powershell' | 'bash';
+          browserValidationEnabled: boolean;
         }>;
       })
       .then((payload) => {
         if (!cancelled) {
           setMaxTurns(payload.maxTurns);
           setShell(payload.shell);
+          setBrowserValidationEnabled(payload.browserValidationEnabled);
         }
       })
       .catch((err: unknown) => {
@@ -6615,6 +6827,38 @@ function GeneralSettingsPanel({
       setRecordPayloads((current) => (current === null ? null : !current));
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function toggleBrowserValidation(value: boolean) {
+    setBrowserValidationEnabled(value);
+    setSavingBrowserValidation(true);
+    try {
+      const response = await apiFetch('/api/agent-config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ browserValidationEnabled: value }),
+      });
+      const payload = (await response.json().catch(() => ({}))) as {
+        browserValidationEnabled?: boolean;
+        runtime?: RuntimeInfo;
+        error?: string;
+      };
+      if (!response.ok || typeof payload.browserValidationEnabled !== 'boolean') {
+        throw new Error(payload.error ?? `保存失败 (${response.status})`);
+      }
+      setBrowserValidationEnabled(payload.browserValidationEnabled);
+      if (payload.runtime) onRuntimeChange(payload.runtime);
+      messageApi.success(
+        payload.browserValidationEnabled
+          ? '已开启浏览器验证'
+          : '已关闭浏览器验证，浏览器会话已释放',
+      );
+    } catch (err) {
+      messageApi.error(`保存失败: ${err instanceof Error ? err.message : String(err)}`);
+      setBrowserValidationEnabled((current) => (current === null ? null : !current));
+    } finally {
+      setSavingBrowserValidation(false);
     }
   }
 
@@ -6856,7 +7100,7 @@ function GeneralSettingsPanel({
               onChange={(color) => onAccentColorsChange({ ...accentColors, dark: color })}
             />
           </Form.Item>
-          <Form.Item label=" ">
+          <Form.Item label=" " colon={false}>
             <Button size="small" icon={<ReloadOutlined />} onClick={onResetAccent}>
               恢复默认主色
             </Button>
@@ -6871,6 +7115,24 @@ function GeneralSettingsPanel({
           labelCol={{ flex: '220px' }}
           style={{ maxWidth: 640 }}
         >
+          <Form.Item
+            label={
+              <Space size={4}>
+                开启浏览器验证（Beta）
+                <Tooltip title="默认关闭。开启后 Agent 可使用 browser_* 和 frontend_validate 工具，并在修改前端文件后执行浏览器验证。">
+                  <QuestionCircleOutlined className="pa-settings-help" />
+                </Tooltip>
+              </Space>
+            }
+          >
+            <Switch
+              data-testid="browser-validation-toggle"
+              checked={browserValidationEnabled ?? false}
+              disabled={browserValidationEnabled === null}
+              loading={savingBrowserValidation}
+              onChange={(value) => void toggleBrowserValidation(value)}
+            />
+          </Form.Item>
           <Form.Item
             label={
               <Space size={4}>
@@ -7035,7 +7297,7 @@ function GeneralSettingsPanel({
                 <Alert
                   type="warning"
                   showIcon
-                  message="暂无可用视觉模型"
+                  title="暂无可用视觉模型"
                   description="请先在“模型提供商”中配置支持图片输入的供应商和模型。"
                 />
               </Form.Item>
@@ -7686,6 +7948,378 @@ function PlanDocViewer({ doc }: { doc?: PlanDoc }) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// 浏览器 Tab — 实时展示验证任务中的浏览器动作
+// ---------------------------------------------------------------------------
+
+/** 验证工件 URL（截图等），带 token 鉴权（与 FrontendValidationCard 一致）。 */
+function validationArtifactUrl(projectHash: string, runId: string, artifactId: string): string {
+  const token = currentAuthToken();
+  const path = `/api/validation/artifacts/${encodeURIComponent(projectHash)}/${encodeURIComponent(runId)}/${encodeURIComponent(artifactId)}`;
+  return token ? `${path}?token=${encodeURIComponent(token)}` : path;
+}
+
+function BrowserViewer({
+  activity,
+  sessionId,
+  visible,
+}: {
+  activity: BrowserActivityItem[];
+  sessionId?: string;
+  visible: boolean;
+}) {
+  const session = browserSessionState(activity);
+  const pageRef = useRef<HTMLDivElement | null>(null);
+  const [embeddedState, setEmbeddedState] = useState<DesktopBrowserViewState>();
+  // 最近的截图工件（按活动顺序向后查找）
+  const latestScreenshot = useMemo(() => {
+    for (let index = activity.length - 1; index >= 0; index -= 1) {
+      const shot = activity[index].screenshot;
+      if (shot) return shot;
+    }
+    return undefined;
+  }, [activity]);
+  // 最近一次的页面文本（含文本的最后一条活动）
+  const latestPageText = useMemo(() => {
+    for (let index = activity.length - 1; index >= 0; index -= 1) {
+      const item = activity[index];
+      if (item.text) return { item, text: item.text };
+    }
+    return undefined;
+  }, [activity]);
+  const running = activity.some((item) => item.status === 'running');
+  const activeState = embeddedState?.sessionId === sessionId ? embeddedState : undefined;
+  const locked = Boolean(activeState?.locked);
+  const currentUrl = activeState?.url || session.url || '';
+
+  useEffect(() => {
+    const desktopApi = window.personalAgentDesktop;
+    if (!desktopApi || !sessionId) {
+      setEmbeddedState(undefined);
+      return;
+    }
+    let disposed = false;
+    const acceptState = (next: DesktopBrowserViewState | null) => {
+      if (!disposed && next?.sessionId === sessionId) setEmbeddedState(next);
+    };
+    const unsubscribe = desktopApi.onBrowserViewState(acceptState);
+    // Browser creation may finish before this tab mounts. Querying after the
+    // subscription closes that event-delivery race without waiting for navigation.
+    void desktopApi
+      .getBrowserViewState(sessionId)
+      .then(acceptState)
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+      unsubscribe();
+    };
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (embeddedState && embeddedState.sessionId !== sessionId) {
+      setEmbeddedState(undefined);
+    }
+  }, [embeddedState, sessionId]);
+
+  useLayoutEffect(() => {
+    const desktopApi = window.personalAgentDesktop;
+    const element = pageRef.current;
+    if (!desktopApi || !element || !sessionId) return;
+    let disposed = false;
+    let frame = 0;
+    let lastLayoutKey = '';
+
+    const report = () => {
+      const bounds = browserViewBounds(element);
+      const nextVisible = visible && browserViewIsUncovered(element, bounds);
+      const layoutKey = `${nextVisible ? 1 : 0}:${bounds.x}:${bounds.y}:${bounds.width}:${bounds.height}`;
+      if (layoutKey !== lastLayoutKey) {
+        lastLayoutKey = layoutKey;
+        void desktopApi
+          .setBrowserViewLayout({ sessionId, visible: nextVisible, bounds })
+          .catch(() => {
+            // Retry on the next frame if the desktop bridge was temporarily unavailable.
+            if (!disposed && lastLayoutKey === layoutKey) lastLayoutKey = '';
+          });
+      }
+    };
+
+    const scheduleReport = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(report);
+    };
+    // WebContentsView lives outside the DOM compositor. Observe the slot and its
+    // layout chain so sidebar drags, collapsed logs, CSS transitions, and window
+    // changes cannot leave a stale native surface.
+    const resizeObserver = new ResizeObserver(scheduleReport);
+    let observed: HTMLElement | null = element;
+    while (observed) {
+      resizeObserver.observe(observed);
+      observed = observed.parentElement;
+    }
+    // Ant overlays are rendered through portals and do not necessarily resize the
+    // slot. Their DOM/class mutations must also trigger the native occlusion check.
+    const mutationObserver = new MutationObserver(scheduleReport);
+    if (visible) {
+      mutationObserver.observe(document.body, {
+        attributes: true,
+        attributeFilter: ['class', 'style', 'hidden', 'aria-hidden', 'open'],
+        childList: true,
+        subtree: true,
+      });
+    }
+    window.addEventListener('resize', scheduleReport);
+    window.addEventListener('scroll', scheduleReport, true);
+    window.addEventListener('transitionend', scheduleReport, true);
+    window.addEventListener('animationend', scheduleReport, true);
+    document.addEventListener('visibilitychange', scheduleReport);
+    window.visualViewport?.addEventListener('resize', scheduleReport);
+    window.visualViewport?.addEventListener('scroll', scheduleReport);
+    scheduleReport();
+    return () => {
+      disposed = true;
+      cancelAnimationFrame(frame);
+      resizeObserver.disconnect();
+      mutationObserver.disconnect();
+      window.removeEventListener('resize', scheduleReport);
+      window.removeEventListener('scroll', scheduleReport, true);
+      window.removeEventListener('transitionend', scheduleReport, true);
+      window.removeEventListener('animationend', scheduleReport, true);
+      document.removeEventListener('visibilitychange', scheduleReport);
+      window.visualViewport?.removeEventListener('resize', scheduleReport);
+      window.visualViewport?.removeEventListener('scroll', scheduleReport);
+      void desktopApi
+        .setBrowserViewLayout({
+          sessionId,
+          visible: false,
+          bounds: browserViewBounds(element),
+        })
+        .catch(() => undefined);
+    };
+  }, [sessionId, visible]);
+
+  const navigate = (action: 'back' | 'forward' | 'reload') => {
+    if (!sessionId || locked) return;
+    void window.personalAgentDesktop?.navigateBrowserView(sessionId, action).catch(() => undefined);
+  };
+
+  const statusLabel = activeState
+    ? activeState.status === 'creating'
+      ? '正在创建浏览器'
+      : activeState.status === 'loading'
+        ? '页面加载中'
+        : activeState.status === 'crashed'
+          ? '页面已崩溃'
+          : activeState.status === 'error'
+            ? '浏览器不可用'
+            : activeState.status === 'closed'
+              ? '浏览器已关闭'
+              : locked
+                ? 'Agent 操作中'
+                : '可交互'
+    : running
+      ? '正在启动浏览器'
+      : session.open
+        ? '等待嵌入页面'
+        : '浏览器未打开';
+
+  const logPanel = (
+    <div className="pa-browser-log-content">
+      {latestScreenshot && (
+        <a
+          href={validationArtifactUrl(
+            latestScreenshot.projectHash,
+            latestScreenshot.runId,
+            latestScreenshot.artifactId,
+          )}
+          target="_blank"
+          rel="noreferrer"
+        >
+          打开最近截图：{latestScreenshot.name}
+        </a>
+      )}
+      {activity.length === 0 ? (
+        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无浏览器操作日志" />
+      ) : (
+        <div className="pa-browser-feed">
+          {activity.map((item) => (
+            <div className={`pa-browser-feed-item ${item.status}`} key={item.id}>
+              <div className="pa-browser-feed-head">
+                {item.status === 'running' ? (
+                  <LoadingOutlined spin />
+                ) : item.status === 'success' ? (
+                  <CheckCircleOutlined />
+                ) : item.status === 'interrupted' ? (
+                  <StopOutlined />
+                ) : (
+                  <BugOutlined />
+                )}
+                <span className="pa-browser-feed-summary" title={item.summary}>
+                  {item.summary}
+                </span>
+                <span className="pa-browser-feed-time">
+                  {item.time}
+                  {typeof item.duration === 'number' ? ` · ${item.duration} ms` : ''}
+                </span>
+              </div>
+              {item.error && <div className="pa-browser-feed-error">{item.error}</div>}
+              {item.url && (
+                <div className="pa-browser-feed-url" title={item.url}>
+                  {item.url}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      {latestPageText && <pre className="pa-browser-page-text-content">{latestPageText.text}</pre>}
+    </div>
+  );
+
+  return (
+    <div className="pa-browser-viewer" data-testid="browser-viewer">
+      <div className="pa-browser-toolbar">
+        <Space.Compact size="small">
+          <Tooltip title="后退">
+            <Button
+              aria-label="后退"
+              icon={<LeftOutlined />}
+              disabled={locked || !activeState?.canGoBack}
+              onClick={() => navigate('back')}
+            />
+          </Tooltip>
+          <Tooltip title="前进">
+            <Button
+              aria-label="前进"
+              icon={<RightOutlined />}
+              disabled={locked || !activeState?.canGoForward}
+              onClick={() => navigate('forward')}
+            />
+          </Tooltip>
+          <Tooltip title="刷新">
+            <Button
+              aria-label="刷新"
+              icon={<ReloadOutlined spin={activeState?.status === 'loading'} />}
+              disabled={locked || !activeState || activeState.status === 'closed'}
+              onClick={() => navigate('reload')}
+            />
+          </Tooltip>
+        </Space.Compact>
+        <Input
+          size="small"
+          readOnly
+          className="pa-browser-url"
+          value={currentUrl}
+          placeholder="等待本地页面打开…"
+          title={currentUrl}
+          prefix={<GlobalOutlined />}
+        />
+        <span className={`pa-browser-native-status ${locked ? 'locked' : ''}`}>
+          {locked ? (
+            <LockOutlined />
+          ) : activeState?.status === 'loading' ? (
+            <LoadingOutlined spin />
+          ) : null}
+          {statusLabel}
+        </span>
+      </div>
+      <div ref={pageRef} className="pa-browser-embed" aria-label="嵌入式浏览器页面">
+        {(!activeState || ['creating', 'closed'].includes(activeState.status)) && (
+          <div className="pa-browser-embed-placeholder">
+            {running ? <Spin size="small" /> : <GlobalOutlined />}
+            <span>{statusLabel}</span>
+          </div>
+        )}
+        {(activeState?.status === 'error' || activeState?.status === 'crashed') && (
+          <Alert type="error" showIcon title={statusLabel} description={activeState.error} />
+        )}
+      </div>
+      <Collapse
+        size="small"
+        className="pa-browser-logs"
+        items={[
+          {
+            key: 'logs',
+            label: `操作与错误日志${activity.length ? `（${activity.length}）` : ''}`,
+            children: logPanel,
+          },
+        ]}
+      />
+    </div>
+  );
+}
+
+/** Convert the DOM content box to integer Electron view coordinates and clip it to the window. */
+function browserViewBounds(element: HTMLElement): {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+} {
+  const rect = element.getBoundingClientRect();
+  const viewportWidth = document.documentElement.clientWidth;
+  const viewportHeight = document.documentElement.clientHeight;
+  const contentLeft = Math.round(rect.left + element.clientLeft);
+  const contentTop = Math.round(rect.top + element.clientTop);
+  const left = Math.max(0, contentLeft);
+  const top = Math.max(0, contentTop);
+  const right = Math.min(viewportWidth, contentLeft + Math.max(0, element.clientWidth));
+  const bottom = Math.min(viewportHeight, contentTop + Math.max(0, element.clientHeight));
+  return {
+    x: left,
+    y: top,
+    width: Math.max(0, right - left),
+    height: Math.max(0, bottom - top),
+  };
+}
+
+/**
+ * Native child views always render above the React renderer. Only expose the
+ * browser surface while its DOM slot is actually topmost; opening an Ant modal,
+ * drawer, dropdown, or another desktop overlay then moves the native view away.
+ */
+function browserViewIsUncovered(
+  element: HTMLElement,
+  bounds: { x: number; y: number; width: number; height: number },
+): boolean {
+  if (
+    document.visibilityState !== 'visible' ||
+    !element.isConnected ||
+    bounds.width < 1 ||
+    bounds.height < 1
+  ) {
+    return false;
+  }
+  const style = getComputedStyle(element);
+  if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) {
+    return false;
+  }
+
+  const insetX = Math.min(4, Math.max(0, Math.floor(bounds.width / 4)));
+  const insetY = Math.min(4, Math.max(0, Math.floor(bounds.height / 4)));
+  const left = bounds.x + insetX;
+  const right = bounds.x + bounds.width - insetX - 1;
+  const top = bounds.y + insetY;
+  const bottom = bounds.y + bounds.height - insetY - 1;
+  const centerX = Math.floor((left + right) / 2);
+  const centerY = Math.floor((top + bottom) / 2);
+  const points = [
+    [left, top],
+    [centerX, top],
+    [right, top],
+    [left, centerY],
+    [centerX, centerY],
+    [right, centerY],
+    [left, bottom],
+    [centerX, bottom],
+    [right, bottom],
+  ];
+  return points.every(([x, y]) => {
+    const topmost = document.elementFromPoint(x, y);
+    return topmost === element || (topmost !== null && element.contains(topmost));
+  });
+}
+
 function Inspector({
   state,
   activeProject,
@@ -7813,38 +8447,6 @@ function Metadata({ label, value }: { label: string; value: ReactNode }) {
       <dd title={typeof value === 'string' ? value : undefined}>{value}</dd>
     </div>
   );
-}
-
-function useExecutionTimer(busy: boolean): string | undefined {
-  const startedAt = useRef<number>();
-  const [label, setLabel] = useState<string>();
-
-  useEffect(() => {
-    let interval: ReturnType<typeof setInterval> | undefined;
-    let hideTimer: ReturnType<typeof setTimeout> | undefined;
-
-    if (busy) {
-      if (startedAt.current === undefined) startedAt.current = Date.now();
-      const update = () => {
-        if (startedAt.current === undefined) return;
-        setLabel(`执行中 ${formatExecutionDuration(Date.now() - startedAt.current)}`);
-      };
-      update();
-      interval = setInterval(update, 100);
-    } else if (startedAt.current !== undefined) {
-      const elapsed = Date.now() - startedAt.current;
-      startedAt.current = undefined;
-      setLabel(`本次 ${formatExecutionDuration(elapsed)}`);
-      hideTimer = setTimeout(() => setLabel(undefined), 5000);
-    }
-
-    return () => {
-      if (interval) clearInterval(interval);
-      if (hideTimer) clearTimeout(hideTimer);
-    };
-  }, [busy]);
-
-  return label;
 }
 
 function planDocCardItem(doc: PlanDoc): PlanDocTimelineItem {
@@ -8223,11 +8825,21 @@ function bootstrapAuthToken(): void {
 
 bootstrapAuthToken();
 
-function apiFetch(path: string, options: RequestInit = {}) {
-  const token =
+/**
+ * 当前认证 token：优先 sessionStorage（bootstrapAuthToken 已在页面加载时写入），
+ * 其次 URL 参数。WebSocket 连接后 token 会从 URL 移除（history.replaceState），
+ * 因此必须回退到 sessionStorage，否则验证截图等 <img> 请求会因缺少 token 而 401 裂图。
+ */
+function currentAuthToken(): string | undefined {
+  return (
     sessionStorage.getItem('personal-agent-token') ??
     new URLSearchParams(location.search).get('token') ??
-    undefined;
+    undefined
+  );
+}
+
+function apiFetch(path: string, options: RequestInit = {}) {
+  const token = currentAuthToken();
   const headers = new Headers(options.headers);
   if (token) headers.set('Authorization', `Bearer ${token}`);
   return fetch(path, { ...options, headers });
@@ -8304,6 +8916,7 @@ function ContextUsagePanel({ usage, footer }: { usage?: ContextUsage; footer?: R
         percent={usage.percentage}
         size="small"
         status={danger ? 'exception' : warn ? 'active' : 'normal'}
+        format={(percent) => `${(percent ?? 0).toFixed(2)}%`}
       />
       <div className="pa-context-tip-row">
         <span>已使用</span>
@@ -8315,7 +8928,7 @@ function ContextUsagePanel({ usage, footer }: { usage?: ContextUsage; footer?: R
       </div>
       <div className="pa-context-tip-row">
         <span>占用</span>
-        <b>{usage.percentage}%</b>
+        <b>{usage.percentage.toFixed(2)}%</b>
       </div>
       {typeof usage.cacheHitTokens === 'number' && usage.cacheHitTokens > 0 && (
         <div className="pa-context-tip-row">
@@ -8439,6 +9052,15 @@ function currentTime(): string {
   });
 }
 
+/** 含秒的时间（浏览器活动流条目使用，便于区分连续动作）。 */
+function currentTimeWithSeconds(): string {
+  return new Date().toLocaleTimeString('zh-CN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+}
+
 function relativeTime(value: string): string {
   const seconds = Math.floor((Date.now() - new Date(value).getTime()) / 1000);
   if (seconds < 60) return '刚刚';
@@ -8450,20 +9072,6 @@ function relativeTime(value: string): string {
 
 function lastPathSegment(value: string): string | undefined {
   return value.split(/[\\/]/).filter(Boolean).at(-1);
-}
-
-function formatExecutionDuration(milliseconds: number): string {
-  const totalTenths = Math.max(0, Math.floor(milliseconds / 100));
-  const tenths = totalTenths % 10;
-  const totalSeconds = Math.floor(totalTenths / 10);
-  const seconds = totalSeconds % 60;
-  const totalMinutes = Math.floor(totalSeconds / 60);
-  const minutes = totalMinutes % 60;
-  const hours = Math.floor(totalMinutes / 60);
-  const clock = hours
-    ? `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
-    : `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
-  return `${clock}.${tenths}`;
 }
 
 /** 任务完成时计算总耗时（ms）：从消息创建时间戳起算；缺时间戳（如历史恢复的消息）返回 undefined。 */

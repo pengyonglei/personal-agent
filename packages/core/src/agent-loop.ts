@@ -57,6 +57,14 @@ export interface AgentLoopConfig {
    * inject_user_message 等「插入当前执行循环」的能力）。返回的数组会被清空。
    */
   drainPendingUserMessages?: () => string[];
+  /**
+   * 是否存在待处理的系统级指令（如前端修改后的验证要求）：
+   * 指令本身通过系统提示词动态段（contextAssembler.addSection 的函数式
+   * content）在每次 assemble 时求值注入，不入对话历史；
+   * 此钩子仅在 end_turn 时被询问，返回 true 表示要求模型继续本轮循环
+   * （如执行 frontend_validate），而不是直接结束任务。
+   */
+  hasPendingInstruction?: () => boolean;
 }
 
 export interface ModelCallDebugStart {
@@ -369,7 +377,10 @@ export class AgentLoop {
                   // 执行期间注入的用户消息：若存在，则追加进历史并延续循环，
                   // 让模型在本轮运行内回应这些补充消息，而不是直接结束。
                   const injectedMessages = this.config.drainPendingUserMessages?.() ?? [];
-                  if (injectedMessages.length > 0) {
+                  // 系统级待办指令（如前端验证要求）：由系统提示词动态段注入，
+                  // 不入历史；存在时延续循环让模型在本轮运行内响应。
+                  const pendingInstruction = this.config.hasPendingInstruction?.() ?? false;
+                  if (injectedMessages.length > 0 || pendingInstruction) {
                     for (const injectedText of injectedMessages) {
                       this.config.contextAssembler.addMessage({
                         role: 'user',

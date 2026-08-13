@@ -1,7 +1,11 @@
 import { spawn } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { ValidationBrowserSession } from './browser';
+import {
+  ValidationBrowserSession,
+  type ValidationBrowserController,
+  type ValidationBrowserHost,
+} from './browser';
 import {
   artifactFromPath,
   createRunArtifacts,
@@ -11,6 +15,7 @@ import {
 } from './artifacts';
 import { loadValidationConfig, ValidationConfigError } from './config';
 import { ensureValidationServer, stopProcessTree, ValidationInfrastructureError } from './server';
+import type { ManagedValidationServer } from './server';
 import type {
   ValidationArtifact,
   ValidationConfig,
@@ -28,6 +33,24 @@ export interface RunFrontendValidationOptions {
   signal?: AbortSignal;
   visualReviewer?: VisualReviewer;
   onProgress?: (message: string) => void;
+  /** Optional Electron browser host. Omit to launch the existing Playwright Chromium. */
+  browserHost?: ValidationBrowserHost;
+  browserSessionId?: string;
+  /** Existing development-server lease owned by the caller. */
+  server?: ManagedValidationServer;
+  /** Keep the acquired page and development server alive for follow-up browser tools. */
+  retainResources?: boolean;
+  onResourcesAcquired?: (resources: {
+    browser: ValidationBrowserController;
+    server: Awaited<ReturnType<typeof ensureValidationServer>>;
+    artifactDirectory: string;
+    projectHash: string;
+    runId: string;
+  }) => void | Promise<void>;
+  onBrowserAcquired?: (browser: ValidationBrowserController) => void | Promise<void>;
+  onBrowserAcquireStarted?: () => void | Promise<void>;
+  /** Global trace mutex supplied by the desktop tool layer. */
+  acquireTraceLock?: (signal?: AbortSignal) => Promise<() => void>;
 }
 
 export function validationExitCode(status: ValidationRunResult['status']): 0 | 1 | 2 {
@@ -65,8 +88,11 @@ export async function runFrontendValidation(
   const artifacts: ValidationArtifact[] = [];
   const logLines: string[] = [];
   let server: Awaited<ReturnType<typeof ensureValidationServer>> | undefined;
-  let browser: ValidationBrowserSession | undefined;
+  let browser: ValidationBrowserController | undefined;
   let traceStarted = false;
+  let releaseTraceLock: (() => void) | undefined;
+  let resourcesRetained = false;
+  const ownsServer = !options.server;
   let vision: ValidationRunResult['vision'] = {
     status: 'skipped',
     reason: 'No visual reviewer configured.',
@@ -95,7 +121,9 @@ export async function runFrontendValidation(
 
     options.onProgress?.('Starting or reusing the development server.');
     const serverStep = await timedStep('development server', async () => {
-      server = await ensureValidationServer(config, options.workingDirectory, options.signal);
+      server =
+        options.server ??
+        (await ensureValidationServer(config, options.workingDirectory, options.signal));
       return server.reused ? 'Reused an existing server.' : 'Started a managed server.';
     });
     steps.push(serverStep.step);
@@ -107,8 +135,39 @@ export async function runFrontendValidation(
       throw new ValidationFailure();
     }
 
-    browser = new ValidationBrowserSession(config, options.workingDirectory);
+    if (config.artifacts.trace !== 'off' && options.acquireTraceLock) {
+      options.onProgress?.('Waiting for the validation trace lock.');
+      releaseTraceLock = await options.acquireTraceLock(options.signal);
+    }
+
+    if (options.browserHost) {
+      if (!options.browserSessionId) {
+        throw new ValidationInfrastructureError(
+          'Embedded browser host requires a browser session id.',
+        );
+      }
+      await options.onBrowserAcquireStarted?.();
+      browser = await options.browserHost.acquire({
+        sessionId: options.browserSessionId,
+        config,
+        workingDirectory: options.workingDirectory,
+        reset: true,
+      });
+    } else {
+      browser = new ValidationBrowserSession(config, options.workingDirectory);
+    }
+    await options.onBrowserAcquired?.(browser);
     await browser.open();
+    if (server) {
+      await options.onResourcesAcquired?.({
+        browser,
+        server,
+        artifactDirectory: run.directory,
+        projectHash: run.projectHash,
+        runId: run.runId,
+      });
+      resourcesRetained = Boolean(options.retainResources);
+    }
     if (config.artifacts.trace !== 'off') {
       await browser.startTrace();
       traceStarted = true;
@@ -174,11 +233,19 @@ export async function runFrontendValidation(
           error: message,
         });
         const failurePath = join(run.directory, screenshotName(`${scenario.name}-failure`));
-        await browser.screenshot(failurePath).catch(() => undefined);
+        let failureScreenshotError: unknown;
+        await browser.screenshot(failurePath).catch((error) => {
+          failureScreenshotError = error;
+        });
         try {
           artifacts.push(await artifactFromPath(failurePath, 'screenshot', 'image/png'));
-        } catch {
-          // A navigation-level failure may prevent a screenshot.
+        } catch (error) {
+          const screenshotError = failureScreenshotError ?? error;
+          issues.push({
+            source: 'infrastructure',
+            scenario: scenario.name,
+            message: `Cannot capture usable failure screenshot: ${formatError(screenshotError)}`,
+          });
         }
       }
     }
@@ -210,8 +277,13 @@ export async function runFrontendValidation(
         }
       }
     }
-    await browser?.close();
-    await server?.stop();
+    const infrastructureFailure = issues.some((issue) => issue.source === 'infrastructure');
+    if (infrastructureFailure) resourcesRetained = false;
+    if (!resourcesRetained) {
+      await browser?.close();
+      if (ownsServer) await server?.stop();
+    }
+    releaseTraceLock?.();
   }
 
   const logArtifact = await writeTextArtifact(
@@ -350,7 +422,7 @@ async function timedStep<T>(name: string, work: () => Promise<T>) {
 
 function collectDiagnostics(
   config: ValidationConfig,
-  browser: ValidationBrowserSession,
+  browser: ValidationBrowserController,
   issues: ValidationIssue[],
   logs: string[],
 ): void {

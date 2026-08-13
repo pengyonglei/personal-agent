@@ -81,6 +81,7 @@ export function normalizeValidationConfig(value: unknown): ValidationConfig {
       ),
       locale: optionalString(browser.locale, 'browser.locale'),
       executablePath: optionalString(browser.executablePath, 'browser.executablePath'),
+      headless: optionalBoolean(browser.headless, 'browser.headless', true),
     },
     checks: {
       quick: commandList(checks.quick, 'checks.quick'),

@@ -23,9 +23,29 @@ test('normalizes a minimal validation configuration', () => {
     scenarios: [{ name: 'home' }],
   });
   assert.deepEqual(config.browser.viewport, { width: 1440, height: 1000 });
+  assert.equal(config.browser.headless, true);
   assert.equal(config.server.healthUrl, 'http://127.0.0.1:3000');
   assert.equal(config.scenarios[0].screenshot, true);
   assert.deepEqual(config.scenarios[0].profiles, ['quick', 'full']);
+});
+
+test('honors an explicit headed browser configuration', () => {
+  const config = normalizeValidationConfig({
+    server: { url: 'http://127.0.0.1:3000' },
+    browser: { headless: false, viewport: { width: 800, height: 600 } },
+    scenarios: [{ name: 'home' }],
+  });
+  assert.equal(config.browser.headless, false);
+  assert.deepEqual(config.browser.viewport, { width: 800, height: 600 });
+  assert.throws(
+    () =>
+      normalizeValidationConfig({
+        server: { url: 'http://127.0.0.1:3000' },
+        browser: { headless: 'yes' },
+        scenarios: [{ name: 'home' }],
+      }),
+    /browser.headless must be a boolean/,
+  );
 });
 
 test('rejects external URLs and ambiguous locators', () => {

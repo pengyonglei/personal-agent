@@ -16,10 +16,55 @@ export interface BrowserDiagnostics {
   responses: Array<{ url: string; status: number }>;
 }
 
-export class ValidationBrowserSession {
+/**
+ * Browser operations used by validation and browser tools. Implementations may
+ * own a Playwright-launched browser or control an Electron-embedded page.
+ */
+export interface ValidationBrowserController {
+  readonly diagnostics: BrowserDiagnostics;
+  open(url?: string): Promise<void>;
+  reset(url?: string): Promise<void>;
+  startTrace(): Promise<void>;
+  stopTrace(path?: string): Promise<void>;
+  navigate(path: string): Promise<void>;
+  act(action: ValidationAction): Promise<void>;
+  assert(assertion: ValidationAssertion): Promise<void>;
+  snapshot(): Promise<BrowserSnapshot>;
+  screenshot(path: string, fullPage?: boolean): Promise<void>;
+  close(): Promise<void>;
+}
+
+export interface ValidationBrowserAcquireOptions {
+  sessionId: string;
+  config: ValidationConfig;
+  workingDirectory: string;
+  /** Recreate the underlying browsing partition before returning the controller. */
+  reset?: boolean;
+}
+
+/** Desktop-only injection point. Web and CLI omit it and keep using Playwright Chromium. */
+export interface ValidationBrowserHost {
+  acquire(options: ValidationBrowserAcquireOptions): Promise<ValidationBrowserController>;
+  close(sessionId: string): Promise<void>;
+  closeAll?(): Promise<void>;
+  /** Notifies the tool layer when a page disappears without browser_close. */
+  onSessionClosed?(listener: (sessionId: string) => void): () => void;
+}
+
+export interface ConnectedValidationBrowserOptions {
+  page: Page;
+  context: BrowserContext;
+  onAutomationActive?: (active: boolean) => void | Promise<void>;
+  /** Electron WebContentsView cannot reliably use CDP Page.captureScreenshot. */
+  captureScreenshot?: (path: string, fullPage: boolean) => Promise<void>;
+  onClose?: () => void | Promise<void>;
+}
+
+export class ValidationBrowserSession implements ValidationBrowserController {
   private browser?: Browser;
   private context?: BrowserContext;
   private page?: Page;
+  private automationDepth = 0;
   readonly diagnostics: BrowserDiagnostics = {
     console: [],
     pageErrors: [],
@@ -30,17 +75,26 @@ export class ValidationBrowserSession {
   constructor(
     private readonly config: ValidationConfig,
     private readonly workingDirectory: string,
-  ) {}
+    private readonly connected?: ConnectedValidationBrowserOptions,
+  ) {
+    if (connected) {
+      this.context = connected.context;
+      this.page = connected.page;
+      this.observe(connected.page);
+    }
+  }
 
   async open(url = this.config.server.url): Promise<void> {
     assertLocalUrl(url);
-    if (!this.browser) {
+    if (!this.page) {
+      const headless = resolveHeadless(this.config.browser.headless);
       const executablePath = resolveExecutablePath(
         this.config.browser.executablePath,
         this.workingDirectory,
+        headless,
       );
       try {
-        this.browser = await chromium.launch({ headless: true, executablePath });
+        this.browser = await chromium.launch({ headless, executablePath });
       } catch (error) {
         throw new ValidationInfrastructureError(
           `Chromium could not start: ${formatError(error)}. Run \"pnpm exec playwright install chromium\" or package the configured browser.`,
@@ -58,7 +112,28 @@ export class ValidationBrowserSession {
       this.page = await this.context.newPage();
       this.observe(this.page);
     }
-    await this.requirePage().goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    await this.withAutomationLock(() =>
+      this.requirePage().goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 }),
+    );
+  }
+
+  async reset(url = this.config.server.url): Promise<void> {
+    if (this.connected) {
+      await this.withAutomationLock(async () => {
+        await this.requireContext().clearCookies();
+        await this.requireContext().clearPermissions();
+        await this.requirePage()
+          .evaluate(() => {
+            localStorage.clear();
+            sessionStorage.clear();
+          })
+          .catch(() => undefined);
+      });
+      await this.open(url);
+      return;
+    }
+    await this.close();
+    await this.open(url);
   }
 
   async startTrace(): Promise<void> {
@@ -76,10 +151,16 @@ export class ValidationBrowserSession {
   async navigate(path: string): Promise<void> {
     const url = new URL(path, this.config.server.url).toString();
     assertLocalUrl(url);
-    await this.requirePage().goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    await this.withAutomationLock(() =>
+      this.requirePage().goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 }),
+    );
   }
 
   async act(action: ValidationAction): Promise<void> {
+    await this.withAutomationLock(() => this.actUnlocked(action));
+  }
+
+  private async actUnlocked(action: ValidationAction): Promise<void> {
     const page = this.requirePage();
     if (action.action === 'wait') {
       await page.waitForTimeout(action.timeoutMs ?? 500);
@@ -116,6 +197,10 @@ export class ValidationBrowserSession {
   }
 
   async assert(assertion: ValidationAssertion): Promise<void> {
+    await this.withAutomationLock(() => this.assertUnlocked(assertion));
+  }
+
+  private async assertUnlocked(assertion: ValidationAssertion): Promise<void> {
     const page = this.requirePage();
     if (assertion.assert === 'url') {
       const actual = page.url();
@@ -214,10 +299,20 @@ export class ValidationBrowserSession {
   }
 
   async screenshot(path: string, fullPage = true): Promise<void> {
+    if (this.connected?.captureScreenshot) {
+      await this.connected.captureScreenshot(path, fullPage);
+      return;
+    }
     await this.requirePage().screenshot({ path, fullPage });
   }
 
   async close(): Promise<void> {
+    if (this.connected) {
+      this.page = undefined;
+      this.context = undefined;
+      await this.connected.onClose?.();
+      return;
+    }
     await this.context?.close().catch(() => undefined);
     await this.browser?.close().catch(() => undefined);
     this.page = undefined;
@@ -252,6 +347,17 @@ export class ValidationBrowserSession {
     if (!this.context) throw new ValidationInfrastructureError('Browser session is not open.');
     return this.context;
   }
+
+  private async withAutomationLock<T>(work: () => Promise<T>): Promise<T> {
+    this.automationDepth += 1;
+    if (this.automationDepth === 1) await this.connected?.onAutomationActive?.(true);
+    try {
+      return await work();
+    } finally {
+      this.automationDepth -= 1;
+      if (this.automationDepth === 0) await this.connected?.onAutomationActive?.(false);
+    }
+  }
 }
 
 function locate(page: Page, value: ValidationAction | ValidationAssertion): Locator {
@@ -282,19 +388,46 @@ function isAllowedLocalResource(value: string): boolean {
   const url = new URL(value);
   if (['data:', 'blob:', 'about:'].includes(url.protocol)) return true;
   return (
-    ['http:', 'https:'].includes(url.protocol) &&
+    ['http:', 'https:', 'ws:', 'wss:'].includes(url.protocol) &&
     ['localhost', '127.0.0.1', '::1'].includes(url.hostname)
   );
 }
 
-function resolveExecutablePath(configured: string | undefined, workingDirectory: string) {
+function resolveExecutablePath(
+  configured: string | undefined,
+  workingDirectory: string,
+  headless: boolean,
+) {
   const value = process.env.PERSONAL_AGENT_CHROMIUM_EXECUTABLE ?? configured;
   if (value) return resolve(workingDirectory, value);
   const bundledRoot = process.env.PLAYWRIGHT_BROWSERS_PATH;
   if (!bundledRoot || !existsSync(bundledRoot)) return undefined;
-  for (const directory of readdirSync(bundledRoot).sort().reverse()) {
+  const directories = readdirSync(bundledRoot).sort().reverse();
+  // The headless shell cannot show a window; in headed mode prefer the full Chromium build.
+  if (!headless) {
+    for (const directory of directories) {
+      const candidates = [
+        resolve(bundledRoot, directory, 'chrome-win64', 'chrome.exe'),
+        resolve(bundledRoot, directory, 'chrome-linux', 'chrome'),
+        resolve(
+          bundledRoot,
+          directory,
+          'chrome-mac',
+          'Chromium.app',
+          'Contents',
+          'MacOS',
+          'Chromium',
+        ),
+      ];
+      const match = candidates.find(existsSync);
+      if (match) return match;
+    }
+  }
+  for (const directory of directories) {
     const candidates = [
       resolve(bundledRoot, directory, 'chrome-headless-shell-win64', 'chrome-headless-shell.exe'),
+      resolve(bundledRoot, directory, 'chrome-headless-shell-linux64', 'chrome-headless-shell'),
+      resolve(bundledRoot, directory, 'chrome-headless-shell-mac64', 'chrome-headless-shell'),
       resolve(bundledRoot, directory, 'chrome-win64', 'chrome.exe'),
       resolve(bundledRoot, directory, 'chrome-linux', 'chrome'),
       resolve(
@@ -311,6 +444,18 @@ function resolveExecutablePath(configured: string | undefined, workingDirectory:
     if (match) return match;
   }
   return undefined;
+}
+
+/**
+ * Resolves whether the browser window should be visible.
+ * Config value wins unless overridden by the PERSONAL_AGENT_HEADLESS environment
+ * variable ('1'/'true' forces headless, '0'/'false' forces a visible window).
+ */
+function resolveHeadless(configured: boolean): boolean {
+  const value = process.env.PERSONAL_AGENT_HEADLESS?.trim().toLowerCase();
+  if (value === '0' || value === 'false') return false;
+  if (value === '1' || value === 'true') return true;
+  return configured;
 }
 
 function formatError(error: unknown): string {

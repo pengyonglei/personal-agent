@@ -49,14 +49,18 @@ import type {
   UserQuestion,
 } from '@personal-agent/shared';
 import { createLogger, ProviderFeature } from '@personal-agent/shared';
+import type { ValidationBrowserHost } from '@personal-agent/validation';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import {
+  BROWSER_VALIDATION_TOOL_NAMES,
   describeShell,
+  closeAllBrowserSessions,
   closeBrowserSession,
   registerBuiltinTools,
+  setBrowserValidationToolsEnabled,
   setDefaultShellPreference,
   type PermissionManager,
   type ToolContext,
@@ -101,6 +105,12 @@ const PLAN_MODE_TOOLS = new Set([
   'submit_plan',
   'ask_user',
 ]);
+/** 计划批准后的执行注入默认模板；${plan} 占位符会被当前全量计划替换。 */
+const PLAN_EXECUTION_WEB_TEMPLATE = `## Approved Plan
+
+${'${plan}'}
+
+Execute in dependency order and use update_plan_step to report progress.`;
 
 export type RuntimeEmitter = (message: ServerMessage) => void;
 export type PermissionRequester = (
@@ -195,6 +205,7 @@ export class WebAgentRuntime {
   readonly fileChangeStore: FileChangeStore;
   /** 标准技能上传目录（~/.personal-agent/skills，与插件等配置同根）。 */
   private readonly skillsDirectory: string;
+  private readonly browserHost?: ValidationBrowserHost;
 
   private constructor(
     config: AppConfig,
@@ -206,6 +217,7 @@ export class WebAgentRuntime {
     plansDirectory?: string,
     fileChangesDirectory?: string,
     skillsDirectory?: string,
+    browserHost?: ValidationBrowserHost,
   ) {
     this.config = config;
     this.workingDirectory = workingDirectory;
@@ -213,6 +225,7 @@ export class WebAgentRuntime {
     this.configPath = configPath;
     this.sessionsDirectory = sessionsDirectory;
     this.skillsDirectory = skillsDirectory ?? resolve(homedir(), '.personal-agent', 'skills');
+    this.browserHost = browserHost;
     this.planStore = new PlanStore(
       plansDirectory ?? resolve(homedir(), '.personal-agent', 'plans'),
     );
@@ -224,7 +237,9 @@ export class WebAgentRuntime {
     // Sync the shell preference into the tool layer so the bash tool follows
     // the setting without rebuilding (the settings page can change it live).
     setDefaultShellPreference(config.tools.shell);
-    const tools = registerBuiltinTools();
+    const tools = registerBuiltinTools({
+      browserValidationEnabled: config.validation.enabled,
+    });
     this.toolRegistry = tools.registry;
     this.toolExecutor = tools.executor;
     this.permissionManager = tools.permissionManager;
@@ -265,6 +280,8 @@ export class WebAgentRuntime {
       fileChangesDirectory?: string;
       /** 标准技能上传目录（默认 ~/.personal-agent/skills，测试用）。 */
       skillsDirectory?: string;
+      /** Desktop-only embedded browser host. */
+      browserHost?: ValidationBrowserHost;
     } = {},
   ): Promise<WebAgentRuntime> {
     const workingDirectory =
@@ -285,6 +302,7 @@ export class WebAgentRuntime {
       options.plansDirectory,
       options.fileChangesDirectory,
       options.skillsDirectory,
+      options.browserHost,
     );
     await runtime.initialize();
     return runtime;
@@ -489,6 +507,7 @@ export class WebAgentRuntime {
       reasoningEffort: this.getReasoningEffort(),
       workingDirectory: this.workingDirectory,
       toolCount: this.toolRegistry.listAll().length,
+      browserValidationEnabled: this.config.validation.enabled,
       plugins: this.pluginLoader.getLoadedPlugins().map((plugin) => ({
         name: plugin.manifest.name,
         version: plugin.manifest.version,
@@ -884,6 +903,31 @@ export class WebAgentRuntime {
     setDefaultShellPreference(shell);
   }
 
+  isBrowserValidationEnabled(): boolean {
+    return this.config.validation.enabled;
+  }
+
+  /** Apply the global browser-validation switch immediately to all tasks. */
+  async setBrowserValidationEnabled(enabled: boolean): Promise<void> {
+    this.config.validation.enabled = enabled;
+    setBrowserValidationToolsEnabled(this.toolRegistry, enabled);
+    for (const conversation of this.conversations.values()) {
+      conversation.onBrowserValidationSettingChanged(enabled);
+    }
+    if (enabled) return;
+
+    try {
+      await closeAllBrowserSessions();
+    } catch (error) {
+      log.warn(`Browser validation session cleanup failed: ${formatError(error)}`);
+    }
+    try {
+      await this.browserHost?.closeAll?.();
+    } catch (error) {
+      log.warn(`Embedded browser host cleanup failed: ${formatError(error)}`);
+    }
+  }
+
   /**
    * Live-update memory settings (settings page).
    * 开启时（重新）初始化 memory store 并注册 read_memory / write_memory 工具；
@@ -1162,6 +1206,16 @@ export class WebAgentRuntime {
     input: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<ToolResult> {
+    const browserValidationTool = (BROWSER_VALIDATION_TOOL_NAMES as readonly string[]).includes(
+      name,
+    );
+    if (browserValidationTool && !this.config.validation.enabled) {
+      return {
+        success: false,
+        content: '',
+        error: '浏览器验证未开启。请先在“设置 → 通用”中开启浏览器验证。',
+      };
+    }
     // 文件修改捕获：执行前记录目标文件的旧内容（write_file / edit_file）
     const captured = await this.captureFileBefore(name, input);
     await this.pluginLoader.dispatchHook('on_tool_execute', {
@@ -1173,12 +1227,24 @@ export class WebAgentRuntime {
       sessionId: conversation.sessionId,
       workingDirectory: conversation.workingDirectory,
       signal,
+      browserHost: this.browserHost,
       askUser: (question, questionSignal) => conversation.askUser(question, questionSignal),
       reviewImage: this.config.vision.enabled
         ? (reviewInput) => this.reviewValidationImage(conversation.workingDirectory, reviewInput)
         : undefined,
     };
-    const result = await this.toolExecutor.executeWithPermission(name, input, context, true);
+    let result = await this.toolExecutor.executeWithPermission(name, input, context, true);
+    // The user may turn validation off while an operation is still in flight.
+    // Tear down anything it created and do not report a stale successful result.
+    if (browserValidationTool && !this.config.validation.enabled) {
+      await closeBrowserSession(conversation.sessionId).catch(() => undefined);
+      await this.browserHost?.close(conversation.sessionId).catch(() => undefined);
+      result = {
+        success: false,
+        content: '',
+        error: '浏览器验证已关闭，当前操作已停止。',
+      };
+    }
     if (name === 'frontend_validate') {
       conversation.recordFrontendValidation(result.success);
     }
@@ -1369,6 +1435,7 @@ export class WebAgentRuntime {
     this.taskProviderOverrides.clear();
     await this.mcpManager.disconnectAll();
     await this.providerRegistry?.disposeAll();
+    await this.browserHost?.closeAll?.();
     this.statsStore?.close();
   }
 
@@ -1424,6 +1491,8 @@ export class WebConversation {
   private injectedUserMessages: string[] = [];
   /** Smart post-edit gate: visible frontend changes must carry validation evidence. */
   private readonly frontendValidationGate = new FrontendValidationGate();
+  /** 最近一次推送给前端的验证提醒文本（用于去重，仅在内容变化时发 notice）。 */
+  private lastValidationNotice?: string;
 
   get providerInstance(): LLMProvider {
     return this.provider;
@@ -1507,7 +1576,10 @@ export class WebConversation {
       await this.runtime.dispatchUserInput(this, normalizedInput.text);
       const cleanedInput = await this.runtime.injectPromptContext(this, normalizedInput.text);
       const prepared = await this.runtime.prepareUserPrompt(this, normalizedInput, cleanedInput);
-      for await (const event of this.agentLoop.run(prepared.modelContent, prepared.displayContent)) {
+      for await (const event of this.agentLoop.run(
+        prepared.modelContent,
+        prepared.displayContent,
+      )) {
         this.forwardAgentEvent(event);
       }
       this.session.replaceMessages(this.context.getHistory());
@@ -1542,11 +1614,20 @@ export class WebConversation {
   /** 记录本次任务执行中修改的文件（执行结束后随 run_changes 消息推送）。 */
   recordFileChange(path: string, oldContent: string, newContent: string): void {
     this.pendingFileChanges.push({ path, oldContent, newContent });
-    this.frontendValidationGate.recordFile(path);
+    if (this.runtime.isBrowserValidationEnabled()) {
+      this.frontendValidationGate.recordFile(path);
+    }
   }
 
   recordFrontendValidation(success: boolean): void {
+    if (!this.runtime.isBrowserValidationEnabled()) return;
     this.frontendValidationGate.recordValidation(success);
+  }
+
+  onBrowserValidationSettingChanged(enabled: boolean): void {
+    if (enabled) return;
+    this.frontendValidationGate.reset();
+    this.lastValidationNotice = undefined;
   }
 
   /** 把本次执行收集到的文件修改推送给前端（一次用户请求的修改清单）。
@@ -1622,9 +1703,27 @@ export class WebConversation {
   drainInjectedUserMessages(): string[] {
     const pending = this.injectedUserMessages;
     this.injectedUserMessages = [];
-    const validation = this.frontendValidationGate.requiredFollowup();
-    if (validation) pending.push(validation);
+    // 前端验证要求不再伪装成用户消息注入历史，而是通过系统提示词动态段
+    // （见 createAgentState 中的 frontend-validation-followup section）传达给
+    // 模型；这里只把「有要求」的信号以 notice 推给前端，让用户看到进度提示。
+    const followup = this.runtime.isBrowserValidationEnabled()
+      ? this.frontendValidationGate.requiredFollowup()
+      : undefined;
+    if (followup && followup !== this.lastValidationNotice) {
+      this.lastValidationNotice = followup;
+      this.emit({ type: 'notice', message: followup, taskId: this.taskId });
+    } else if (!followup) {
+      this.lastValidationNotice = undefined;
+    }
     return pending;
+  }
+
+  /** 是否存在待处理的系统级验证要求（AgentLoop 据此延续循环，不结束任务）。 */
+  hasPendingValidationFollowup(): boolean {
+    return (
+      this.runtime.isBrowserValidationEnabled() &&
+      Boolean(this.frontendValidationGate.requiredFollowup())
+    );
   }
 
   async checkpoint(): Promise<void> {
@@ -1663,6 +1762,7 @@ export class WebConversation {
       await this.session.save();
     }
     await this.runtime.dispatchSessionEnd(this);
+    await closeBrowserSession(previousId);
     this.runtime.detachConversation(this, previousId);
     this.createState();
     await this.session.ensureDir();
@@ -1679,6 +1779,7 @@ export class WebConversation {
     const previousId = this.sessionId;
     const restored = await this.session.restore(sessionId);
     if (!restored) return false;
+    await closeBrowserSession(previousId);
     this.runtime.detachConversation(this, previousId);
     this.context.replaceHistory(this.session.getMessages());
     this.planEngine.clearPlan();
@@ -1704,6 +1805,7 @@ export class WebConversation {
       await this.session.save();
     }
     await this.runtime.dispatchSessionEnd(this);
+    await closeBrowserSession(previousId);
     this.runtime.detachConversation(this, previousId);
     this.workingDirectory = resolve(workingDirectory);
     this.createState();
@@ -1764,24 +1866,30 @@ Do not execute changes until the user approves the plan in the Web UI.
 When you need the user to make a decision, call ask_user with the question and up to 4 recommended options (use multi_select when multiple answers fit). Always put your most recommended option FIRST — the UI marks it with a "推荐" badge. The UI renders the options as a selectable list with a custom answer option.`,
       });
     } else {
-      const approved = this.planEngine.approvePlan();
-      if (approved) {
-        this.context.addSection({
-          name: 'plan-execution',
-          priority: 5,
-          content: (
-            this.runtime.promptOverrides?.['plan-execution-web'] ??
-            `## Approved Plan
-
-${'${plan}'}
-
-Execute in dependency order and use update_plan_step to report progress.`
-          ).replace('${plan}', () => formatPlan(approved)),
-        });
-      }
+      this.planEngine.approvePlan();
+      this.syncPlanExecutionSection();
     }
     this.publishPlan();
     return this.planEngine.getPlan();
+  }
+
+  /**
+   * 幂等重建 plan-execution 上下文段：计划处于 approved/in_progress/completed 时，
+   * 用当前最新全量计划（含步骤描述/工具/产出）替换 ${plan}；否则移除该段。
+   * publishPlan() 在 submit_plan / 批准 / 每次 update_plan_step 后都会触发，
+   * 保证执行中的模型始终看到最新进度，无需依赖 get_plan 自查。
+   */
+  private syncPlanExecutionSection(): void {
+    this.context.removeSection('plan-execution');
+    const plan = this.planEngine.getPlan();
+    if (!plan || !['approved', 'in_progress', 'completed'].includes(plan.status)) return;
+    const template =
+      this.runtime.promptOverrides?.['plan-execution-web'] ?? PLAN_EXECUTION_WEB_TEMPLATE;
+    this.context.addSection({
+      name: 'plan-execution',
+      priority: 5,
+      content: template.replace('${plan}', () => formatPlan(plan, { detail: 'full' })),
+    });
   }
 
   publishPlan(): void {
@@ -1816,6 +1924,8 @@ Execute in dependency order and use update_plan_step to report progress.`
         })
         .catch((error) => log.warn(`Plan doc save failed: ${formatError(error)}`));
     }
+    // 执行上下文段与计划状态同步（submit_plan / 批准 / update_plan_step 均会触发 publishPlan）。
+    this.syncPlanExecutionSection();
   }
 
   askPermission(
@@ -1895,6 +2005,17 @@ Execute in dependency order and use update_plan_step to report progress.`
       },
       this.runtime.promptOverrides,
     );
+    // 前端验证要求作为系统提示词动态段注入（每次 assemble 时求值）：
+    // 模型在每轮都能看到最新要求，验证通过后自动消失；不污染对话历史。
+    this.context.addSection({
+      name: 'frontend-validation-followup',
+      priority: 6,
+      conditional: () => this.hasPendingValidationFollowup(),
+      content: () =>
+        this.runtime.isBrowserValidationEnabled()
+          ? (this.frontendValidationGate.requiredFollowup() ?? '')
+          : '',
+    });
     this.planEngine = new PlanModeEngine();
     this.statsRecorder = this.runtime.statsStore
       ? new ModelRequestRecorder(this.runtime.statsStore, () => this.sessionId)
@@ -1942,6 +2063,8 @@ Execute in dependency order and use update_plan_step to report progress.`
       },
       // 任务执行中注入的用户消息（inject_user_message）：由循环每轮吸取
       drainPendingUserMessages: () => this.drainInjectedUserMessages(),
+      // 前端验证要求（系统级指令）：存在时模型不得直接结束，须先完成验证
+      hasPendingInstruction: () => this.hasPendingValidationFollowup(),
     });
     if (history.length > 0) this.context.replaceHistory(history);
     // 注意：此处不主动推送 context_usage —— createAgentState 可能在会话
@@ -1977,8 +2100,7 @@ Execute in dependency order and use update_plan_step to report progress.`
       // estimate.
       const usedTokens = this.session.getLastInputTokens();
       const totalTokens = this.getTotalContextWindow();
-      const percentage =
-        totalTokens > 0 ? Math.min(100, Math.round((usedTokens / totalTokens) * 100)) : 0;
+      const percentage = totalTokens > 0 ? Math.min(100, (usedTokens / totalTokens) * 100) : 0;
       const usage: ContextUsage = {
         usedTokens,
         totalTokens,
@@ -2125,7 +2247,7 @@ function supportsRuntimeReasoning(providerId: ProviderId, model?: ModelInfo): bo
 }
 
 function reasoningOptionsForProvider(providerId: ProviderId): ReasoningEffort[] {
-  if (providerId === 'deepseek') return ['off', 'high', 'max'];
+  if (providerId === 'deepseek') return ['off', 'low', 'high', 'max'];
   if (providerId === 'volcano') return ['off', 'low', 'medium', 'high'];
   return ['off'];
 }
@@ -2144,8 +2266,10 @@ function normalizeRuntimeReasoningEffort(
   effort: ReasoningEffort,
 ): ReasoningEffort {
   if (providerId === 'deepseek') {
-    if (effort === 'off' || effort === 'max') return effort;
-    return 'high';
+    // DeepSeek exposes off / low / high / max; 'medium' is not supported and
+    // maps to 'low' (the closest supported level).
+    if (effort === 'medium') return 'low';
+    return effort;
   }
   if (providerId === 'volcano') {
     // Volcano Ark exposes low/medium/high; 'max' is not supported.

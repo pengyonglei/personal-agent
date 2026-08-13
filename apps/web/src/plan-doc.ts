@@ -21,9 +21,22 @@ const PLAN_STATUS_LABELS: Record<string, string> = {
   completed: '已完成',
 };
 
+const STEP_STATUS_LABELS: Record<string, string> = {
+  pending: '待执行',
+  in_progress: '执行中',
+  completed: '已完成',
+  skipped: '已跳过',
+  failed: '失败',
+};
+
 /** 计划状态 → 中文标签（卡片 Tag 与文档头部共用）。 */
 export function planStatusLabel(status: string): string {
   return PLAN_STATUS_LABELS[status] ?? status;
+}
+
+/** 步骤状态 → 中文标签（文档执行步骤小节标题共用）。 */
+export function stepStatusLabel(status: string): string {
+  return STEP_STATUS_LABELS[status] ?? status;
 }
 
 function formatDateTime(value: Date): string {
@@ -36,7 +49,8 @@ function formatDateTime(value: Date): string {
 
 /**
  * 将结构化计划转换为中文 Markdown 文档。
- * 「执行步骤」仅列出步骤标题，不包含步骤描述、状态、依赖、工具调用等细节；
+ * 「执行步骤」每个步骤升格为小节：标题带状态标记，正文包含步骤描述，
+ * 并数据驱动地渲染依赖、工具调用与产出（仅在有值时输出）；
  * 计划级标题/描述、风险、元信息小节保留。
  */
 export function planToMarkdown(plan: Plan): string {
@@ -45,9 +59,25 @@ export function planToMarkdown(plan: Plan): string {
   if (plan.description.trim()) {
     lines.push('', plan.description.trim());
   }
-  lines.push('', '## 执行步骤', '');
+  lines.push('', '## 执行步骤');
   for (const step of plan.steps) {
-    lines.push(`${step.order}. ${step.title}`);
+    lines.push('', `### ${step.order}. ${step.title} [${stepStatusLabel(step.status)}]`);
+    if (step.description.trim()) {
+      lines.push(step.description.trim());
+    }
+    if (step.dependencies.length > 0) {
+      lines.push(`- 依赖：${step.dependencies.join('、')}`);
+    }
+    if (step.toolCalls.length > 0) {
+      lines.push(`- 工具：${step.toolCalls.join('、')}`);
+    }
+    if (
+      (step.status === 'completed' || step.status === 'failed') &&
+      step.output !== undefined &&
+      step.output.trim() !== ''
+    ) {
+      lines.push(`- 产出：${step.output.trim()}`);
+    }
   }
   if (plan.metadata.risks.length > 0) {
     lines.push('', '## 风险', '');

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, open, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, isAbsolute, resolve } from 'node:path';
 import type { ValidationArtifact, ValidationArtifactKind, ValidationRunResult } from './types';
@@ -52,6 +52,9 @@ export async function artifactFromPath(
   mimeType: string,
 ): Promise<ValidationArtifact> {
   const info = await stat(path);
+  if (kind === 'screenshot' && mimeType === 'image/png') {
+    await assertUsablePngScreenshot(path, info.size);
+  }
   return {
     id: basename(path),
     kind,
@@ -59,6 +62,28 @@ export async function artifactFromPath(
     mimeType,
     size: info.size,
   };
+}
+
+async function assertUsablePngScreenshot(path: string, size: number): Promise<void> {
+  if (size < 24) throw new Error(`Screenshot artifact is not a valid PNG: ${basename(path)}`);
+  const header = Buffer.alloc(24);
+  const file = await open(path, 'r');
+  try {
+    await file.read(header, 0, header.length, 0);
+  } finally {
+    await file.close();
+  }
+  const pngSignature = '89504e470d0a1a0a';
+  if (header.subarray(0, 8).toString('hex') !== pngSignature) {
+    throw new Error(`Screenshot artifact is not a valid PNG: ${basename(path)}`);
+  }
+  const width = header.readUInt32BE(16);
+  const height = header.readUInt32BE(20);
+  if (width < 16 || height < 16) {
+    throw new Error(
+      `Screenshot artifact has an unusable ${width}x${height} capture surface: ${basename(path)}`,
+    );
+  }
 }
 
 export async function writeValidationReport(

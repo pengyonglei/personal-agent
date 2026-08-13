@@ -137,7 +137,6 @@ function buildEnv() {
 }
 
 async function buildRuntime() {
-  await runPnpm(['run', 'prepare:chromium'], {});
   await runPnpm(['run', 'prepare:runtime'], {});
   await runPnpm(['run', 'build:production'], {});
 }

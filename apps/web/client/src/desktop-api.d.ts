@@ -15,6 +15,28 @@ interface PersonalAgentDesktopApi {
   showQuestionRequestNotification(payload: { taskId: string; title: string }): Promise<boolean>;
   /** 用户点击系统通知后，请求前端定位到对应任务。 */
   onOpenTaskRequested(listener: (taskId: string) => void): () => void;
+  setBrowserViewLayout(payload: {
+    sessionId: string;
+    bounds: { x: number; y: number; width: number; height: number };
+    visible: boolean;
+  }): Promise<boolean>;
+  getBrowserViewState(sessionId: string): Promise<DesktopBrowserViewState | null>;
+  navigateBrowserView(
+    sessionId: string,
+    action: 'back' | 'forward' | 'reload',
+  ): Promise<boolean>;
+  onBrowserViewState(listener: (state: DesktopBrowserViewState) => void): () => void;
+}
+
+interface DesktopBrowserViewState {
+  sessionId: string;
+  status: 'creating' | 'loading' | 'ready' | 'crashed' | 'closed' | 'error';
+  url: string;
+  title: string;
+  locked: boolean;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  error?: string;
 }
 
 interface Window {

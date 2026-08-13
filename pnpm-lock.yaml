@@ -123,6 +123,9 @@ importers:
 
   apps/desktop:
     dependencies:
+      '@personal-agent/validation':
+        specifier: workspace:*
+        version: link:../../packages/validation
       electron-updater:
         specifier: ^6.8.9
         version: 6.8.9(supports-color@8.1.1)

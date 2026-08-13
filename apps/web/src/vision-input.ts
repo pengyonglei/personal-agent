@@ -65,11 +65,15 @@ export async function prepareUserPromptInput(
   const visionProvider = await options.getVisionProvider();
   const messages: UnifiedMessage[] = [
     {
+      role: 'system',
+      content: IMAGE_EXTRACTION_PROMPT,
+    },
+    {
       role: 'user',
       content: [
         {
           type: 'text',
-          text: `${IMAGE_EXTRACTION_PROMPT}\n\n用户文字请求：${options.text.trim() || '（未提供文字）'}`,
+          text: `用户文字请求：${options.text.trim() || '（未提供文字）'}`,
         },
         ...options.images.flatMap<UnifiedContentBlock>((image, index) => [
           { type: 'text', text: `图片 ${index + 1}：${image.name}` },

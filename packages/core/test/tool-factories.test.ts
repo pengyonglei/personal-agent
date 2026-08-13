@@ -212,3 +212,43 @@ test('formatPlan 输出标题/进度/步骤标记/风险', () => {
   assert.match(text, /\[ \] step-1: Step One/);
   assert.match(text, /Risks: r1/);
 });
+
+test('formatPlan detail=full 输出步骤描述/工具/产出，summary 不输出', async () => {
+  const engine = new PlanModeEngine();
+  engine.createPlan({
+    title: 'My Plan',
+    description: 'desc',
+    risks: ['r1'],
+    steps: [
+      { id: 'step-1', title: 'Step One', description: 'read the code', toolCalls: ['read_file'] },
+      {
+        id: 'step-2',
+        title: 'Step Two',
+        description: 'write the fix',
+        toolCalls: ['edit_file'],
+        dependencies: ['step-1'],
+      },
+    ],
+  });
+  engine.approvePlan();
+  await engine.startStep('step-1');
+  await engine.completeStep('step-1', 'done result');
+  const plan = engine.getPlan();
+  assert.ok(plan);
+
+  const full = formatPlan(plan, { detail: 'full' });
+  assert.match(full, /\[x\] step-1: Step One/);
+  assert.match(full, /read the code/);
+  assert.match(full, /Tools: read_file/);
+  assert.match(full, /Output: done result/);
+  assert.match(full, /\[ \] step-2: Step Two \(after: step-1\)/);
+  assert.match(full, /write the fix/);
+  assert.match(full, /Tools: edit_file/);
+
+  const summary = formatPlan(plan);
+  assert.doesNotMatch(summary, /read the code/);
+  assert.doesNotMatch(summary, /Tools:/);
+  assert.doesNotMatch(summary, /Output:/);
+  assert.match(summary, /\[x\] step-1: Step One/);
+  assert.match(summary, /\[ \] step-2: Step Two \(after: step-1\)/);
+});

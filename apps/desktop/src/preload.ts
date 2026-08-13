@@ -7,6 +7,10 @@ const TASK_COMPLETION_NOTIFICATION_CHANNEL = 'desktop:task-completion-notificati
 const PERMISSION_REQUEST_NOTIFICATION_CHANNEL = 'desktop:permission-request-notification';
 const QUESTION_REQUEST_NOTIFICATION_CHANNEL = 'desktop:question-request-notification';
 const OPEN_TASK_REQUESTED_CHANNEL = 'desktop:open-task-requested';
+const BROWSER_VIEW_LAYOUT_CHANNEL = 'desktop:browser-view-layout';
+const BROWSER_VIEW_GET_STATE_CHANNEL = 'desktop:browser-view-get-state';
+const BROWSER_VIEW_NAVIGATE_CHANNEL = 'desktop:browser-view-navigate';
+const BROWSER_VIEW_STATE_CHANNEL = 'desktop:browser-view-state';
 
 contextBridge.exposeInMainWorld(
   'personalAgentDesktop',
@@ -39,6 +43,55 @@ contextBridge.exposeInMainWorld(
       };
       ipcRenderer.on(OPEN_TASK_REQUESTED_CHANNEL, subscription);
       return () => ipcRenderer.removeListener(OPEN_TASK_REQUESTED_CHANNEL, subscription);
+    },
+    setBrowserViewLayout: (payload: {
+      sessionId: string;
+      bounds: { x: number; y: number; width: number; height: number };
+      visible: boolean;
+    }): Promise<boolean> =>
+      ipcRenderer.invoke(BROWSER_VIEW_LAYOUT_CHANNEL, payload) as Promise<boolean>,
+    getBrowserViewState: (sessionId: string): Promise<{
+      sessionId: string;
+      status: 'creating' | 'loading' | 'ready' | 'crashed' | 'closed' | 'error';
+      url: string;
+      title: string;
+      locked: boolean;
+      canGoBack: boolean;
+      canGoForward: boolean;
+      error?: string;
+    } | null> =>
+      ipcRenderer.invoke(BROWSER_VIEW_GET_STATE_CHANNEL, sessionId) as Promise<{
+        sessionId: string;
+        status: 'creating' | 'loading' | 'ready' | 'crashed' | 'closed' | 'error';
+        url: string;
+        title: string;
+        locked: boolean;
+        canGoBack: boolean;
+        canGoForward: boolean;
+        error?: string;
+      } | null>,
+    navigateBrowserView: (
+      sessionId: string,
+      action: 'back' | 'forward' | 'reload',
+    ): Promise<boolean> =>
+      ipcRenderer.invoke(BROWSER_VIEW_NAVIGATE_CHANNEL, sessionId, action) as Promise<boolean>,
+    onBrowserViewState: (
+      listener: (state: {
+        sessionId: string;
+        status: 'creating' | 'loading' | 'ready' | 'crashed' | 'closed' | 'error';
+        url: string;
+        title: string;
+        locked: boolean;
+        canGoBack: boolean;
+        canGoForward: boolean;
+        error?: string;
+      }) => void,
+    ): (() => void) => {
+      const subscription = (_event: Electron.IpcRendererEvent, state: unknown) => {
+        if (state && typeof state === 'object') listener(state as never);
+      };
+      ipcRenderer.on(BROWSER_VIEW_STATE_CHANNEL, subscription);
+      return () => ipcRenderer.removeListener(BROWSER_VIEW_STATE_CHANNEL, subscription);
     },
   }),
 );

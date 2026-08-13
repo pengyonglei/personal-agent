@@ -42,3 +42,14 @@ test('successful validation suppresses the gate until another frontend file chan
   gate.recordFile('src/theme.css');
   assert.equal(gate.needsValidation(), true);
 });
+
+test('reset clears pending frontend validation work', () => {
+  const gate = new FrontendValidationGate();
+  gate.recordFile('src/components/App.tsx');
+  assert.equal(gate.needsValidation(), true);
+
+  gate.reset();
+
+  assert.equal(gate.needsValidation(), false);
+  assert.equal(gate.requiredFollowup(), undefined);
+});

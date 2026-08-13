@@ -11,6 +11,7 @@ import type { UserAnswer, UserQuestion } from '@personal-agent/shared';
 import {
   loadConfig,
   saveAgentSettings,
+  saveBrowserValidationSettings,
   saveMemorySettings,
   savePromptSettings,
   saveStatsSettings,
@@ -39,6 +40,7 @@ import {
   loadValidationConfig,
   projectHash,
   resolveValidationArtifact,
+  type ValidationBrowserHost,
 } from '@personal-agent/validation';
 
 const UNTITLED_TASK_TITLE = '新任务';
@@ -84,6 +86,8 @@ export interface WebServerOptions {
   skillsDirectory?: string;
   /** 验证配置路径。Defaults to ~/.personal-agent/validation.yaml */
   validationConfigPath?: string;
+  /** Desktop-only embedded browser host. */
+  browserHost?: ValidationBrowserHost;
   viteDev?: boolean;
 }
 
@@ -116,6 +120,7 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
     plansDirectory: options.plansDirectory,
     fileChangesDirectory: options.fileChangesDirectory,
     skillsDirectory: options.skillsDirectory,
+    browserHost: options.browserHost,
   });
   // Model request stats (SQLite) — graceful degradation when node:sqlite is
   // unavailable on the runtime (Node < 22.13). Never blocks server startup.
@@ -455,14 +460,18 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
     }
   });
 
-  // Agent 通用配置（设置 -> 通用）：最大循环轮数 maxTurns、bash 工具 shell
+  // Agent 通用配置（设置 -> 通用）：循环轮数、shell 与全局浏览器验证开关。
   app.get('/api/agent-config', (req, res) => {
     if (!isAuthorized(req.headers.authorization, req.query.token, authToken)) {
       res.status(401).json({ error: 'Unauthorized' });
       return;
     }
     const config = loadConfig({ cwd: runtime.workingDirectory, configPath: configPath });
-    res.json({ maxTurns: config.agent.maxTurns, shell: config.tools.shell });
+    res.json({
+      maxTurns: config.agent.maxTurns,
+      shell: config.tools.shell,
+      browserValidationEnabled: config.validation.enabled,
+    });
   });
 
   app.put('/api/agent-config', async (req, res) => {
@@ -474,7 +483,8 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
       const body = req.body as Record<string, unknown> | undefined;
       const maxTurns = body?.maxTurns;
       const shell = body?.shell;
-      if (maxTurns === undefined && shell === undefined) {
+      const browserValidationEnabled = body?.browserValidationEnabled;
+      if (maxTurns === undefined && shell === undefined && browserValidationEnabled === undefined) {
         throw new Error('没有需要保存的配置项。');
       }
       if (maxTurns !== undefined) {
@@ -499,7 +509,23 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
         // Take effect immediately for the bash tool in the running process.
         runtime.setShellPreference(shell);
       }
-      res.json({ maxTurns: runtime.config.agent.maxTurns, shell: runtime.config.tools.shell });
+      if (browserValidationEnabled !== undefined) {
+        if (typeof browserValidationEnabled !== 'boolean') {
+          throw new Error('browserValidationEnabled 必须是布尔值。');
+        }
+        await saveBrowserValidationSettings({ enabled: browserValidationEnabled }, configPath);
+        await runtime.setBrowserValidationEnabled(browserValidationEnabled);
+      }
+      const runtimeInfo = runtime.getRuntimeInfo();
+      if (browserValidationEnabled !== undefined) {
+        broadcast({ type: 'runtime_updated', runtime: runtimeInfo });
+      }
+      res.json({
+        maxTurns: runtime.config.agent.maxTurns,
+        shell: runtime.config.tools.shell,
+        browserValidationEnabled: runtime.config.validation.enabled,
+        runtime: runtimeInfo,
+      });
     } catch (error) {
       res.status(400).json({ error: formatError(error) });
     }

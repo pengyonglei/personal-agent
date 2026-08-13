@@ -273,8 +273,14 @@ export function createMemoryTools(host: MemoryToolHost): Tool[] {
 /**
  * 将结构化计划格式化为文本（进度百分比 / 步骤标记 / 依赖 / 风险）。
  * 采用信息更全的 CLI 版，CLI 与 Web 共用，避免双份实现漂移。
+ *
+ * detail 两级：
+ * - 'summary'（默认）：只输出步骤标题/依赖/状态标记，供 get_plan 等工具结果使用，保持紧凑；
+ * - 'full'：额外输出每步的 description、tool_calls 与非空 output，供计划执行注入使用，
+ *   保证模型执行时能看到规划阶段的完整细节，避免按标题脑补导致执行失真。
  */
-export function formatPlan(plan: Plan): string {
+export function formatPlan(plan: Plan, options?: { detail?: 'summary' | 'full' }): string {
+  const detail = options?.detail ?? 'summary';
   const progressCounts = {
     completed: plan.steps.filter((step) => step.status === 'completed').length,
     settled: plan.steps.filter((step) =>
@@ -302,6 +308,17 @@ export function formatPlan(plan: Plan): string {
     const dependencies =
       step.dependencies.length > 0 ? ` (after: ${step.dependencies.join(', ')})` : '';
     lines.push(`[${marker}] ${step.id}: ${step.title}${dependencies}`);
+    if (detail === 'full') {
+      if (step.description.trim()) {
+        lines.push(`    ${step.description.trim().replace(/\n/g, '\n    ')}`);
+      }
+      if (step.toolCalls.length > 0) {
+        lines.push(`    Tools: ${step.toolCalls.join(', ')}`);
+      }
+      if (step.output !== undefined && step.output.trim() !== '') {
+        lines.push(`    Output: ${step.output.trim().replace(/\n/g, '\n    ')}`);
+      }
+    }
   }
   if (plan.metadata.risks.length > 0) {
     lines.push(`Risks: ${plan.metadata.risks.join('; ')}`);

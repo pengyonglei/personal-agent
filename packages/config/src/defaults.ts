@@ -49,6 +49,9 @@ export const DEFAULT_CONFIG: AppConfig = {
     enabled: false,
     prompt: DEFAULT_VISION_PROMPT,
   },
+  validation: {
+    enabled: false,
+  },
   memory: {
     enabled: true,
     store: 'filesystem',

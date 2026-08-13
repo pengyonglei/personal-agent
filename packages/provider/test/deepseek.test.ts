@@ -97,6 +97,17 @@ test('DeepSeek sends thinking settings and preserves reasoning content across to
     assert.deepEqual(disabledRequest.thinking, { type: 'disabled' });
     assert.equal(disabledRequest.temperature, 0.3);
     assert.equal('reasoning_effort' in disabledRequest, false);
+
+    for await (const _event of provider.streamChat([{ role: 'user', content: '简短回答' }], [], {
+      reasoningEffort: 'low',
+      temperature: 0.5,
+    })) {
+      // Consume the stream so the request body can be asserted.
+    }
+    const lowRequest = requestBodies[2];
+    assert.deepEqual(lowRequest.thinking, { type: 'enabled' });
+    assert.equal(lowRequest.reasoning_effort, 'low');
+    assert.equal('temperature' in lowRequest, false);
   } finally {
     await provider.dispose();
     await new Promise<void>((resolve, reject) =>

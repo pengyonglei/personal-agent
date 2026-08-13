@@ -67,6 +67,14 @@ export class FrontendValidationGate {
     return `Frontend validation is still failing. Fix the evidence-backed problem and run frontend_validate again. You may perform at most ${3 - this.failedAttempts} more validation attempt(s).`;
   }
 
+  /** Clear pending validation work when browser validation is turned off. */
+  reset(): void {
+    this.changed.clear();
+    this.revision = 0;
+    this.failedAttempts = 0;
+    this.validatedFingerprint = '';
+  }
+
   private fingerprint(): string {
     return `${this.revision}\n${[...this.changed].sort().join('\n')}`;
   }

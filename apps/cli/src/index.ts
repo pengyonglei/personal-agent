@@ -63,6 +63,34 @@ import * as readline from 'node:readline';
 
 const log = createLogger('cli');
 
+/** 计划批准后的执行注入默认模板；${plan} 占位符会被当前全量计划替换。 */
+const CLI_PLAN_EXECUTION_TEMPLATE = `## Approved Plan
+
+${'${plan}'}
+
+Execute this plan in dependency order. Call update_plan_step before starting each step and again when it completes, fails, or is skipped.`;
+
+/**
+ * 幂等重建 plan-execution 上下文段：计划处于 approved/in_progress/completed 时，
+ * 用当前最新全量计划（含步骤描述/工具/产出）替换 ${plan}；否则移除该段。
+ * /exit-plan 与 update_plan_step 的 publishPlan 回调共用，保证执行中模型看到最新进度。
+ */
+function syncCliPlanExecutionSection(
+  contextAssembler: ContextAssembler,
+  promptOverrides: Record<string, string>,
+  planEngine: PlanModeEngine | undefined,
+): void {
+  contextAssembler.removeSection('plan-execution');
+  const plan = planEngine?.getPlan() ?? null;
+  if (!plan || !['approved', 'in_progress', 'completed'].includes(plan.status)) return;
+  const template = promptOverrides['plan-execution-cli'] ?? CLI_PLAN_EXECUTION_TEMPLATE;
+  contextAssembler.addSection({
+    name: 'plan-execution',
+    priority: 5,
+    content: template.replace('${plan}', () => formatPlan(plan, { detail: 'full' })),
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Model request stats (SQLite) helpers
 // ---------------------------------------------------------------------------
@@ -124,36 +152,37 @@ program
   .command('validate')
   .description('Validate a local frontend project with Playwright')
   .option('--profile <profile>', 'Validation profile: quick or full', 'quick')
-  .option(
-    '-c, --config <path>',
-    `Validation config path (default: ${VALIDATION_CONFIG_PATH})`,
-  )
+  .option('-c, --config <path>', `Validation config path (default: ${VALIDATION_CONFIG_PATH})`)
   .option('--json', 'Print the full machine-readable validation report')
-  .action(async (options: { profile: string; config?: string; json?: boolean }) => {
-    if (options.profile !== 'quick' && options.profile !== 'full') {
-      console.error(`Unknown validation profile: ${options.profile}. Use quick or full.`);
-      process.exitCode = 2;
-      return;
-    }
-    const result = await runFrontendValidation({
-      workingDirectory: process.cwd(),
-      configPath: options.config,
-      profile: options.profile as ValidationProfileName,
-      onProgress: options.json ? undefined : (message) => console.log(`[validate] ${message}`),
-    });
-    if (options.json) {
-      console.log(JSON.stringify(result, null, 2));
-    } else {
-      console.log(result.summary);
-      for (const issue of result.issues) {
-        console.error(
-          `- [${issue.source}] ${issue.scenario ? `${issue.scenario}: ` : ''}${issue.message}`,
-        );
+  .option('--headed', 'Show the browser window instead of running headless')
+  .action(
+    async (options: { profile: string; config?: string; json?: boolean; headed?: boolean }) => {
+      if (options.profile !== 'quick' && options.profile !== 'full') {
+        console.error(`Unknown validation profile: ${options.profile}. Use quick or full.`);
+        process.exitCode = 2;
+        return;
       }
-      console.log(`Artifacts: ${result.artifactDirectory}`);
-    }
-    process.exitCode = validationExitCode(result.status);
-  });
+      if (options.headed) process.env.PERSONAL_AGENT_HEADLESS = '0';
+      const result = await runFrontendValidation({
+        workingDirectory: process.cwd(),
+        configPath: options.config,
+        profile: options.profile as ValidationProfileName,
+        onProgress: options.json ? undefined : (message) => console.log(`[validate] ${message}`),
+      });
+      if (options.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        console.log(result.summary);
+        for (const issue of result.issues) {
+          console.error(
+            `- [${issue.source}] ${issue.scenario ? `${issue.scenario}: ` : ''}${issue.message}`,
+          );
+        }
+        console.log(`Artifacts: ${result.artifactDirectory}`);
+      }
+      process.exitCode = validationExitCode(result.status);
+    },
+  );
 
 program
   .name('personal-agent')
@@ -224,7 +253,9 @@ program
       executor: toolExecutor,
       permissionManager,
       sandbox,
-    } = registerBuiltinTools();
+    } = registerBuiltinTools({
+      browserValidationEnabled: mergedConfig.validation.enabled,
+    });
 
     // Add default permission rules
     permissionManager.addRule({ tool: 'read_file', action: 'allow', scope: 'session' });
@@ -409,6 +440,17 @@ program
     const planEngine = new PlanModeEngine();
     const planModeState: PlanModeState = { active: false };
     const frontendValidationGate = new FrontendValidationGate();
+    let lastValidationNotice: string | undefined;
+    // 前端验证要求作为系统提示词动态段注入（每次 assemble 时求值）：
+    // 模型每轮都能看到最新要求，验证通过后自动消失；不伪装成用户输入污染历史。
+    contextAssembler.addSection({
+      name: 'frontend-validation-followup',
+      priority: 8,
+      conditional: () =>
+        mergedConfig.validation.enabled && Boolean(frontendValidationGate.requiredFollowup()),
+      content: () =>
+        mergedConfig.validation.enabled ? (frontendValidationGate.requiredFollowup() ?? '') : '',
+    });
 
     // Interactive ask_user wiring: readline fallback by default; TUI mode
     // replaces this with an ink QuestionCard bridge (see runTuiMode).
@@ -426,6 +468,7 @@ program
     for (const tool of createPlanTools({
       isPlanModeActive: () => planModeState.active,
       getPlanEngine: () => planEngine,
+      publishPlan: () => syncCliPlanExecutionSection(contextAssembler, promptOverrides, planEngine),
     })) {
       toolRegistry.register(tool);
     }
@@ -477,10 +520,12 @@ program
           input,
         });
         const result = await toolExecutor.executeWithPermission(name, input, toolCtx, true);
-        for (const path of result.metadata?.fileModified ?? []) {
-          frontendValidationGate.recordFile(path);
+        if (mergedConfig.validation.enabled) {
+          for (const path of result.metadata?.fileModified ?? []) {
+            frontendValidationGate.recordFile(path);
+          }
+          if (name === 'frontend_validate') frontendValidationGate.recordValidation(result.success);
         }
-        if (name === 'frontend_validate') frontendValidationGate.recordValidation(result.success);
         await pluginLoader.dispatchHook('on_tool_result', {
           sessionId: session.getSessionId(),
           toolName: name,
@@ -499,9 +544,21 @@ program
         return promptUserPermission(toolName, params);
       },
       drainPendingUserMessages: () => {
-        const followup = frontendValidationGate.requiredFollowup();
-        return followup ? [followup] : [];
+        // 仅真正的用户注入消息走此通道；前端验证要求通过系统提示词动态段传达。
+        // 这里顺手把验证提醒打印给用户（内容变化时只打印一次），保持可见性。
+        const followup = mergedConfig.validation.enabled
+          ? frontendValidationGate.requiredFollowup()
+          : undefined;
+        if (followup && followup !== lastValidationNotice) {
+          lastValidationNotice = followup;
+          console.log(`\x1b[33m⚠ ${followup}\x1b[0m\n`);
+        } else if (!followup) {
+          lastValidationNotice = undefined;
+        }
+        return [];
       },
+      hasPendingInstruction: () =>
+        mergedConfig.validation.enabled && Boolean(frontendValidationGate.requiredFollowup()),
     });
 
     // Initialize sub-agent manager and register spawn_sub_agent tool
@@ -1344,25 +1401,11 @@ When the user is satisfied with the plan, they will use /exit-plan to leave plan
         conditional: () => false,
         content: '',
       });
-      ctx.contextAssembler.removeSection('plan-execution');
-      if (approvedPlan) {
-        ctx.contextAssembler.addSection({
-          name: 'plan-execution',
-          priority: 5,
-          content: (
-            ctx.promptOverrides?.['plan-execution-cli'] ??
-            `## Approved Plan
-
-${'${plan}'}
-
-Execute this plan in dependency order. Call update_plan_step before starting each step and again when it completes, fails, or is skipped.`
-          ).replace('${plan}', () => formatPlan(approvedPlan)),
-        });
-      }
+      syncCliPlanExecutionSection(ctx.contextAssembler, ctx.promptOverrides, ctx.planEngine);
       return {
         status: 'ok',
         output: approvedPlan
-          ? `Plan approved. Tools are available for execution.\n\n${formatPlan(approvedPlan)}`
+          ? `Plan approved. Tools are available for execution.\n\n${formatPlan(approvedPlan, { detail: 'full' })}`
           : 'Plan mode exited without a submitted structured plan. Tools are now available.',
       };
     }

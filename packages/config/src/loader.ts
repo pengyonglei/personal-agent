@@ -44,10 +44,12 @@ export function loadConfig(options: ConfigLoadOptions = {}): AppConfig {
   if (existsSync(projectPath)) {
     const projectConfig = loadYamlFile(projectPath) as Partial<AppConfig> & {
       vision?: unknown;
+      validation?: unknown;
     };
-    // The visual review model is intentionally global. A repository config
-    // must not silently change the provider/model (or its billing behavior).
+    // Visual review and browser validation are intentionally global. A
+    // repository config must not silently enable either capability.
     delete projectConfig.vision;
+    delete projectConfig.validation;
     config = mergeConfig(config, projectConfig);
   }
 
@@ -148,8 +150,7 @@ function mergeEnvVars(config: AppConfig): AppConfig {
         'deepseek-v4-flash',
         'deepseek-v4-pro',
       ];
-      result.providers.deepseek.thinkingEffort =
-        result.providers.deepseek.thinkingEffort || 'high';
+      result.providers.deepseek.thinkingEffort = result.providers.deepseek.thinkingEffort || 'high';
     } else if (path === 'volcano_api_key') {
       result.providers.volcano = result.providers.volcano || {};
       result.providers.volcano.apiKey = value;

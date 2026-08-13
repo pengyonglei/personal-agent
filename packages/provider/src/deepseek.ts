@@ -68,7 +68,7 @@ const MODEL_DEFAULTS = {
 /** DeepSeek extra request fields (OpenAI-compatible API). */
 interface DeepSeekThinkingOptions {
   thinking: { type: 'enabled' | 'disabled' };
-  reasoning_effort?: 'high' | 'max';
+  reasoning_effort?: 'high' | 'max' | 'low';
 }
 
 // ---------------------------------------------------------------------------
@@ -326,9 +326,10 @@ export function normalizeDeepSeekModel(model?: string): string {
 }
 
 /**
- * DeepSeek thinking is a boolean toggle plus an effort hint; low/medium are
- * not exposed by the API and map to 'high'. When thinking is enabled the
- * temperature parameter must be omitted (the API rejects the combination).
+ * DeepSeek thinking is a boolean toggle plus an effort hint. The API exposes
+ * off / low / high / max; 'medium' is not supported and maps to 'low' (the
+ * closest supported level). When thinking is enabled the temperature parameter
+ * must be omitted (the API rejects the combination).
  */
 function getDeepSeekThinkingOptions(
   effort: ReasoningEffort | undefined,
@@ -336,6 +337,6 @@ function getDeepSeekThinkingOptions(
   if (effort === 'off') return { thinking: { type: 'disabled' } };
   return {
     thinking: { type: 'enabled' },
-    reasoning_effort: effort === 'max' ? 'max' : 'high',
+    reasoning_effort: effort === 'max' ? 'max' : effort === 'high' ? 'high' : 'low',
   };
 }

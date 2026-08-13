@@ -67,6 +67,7 @@ export interface ValidationConfig {
     colorScheme: 'light' | 'dark' | 'no-preference';
     locale?: string;
     executablePath?: string;
+    headless: boolean;
   };
   checks: {
     quick: ValidationCommand[];
