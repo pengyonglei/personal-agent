@@ -11,7 +11,6 @@ import type { UserAnswer, UserQuestion } from '@personal-agent/shared';
 import {
   loadConfig,
   saveAgentSettings,
-  saveBrowserValidationSettings,
   saveMemorySettings,
   savePromptSettings,
   saveStatsSettings,
@@ -35,13 +34,6 @@ import {
 } from './protocol';
 import { BUILTIN_PROMPTS, PROMPT_KEYS } from './prompts';
 import { installSkillFromZip, SkillUploadError } from './skill-upload';
-import {
-  getValidationArtifactsRoot,
-  loadValidationConfig,
-  projectHash,
-  resolveValidationArtifact,
-  type ValidationBrowserHost,
-} from '@personal-agent/validation';
 
 const UNTITLED_TASK_TITLE = '新任务';
 /** 批准计划后自动触发执行的内部提示（作为 user 消息写入历史，驱动模型开始执行已批准的计划）。 */
@@ -84,10 +76,6 @@ export interface WebServerOptions {
   fileChangesDirectory?: string;
   /** 标准技能上传目录。Defaults to ~/.personal-agent/skills */
   skillsDirectory?: string;
-  /** 验证配置路径。Defaults to ~/.personal-agent/validation.yaml */
-  validationConfigPath?: string;
-  /** Desktop-only embedded browser host. */
-  browserHost?: ValidationBrowserHost;
   viteDev?: boolean;
 }
 
@@ -120,7 +108,6 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
     plansDirectory: options.plansDirectory,
     fileChangesDirectory: options.fileChangesDirectory,
     skillsDirectory: options.skillsDirectory,
-    browserHost: options.browserHost,
   });
   // Model request stats (SQLite) — graceful degradation when node:sqlite is
   // unavailable on the runtime (Node < 22.13). Never blocks server startup.
@@ -161,40 +148,6 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
       version: VERSION,
       runtime: info,
     });
-  });
-
-  app.get('/api/validation/artifacts/:projectHash/:runId/:artifactId', async (req, res) => {
-    if (!isAuthorized(req.headers.authorization, req.query.token, authToken)) {
-      res.status(401).json({ error: 'Unauthorized' });
-      return;
-    }
-    try {
-      const project = runtime.projects
-        .listProjects({ includeArchived: true })
-        .find((candidate) => projectHash(candidate.rootPath) === req.params.projectHash);
-      const projectRoot = project?.rootPath ?? runtime.workingDirectory;
-      const validationConfig = await loadValidationConfig(
-        projectRoot,
-        options.validationConfigPath,
-      ).catch(() => null);
-      const configuredRoot = validationConfig?.artifacts.root;
-      const root = getValidationArtifactsRoot(
-        configuredRoot ? resolve(projectRoot, configuredRoot) : undefined,
-      );
-      const path = resolveValidationArtifact(
-        root,
-        req.params.projectHash,
-        req.params.runId,
-        req.params.artifactId,
-      );
-      if (!path) {
-        res.status(404).json({ error: 'Validation artifact not found.' });
-        return;
-      }
-      res.sendFile(path);
-    } catch (error) {
-      res.status(500).json({ error: formatError(error) });
-    }
   });
 
   app.get('/api/prompts', (req, res) => {
@@ -460,7 +413,7 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
     }
   });
 
-  // Agent 通用配置（设置 -> 通用）：循环轮数、shell 与全局浏览器验证开关。
+  // Agent 通用配置（设置 -> 通用）：循环轮数与 shell。
   app.get('/api/agent-config', (req, res) => {
     if (!isAuthorized(req.headers.authorization, req.query.token, authToken)) {
       res.status(401).json({ error: 'Unauthorized' });
@@ -470,7 +423,6 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
     res.json({
       maxTurns: config.agent.maxTurns,
       shell: config.tools.shell,
-      browserValidationEnabled: config.validation.enabled,
     });
   });
 
@@ -483,8 +435,7 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
       const body = req.body as Record<string, unknown> | undefined;
       const maxTurns = body?.maxTurns;
       const shell = body?.shell;
-      const browserValidationEnabled = body?.browserValidationEnabled;
-      if (maxTurns === undefined && shell === undefined && browserValidationEnabled === undefined) {
+      if (maxTurns === undefined && shell === undefined) {
         throw new Error('没有需要保存的配置项。');
       }
       if (maxTurns !== undefined) {
@@ -509,21 +460,10 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
         // Take effect immediately for the bash tool in the running process.
         runtime.setShellPreference(shell);
       }
-      if (browserValidationEnabled !== undefined) {
-        if (typeof browserValidationEnabled !== 'boolean') {
-          throw new Error('browserValidationEnabled 必须是布尔值。');
-        }
-        await saveBrowserValidationSettings({ enabled: browserValidationEnabled }, configPath);
-        await runtime.setBrowserValidationEnabled(browserValidationEnabled);
-      }
       const runtimeInfo = runtime.getRuntimeInfo();
-      if (browserValidationEnabled !== undefined) {
-        broadcast({ type: 'runtime_updated', runtime: runtimeInfo });
-      }
       res.json({
         maxTurns: runtime.config.agent.maxTurns,
         shell: runtime.config.tools.shell,
-        browserValidationEnabled: runtime.config.validation.enabled,
         runtime: runtimeInfo,
       });
     } catch (error) {
@@ -906,6 +846,8 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
         return;
       }
       if (message.type === 'list_projects') {
+        // 刷新：先从磁盘重新加载项目/任务存储（拾取外部变更），再下发最新列表。
+        await runtime.projects.reload();
         sendProjectState();
         return;
       }
@@ -1525,7 +1467,6 @@ function parseVisionSettings(value: unknown): VisionSettingsInput {
   }
   const input = value as Record<string, unknown>;
   if (typeof input.enabled !== 'boolean') throw new Error('enabled 格式无效。');
-  if (typeof input.prompt !== 'string') throw new Error('prompt 格式无效。');
   if (
     input.provider !== undefined &&
     input.provider !== 'anthropic' &&
@@ -1543,7 +1484,6 @@ function parseVisionSettings(value: unknown): VisionSettingsInput {
     enabled: input.enabled,
     provider: input.provider as VisionSettingsInput['provider'],
     model: input.model,
-    prompt: input.prompt,
   };
 }
 

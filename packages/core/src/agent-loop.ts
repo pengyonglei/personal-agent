@@ -7,6 +7,7 @@ import type {
   AgentEvent,
   UsageInfo,
   ToolResult,
+  ToolResultContentBlock,
   StopReason,
 } from '@personal-agent/shared';
 import { createLogger, generateId } from '@personal-agent/shared';
@@ -57,14 +58,6 @@ export interface AgentLoopConfig {
    * inject_user_message 等「插入当前执行循环」的能力）。返回的数组会被清空。
    */
   drainPendingUserMessages?: () => string[];
-  /**
-   * 是否存在待处理的系统级指令（如前端修改后的验证要求）：
-   * 指令本身通过系统提示词动态段（contextAssembler.addSection 的函数式
-   * content）在每次 assemble 时求值注入，不入对话历史；
-   * 此钩子仅在 end_turn 时被询问，返回 true 表示要求模型继续本轮循环
-   * （如执行 frontend_validate），而不是直接结束任务。
-   */
-  hasPendingInstruction?: () => boolean;
 }
 
 export interface ModelCallDebugStart {
@@ -377,10 +370,7 @@ export class AgentLoop {
                   // 执行期间注入的用户消息：若存在，则追加进历史并延续循环，
                   // 让模型在本轮运行内回应这些补充消息，而不是直接结束。
                   const injectedMessages = this.config.drainPendingUserMessages?.() ?? [];
-                  // 系统级待办指令（如前端验证要求）：由系统提示词动态段注入，
-                  // 不入历史；存在时延续循环让模型在本轮运行内响应。
-                  const pendingInstruction = this.config.hasPendingInstruction?.() ?? false;
-                  if (injectedMessages.length > 0 || pendingInstruction) {
+                  if (injectedMessages.length > 0) {
                     for (const injectedText of injectedMessages) {
                       this.config.contextAssembler.addMessage({
                         role: 'user',
@@ -497,7 +487,11 @@ export class AgentLoop {
                 this.config.contextAssembler.addMessage({
                   role: 'tool',
                   toolCallId: id,
-                  content: `Tool '${tc.name}' is not available in plan mode. Use /exit-plan to unlock.`,
+                  content: [
+                    createToolResultBlock(id, blockedResult, {
+                      displayText: `Tool '${tc.name}' is not available in plan mode. Use /exit-plan to unlock.`,
+                    }),
+                  ],
                 });
                 completedToolCalls.add(id);
                 yield {
@@ -527,7 +521,11 @@ export class AgentLoop {
                   this.config.contextAssembler.addMessage({
                     role: 'tool',
                     toolCallId: id,
-                    content: `Permission denied: ${tc.name}`,
+                    content: [
+                      createToolResultBlock(id, deniedResult, {
+                        displayText: `Permission denied: ${tc.name}`,
+                      }),
+                    ],
                   });
                   completedToolCalls.add(id);
                   yield {
@@ -552,7 +550,7 @@ export class AgentLoop {
               this.config.contextAssembler.addMessage({
                 role: 'tool',
                 toolCallId: id,
-                content: result.success ? result.content : `Error: ${result.error}`,
+                content: [createToolResultBlock(id, result)],
               });
               completedToolCalls.add(id);
               yield {
@@ -575,7 +573,7 @@ export class AgentLoop {
               this.config.contextAssembler.addMessage({
                 role: 'tool',
                 toolCallId: id,
-                content: `Error: ${interruptedResult.error}`,
+                content: [createToolResultBlock(id, interruptedResult)],
               });
               yield {
                 type: 'tool_call_end',
@@ -733,6 +731,37 @@ function createAssistantContent(text: string, thinking: string): string | Unifie
   const content: UnifiedContentBlock[] = [{ type: 'thinking', thinking }];
   if (text) content.push({ type: 'text', text });
   return content;
+}
+
+/**
+ * 把 ToolResult 转成结构化的 tool_result 内容块，保留对模型有决策价值的
+ * 信息：成功/失败标志、错误消息、截断、修改的文件、任务状态、中断标记。
+ * 展示类元数据（duration 等）不进入模型上下文，避免浪费 token。
+ */
+function createToolResultBlock(
+  toolCallId: string,
+  result: ToolResult,
+  options?: { displayText?: string },
+): ToolResultContentBlock {
+  const block: ToolResultContentBlock = {
+    type: 'tool_result',
+    toolUseId: toolCallId,
+    content: options?.displayText ?? result.content ?? '',
+  };
+  if (!result.success) {
+    block.isError = true;
+    block.error = result.error;
+  }
+  const metadata = result.metadata;
+  if (metadata) {
+    const modelFacing: NonNullable<ToolResultContentBlock['metadata']> = {};
+    if (metadata.truncated) modelFacing.truncated = true;
+    if (metadata.fileModified) modelFacing.fileModified = metadata.fileModified;
+    if (metadata.tasks) modelFacing.tasks = metadata.tasks;
+    if (metadata.interrupted) modelFacing.interrupted = true;
+    if (Object.keys(modelFacing).length > 0) block.metadata = modelFacing;
+  }
+  return block;
 }
 
 class AgentInterruptedError extends Error {

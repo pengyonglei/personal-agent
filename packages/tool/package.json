@@ -33,7 +33,6 @@
   "dependencies": {
     "@personal-agent/config": "workspace:*",
     "@personal-agent/shared": "workspace:*",
-    "@personal-agent/validation": "workspace:*",
     "fast-glob": "^3.3.0",
     "strip-ansi": "^7.1.0",
     "diff": "^7.0.0"

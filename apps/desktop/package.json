@@ -25,9 +25,7 @@
     "clean": "node -e \"fs.rmSync('dist',{recursive:true,force:true});fs.rmSync('out',{recursive:true,force:true})\""
   },
   "dependencies": {
-    "@personal-agent/validation": "workspace:*",
-    "electron-updater": "^6.8.9",
-    "playwright": "1.62.1"
+    "electron-updater": "^6.8.9"
   },
   "devDependencies": {
     "@personal-agent/web": "workspace:*",

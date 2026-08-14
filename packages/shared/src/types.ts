@@ -47,8 +47,22 @@ export interface ToolUseContentBlock {
 export interface ToolResultContentBlock {
   type: 'tool_result';
   toolUseId: string;
-  content: string;
+  /**
+   * 工具输出。支持多块（如 text + image），兼容旧的纯字符串形式。
+   * 注意：传给模型的文本由 Provider 序列化层提取，此处保留结构化内容。
+   */
+  content: string | UnifiedContentBlock[];
+  /** true = 工具执行失败（与 Anthropic wire 的 is_error 对应） */
   isError?: boolean;
+  /** 结构化错误消息（区别于展示文本 content） */
+  error?: string;
+  /** 对模型有决策价值的元数据（展示用元数据如 duration 不进上下文） */
+  metadata?: {
+    truncated?: boolean;
+    fileModified?: string[];
+    tasks?: Array<{ status: string; subject: string }>;
+    interrupted?: boolean;
+  };
 }
 
 export interface ImageContentBlock {
@@ -189,38 +203,6 @@ export interface ToolContext {
   onProgress?: (message: string) => void;
 }
 
-export interface ToolArtifactReference {
-  id: string;
-  kind: 'screenshot' | 'trace' | 'log' | 'report' | 'dom';
-  name: string;
-  mimeType: string;
-  size: number;
-}
-
-export interface FrontendValidationSummary {
-  runId: string;
-  projectHash: string;
-  profile: 'quick' | 'full';
-  status: 'passed' | 'failed' | 'infrastructure_error';
-  summary: string;
-  durationMs: number;
-  steps: Array<{
-    name: string;
-    status: 'passed' | 'failed' | 'skipped';
-    durationMs: number;
-    error?: string;
-  }>;
-  issues: Array<{
-    source: string;
-    message: string;
-    scenario?: string;
-  }>;
-  vision: {
-    status: 'passed' | 'failed' | 'skipped';
-    reason?: string;
-  };
-}
-
 export interface ToolResult {
   success: boolean;
   content: string;
@@ -233,10 +215,6 @@ export interface ToolResult {
     interrupted?: boolean;
     /** Structured tasks from todo_write, so UIs can render icons instead of plain text. */
     tasks?: Array<{ status: string; subject: string }>;
-    /** Safe artifact identifiers resolved through the validation artifact API. */
-    artifacts?: ToolArtifactReference[];
-    /** Structured frontend validation evidence for CLI and UI renderers. */
-    validation?: FrontendValidationSummary;
   };
 }
 

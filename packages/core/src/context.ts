@@ -382,10 +382,18 @@ export class TokenBudget {
 
 function extractText(msg: UnifiedMessage): string {
   if (typeof msg.content === 'string') return msg.content;
-  return msg.content
-    .filter((b) => b.type === 'text')
-    .map((b) => b.text)
-    .join(' ');
+  const parts: string[] = [];
+  for (const block of msg.content) {
+    if (block.type === 'text') parts.push(block.text);
+    else if (block.type === 'tool_result') {
+      parts.push(
+        typeof block.content === 'string'
+          ? block.content
+          : extractText({ content: block.content } as UnifiedMessage),
+      );
+    }
+  }
+  return parts.join(' ');
 }
 
 /** 填充 environment 模板中的占位符（默认模板与用户自定义模板都执行替换） */

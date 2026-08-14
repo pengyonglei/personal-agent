@@ -117,6 +117,17 @@ export class ProjectManager {
     });
   }
 
+  /**
+   * 从磁盘重新加载项目与任务数据（用于「刷新项目和任务」等场景）：
+   * 等待尚未落盘的写入完成后，重新读取存储文件替换内存中的数据，
+   * 从而拾取其他进程/外部编辑对存储文件所做的变更。
+   * 若文件缺失或解析失败则保留当前内存数据，不导致列表被清空。
+   */
+  async reload(): Promise<void> {
+    await this.saveQueue;
+    await this.initialize();
+  }
+
   async createProject(input: { name: string; rootPath: string }): Promise<Project> {
     const name = validateText(input.name, '项目名称', 100);
     const rootPath = await validateRootPath(input.rootPath);

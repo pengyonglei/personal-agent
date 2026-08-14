@@ -6,7 +6,6 @@
   "scripts": {
     "build": "tsup src/server.ts --format esm --dts --clean --external yoga-wasm-web --external vite && vite build",
     "dev": "tsx src/server.ts",
-    "dev:validation": "tsx scripts/validation-server.mjs",
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit && tsc -p client/tsconfig.json --noEmit",
     "test": "tsx --test test/*.test.ts",
@@ -27,7 +26,6 @@
     "@personal-agent/shared": "workspace:*",
     "@personal-agent/stats": "workspace:*",
     "@personal-agent/tool": "workspace:*",
-    "@personal-agent/validation": "workspace:*",
     "adm-zip": "^0.6.0",
     "antd": "6.5.2",
     "express": "^5.0.0",

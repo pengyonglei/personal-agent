@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -294,6 +294,64 @@ test('task plan mode persists across reloads', async () => {
     // 未设置的旧任务记录默认为 undefined（不开启）
     const plainTask = await restored.createTask({ projectId: project.id, title: '普通任务' });
     assert.equal(restored.getTask(plainTask.id)?.planMode, undefined);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('reload picks up external changes written to the storage file', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'personal-agent-project-reload-'));
+  const root = join(directory, 'workspace');
+  const storagePath = join(directory, 'projects.json');
+  await mkdir(root);
+  try {
+    const manager = new ProjectManager(storagePath);
+    await manager.initialize();
+    const project = await manager.createProject({ name: '原始项目', rootPath: root });
+    await manager.createTask({ projectId: project.id, title: '原始任务' });
+
+    // 模拟其他进程/外部编辑直接修改存储文件：新增一个项目。
+    const raw = JSON.parse(await readFile(storagePath, 'utf8')) as {
+      projects: Array<Record<string, unknown>>;
+    };
+    raw.projects.push({
+      id: 'project-external',
+      name: '外部新增项目',
+      rootPath: root,
+      archived: false,
+      pinned: false,
+      sortOrder: 0,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    await writeFile(storagePath, JSON.stringify(raw, null, 2), 'utf8');
+
+    // 刷新前内存里看不到外部项目
+    assert.equal(
+      manager
+        .listProjects({ includeArchived: true })
+        .some((candidate) => candidate.id === 'project-external'),
+      false,
+      '未刷新前不应包含外部新增项目',
+    );
+
+    await manager.reload();
+
+    const names = manager.listProjects({ includeArchived: true }).map((candidate) => candidate.name);
+    assert.ok(names.includes('外部新增项目'), 'reload 后应读取到外部新增的项目');
+    assert.ok(names.includes('原始项目'), 'reload 后原有项目应保留');
+    assert.ok(
+      manager.listTasks(project.id).some((task) => task.title === '原始任务'),
+      'reload 后原有任务应保留',
+    );
+
+    // 文件缺失/损坏时 reload 不应清空内存数据
+    await rm(storagePath, { force: true });
+    await manager.reload();
+    assert.ok(
+      manager.listProjects({ includeArchived: true }).length > 0,
+      '存储文件缺失时 reload 应保留当前内存数据',
+    );
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

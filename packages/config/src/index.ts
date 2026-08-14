@@ -1,12 +1,10 @@
 export { loadConfig, mergeCliFlags, type ConfigLoadOptions, type CliFlags } from './loader';
 export {
   appConfigSchema,
-  DEFAULT_VISION_PROMPT,
   type AppConfig,
   type ModelConfig,
   type StatsConfig,
   type VisionConfig,
-  type BrowserValidationConfig,
 } from './schema';
 export { DEFAULT_CONFIG } from './defaults';
 export {
@@ -33,7 +31,3 @@ export {
 } from './tools-settings';
 export { saveWebSettings, type WebSettingsUpdate } from './web-settings';
 export { saveVisionSettings, type VisionSettingsUpdate } from './vision-settings';
-export {
-  saveBrowserValidationSettings,
-  type BrowserValidationSettingsUpdate,
-} from './browser-validation-settings';

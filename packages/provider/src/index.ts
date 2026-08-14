@@ -5,4 +5,3 @@ export { DeepSeekProvider, normalizeDeepSeekModel } from './deepseek';
 export { VolcanoArkProvider } from './volcano';
 export { OllamaProvider } from './ollama';
 export { ProviderRegistry } from './registry';
-export { FakeValidationProvider } from './fake';

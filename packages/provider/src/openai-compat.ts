@@ -59,10 +59,16 @@ export function toOpenAIMessage(
   }
 
   if (msg.role === 'tool') {
+    const toolResult = extractToolResult(msg);
+    // OpenAI 兼容协议（OpenAI / DeepSeek / Volcano）没有 is_error 字段，
+    // 失败信号编码进 content 前缀；空输出兜底 '(no output)'（DeepSeek 等
+    // 网关对空 content 行为不稳定）。
+    const prefix = toolResult.isError ? '[tool error] ' : '';
+    const text = toolResult.text || '(no output)';
     return {
       role: 'tool',
       tool_call_id: msg.toolCallId ?? '',
-      content: typeof msg.content === 'string' ? msg.content : extractText(msg.content),
+      content: prefix + text,
     };
   }
 
@@ -98,7 +104,11 @@ export function buildOpenAIMessages(
   includeReasoningContent = false,
 ): OpenAI.Chat.ChatCompletionMessageParam[] {
   const systemMsg = messages.filter((m) => m.role === 'system');
-  const nonSystem = messages.filter((m) => m.role !== 'system');
+  // 跳过损坏的 tool 消息（缺 toolCallId 的 tool 消息会被 OpenAI/DeepSeek
+  // 网关拒绝，宁可丢弃也不发空 id）
+  const nonSystem = messages.filter(
+    (m) => !(m.role === 'tool' && !m.toolCallId) && m.role !== 'system',
+  );
 
   const openaiMessages: OpenAI.Chat.ChatCompletionMessageParam[] = nonSystem.map((m) =>
     toOpenAIMessage(m, includeReasoningContent),
@@ -153,10 +163,33 @@ export function mapOpenAIStopReason(
 }
 
 export function extractText(blocks: UnifiedContentBlock[]): string {
-  return blocks
-    .filter((b) => b.type === 'text')
-    .map((b) => (b as { text: string }).text)
-    .join('\n');
+  const parts: string[] = [];
+  for (const block of blocks) {
+    if (block.type === 'text') parts.push(block.text);
+    else if (block.type === 'tool_result') {
+      parts.push(typeof block.content === 'string' ? block.content : extractText(block.content));
+    }
+  }
+  return parts.join('\n');
+}
+
+/**
+ * 从 tool 消息中提取「文本内容 + 是否失败」。
+ * 兼容两种历史形态：旧会话的纯字符串 content（靠 Error: 前缀识别失败），
+ * 新会话的结构化 tool_result 块（靠 isError 字段）。
+ */
+export function extractToolResult(msg: UnifiedMessage): { text: string; isError: boolean } {
+  if (typeof msg.content === 'string') {
+    return { text: msg.content, isError: msg.content.startsWith('Error:') };
+  }
+  let text = '';
+  let isError = false;
+  for (const block of msg.content) {
+    if (block.type !== 'tool_result') continue;
+    text += typeof block.content === 'string' ? block.content : extractText(block.content);
+    if (block.isError) isError = true;
+  }
+  return { text, isError };
 }
 
 export function safeJsonParse(str: string): Record<string, unknown> | null {

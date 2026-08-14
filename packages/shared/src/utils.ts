@@ -29,7 +29,9 @@ function countContentBlockTokens(block: UnifiedContentBlock): number {
     case 'tool_use':
       return countStringTokens(JSON.stringify(block.input)) + countStringTokens(block.name);
     case 'tool_result':
-      return countStringTokens(block.content);
+      return typeof block.content === 'string'
+        ? countStringTokens(block.content)
+        : block.content.reduce((sum, b) => sum + countContentBlockTokens(b), 0);
     case 'image':
       // Rough estimate: images cost ~85 tokens each for Anthropic, ~85 for OpenAI
       return 85;
@@ -158,7 +160,12 @@ export async function withRetry<T>(
     shouldRetry?: (error: Error) => boolean;
   } = {},
 ): Promise<T> {
-  const { maxRetries = 3, baseDelayMs = 1000, maxDelayMs = 30000, shouldRetry = () => true } = options;
+  const {
+    maxRetries = 3,
+    baseDelayMs = 1000,
+    maxDelayMs = 30000,
+    shouldRetry = () => true,
+  } = options;
 
   let lastError: Error = new Error('Unknown error');
 

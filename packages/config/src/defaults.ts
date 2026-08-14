@@ -1,5 +1,4 @@
 import type { AppConfig } from './schema';
-import { DEFAULT_VISION_PROMPT } from './schema';
 
 /**
  * Default configuration values loaded before any user config.
@@ -46,10 +45,6 @@ export const DEFAULT_CONFIG: AppConfig = {
     retentionDays: 90,
   },
   vision: {
-    enabled: false,
-    prompt: DEFAULT_VISION_PROMPT,
-  },
-  validation: {
     enabled: false,
   },
   memory: {

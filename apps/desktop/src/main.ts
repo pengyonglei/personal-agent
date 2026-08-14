@@ -15,12 +15,6 @@ import {
   Tray,
 } from 'electron';
 import { createWebServer } from '@personal-agent/web';
-import {
-  ElectronValidationBrowserHost,
-  waitForElectronCdpEndpoint,
-  type EmbeddedBrowserLayout,
-  type EmbeddedBrowserState,
-} from './browser-host';
 
 // electron-updater 为 CJS 包且由 esbuild 标记 external：
 // 运行时通过 build.mjs 注入的 __require（createRequire）加载，避免 ESM/CJS interop 问题。
@@ -35,17 +29,7 @@ const TASK_COMPLETION_NOTIFICATION_CHANNEL = 'desktop:task-completion-notificati
 const PERMISSION_REQUEST_NOTIFICATION_CHANNEL = 'desktop:permission-request-notification';
 const QUESTION_REQUEST_NOTIFICATION_CHANNEL = 'desktop:question-request-notification';
 const OPEN_TASK_REQUESTED_CHANNEL = 'desktop:open-task-requested';
-const BROWSER_VIEW_LAYOUT_CHANNEL = 'desktop:browser-view-layout';
-const BROWSER_VIEW_GET_STATE_CHANNEL = 'desktop:browser-view-get-state';
-const BROWSER_VIEW_NAVIGATE_CHANNEL = 'desktop:browser-view-navigate';
-const BROWSER_VIEW_STATE_CHANNEL = 'desktop:browser-view-state';
 const mainDirectory = dirname(fileURLToPath(import.meta.url));
-const cdpStartedAt = Date.now();
-
-// A port chosen by Chromium is exposed only on loopback. The endpoint is read
-// from DevToolsActivePort and never exposed to the renderer.
-app.commandLine.appendSwitch('remote-debugging-address', '127.0.0.1');
-app.commandLine.appendSwitch('remote-debugging-port', '0');
 
 // Preload 脚本缺失会导致 window.personalAgentDesktop 不可用
 //（桌面端原生目录选择器失效，前端静默回退到 Web 目录树）。
@@ -58,7 +42,6 @@ if (!existsSync(preloadPath)) {
 }
 
 let mainWindow: BrowserWindow | null = null;
-let embeddedBrowserHost: ElectronValidationBrowserHost | null = null;
 let tray: Tray | null = null;
 let closeWebServer: (() => Promise<void>) | undefined;
 let shutdownStarted = false;
@@ -149,47 +132,6 @@ function startDesktopApplication(): void {
     );
   });
 
-  ipcMain.handle(BROWSER_VIEW_LAYOUT_CHANNEL, (event, payload?: unknown) => {
-    if (!mainWindow || event.sender !== mainWindow.webContents) return false;
-    const layout = parseBrowserLayout(payload);
-    if (!layout || !embeddedBrowserHost) return false;
-    embeddedBrowserHost.setLayout(layout);
-    return true;
-  });
-
-  ipcMain.handle(BROWSER_VIEW_GET_STATE_CHANNEL, (event, sessionId?: unknown) => {
-    if (
-      !mainWindow ||
-      event.sender !== mainWindow.webContents ||
-      typeof sessionId !== 'string' ||
-      !sessionId ||
-      !embeddedBrowserHost
-    ) {
-      return null;
-    }
-    return embeddedBrowserHost.getState(sessionId) ?? null;
-  });
-
-  ipcMain.handle(
-    BROWSER_VIEW_NAVIGATE_CHANNEL,
-    (event, sessionId?: unknown, action?: unknown) => {
-      if (!mainWindow || event.sender !== mainWindow.webContents) return false;
-      if (
-        typeof sessionId !== 'string' ||
-        !sessionId ||
-        !['back', 'forward', 'reload'].includes(String(action)) ||
-        !embeddedBrowserHost
-      ) {
-        return false;
-      }
-      embeddedBrowserHost.navigate(
-        sessionId,
-        action as 'back' | 'forward' | 'reload',
-      );
-      return true;
-    },
-  );
-
   app.on('before-quit', (event) => {
     quitRequested = true;
     if (!closeWebServer || shutdownStarted) return;
@@ -239,21 +181,6 @@ async function createDesktopWindow(): Promise<void> {
   }
 
   const authToken = randomBytes(32).toString('hex');
-  const cdpEndpoint = waitForElectronCdpEndpoint(app.getPath('userData'), cdpStartedAt);
-  void cdpEndpoint.catch((error) =>
-    console.error('[desktop] embedded browser CDP unavailable:', error),
-  );
-  const browserHost = new ElectronValidationBrowserHost({
-    getWindow: () => mainWindow,
-    cdpEndpoint,
-    onState: (state: EmbeddedBrowserState) => {
-      const window = mainWindow;
-      if (window && !window.isDestroyed()) {
-        window.webContents.send(BROWSER_VIEW_STATE_CHANNEL, state);
-      }
-    },
-  });
-  embeddedBrowserHost = browserHost;
   const web = await createWebServer({
     host: '127.0.0.1',
     port: 0,
@@ -263,7 +190,6 @@ async function createDesktopWindow(): Promise<void> {
     projectStoragePath: join(dataDirectory, 'projects.json'),
     sessionsDirectory: join(dataDirectory, 'sessions'),
     clientBuildDirectory,
-    browserHost,
   });
   closeWebServer = web.close;
 
@@ -289,10 +215,6 @@ async function createDesktopWindow(): Promise<void> {
   mainWindow = window;
 
   window.once('ready-to-show', () => window.show());
-  window.on('show', () => browserHost.setWindowVisible(true));
-  window.on('restore', () => browserHost.setWindowVisible(true));
-  window.on('hide', () => browserHost.setWindowVisible(false));
-  window.on('minimize', () => browserHost.setWindowVisible(false));
   window.on('close', (event) => {
     if (quitRequested) return;
     event.preventDefault();
@@ -300,8 +222,6 @@ async function createDesktopWindow(): Promise<void> {
   });
   window.on('closed', () => {
     if (mainWindow === window) mainWindow = null;
-    if (embeddedBrowserHost === browserHost) embeddedBrowserHost = null;
-    void browserHost.closeAll();
   });
   window.webContents.setWindowOpenHandler(({ url }) => {
     openExternalUrl(url);
@@ -499,36 +419,6 @@ function parsePermissionRequestNotification(
   return {
     ...task,
     toolName: (toolName || '敏感操作').slice(0, 100),
-  };
-}
-
-function parseBrowserLayout(value: unknown): EmbeddedBrowserLayout | undefined {
-  if (!value || typeof value !== 'object') return undefined;
-  const payload = value as Record<string, unknown>;
-  const bounds = payload.bounds;
-  if (
-    typeof payload.sessionId !== 'string' ||
-    !payload.sessionId ||
-    typeof payload.visible !== 'boolean' ||
-    !bounds ||
-    typeof bounds !== 'object'
-  ) {
-    return undefined;
-  }
-  const rectangle = bounds as Record<string, unknown>;
-  const values = [rectangle.x, rectangle.y, rectangle.width, rectangle.height];
-  if (!values.every((item) => typeof item === 'number' && Number.isFinite(item))) {
-    return undefined;
-  }
-  return {
-    sessionId: payload.sessionId,
-    visible: payload.visible,
-    bounds: {
-      x: rectangle.x as number,
-      y: rectangle.y as number,
-      width: rectangle.width as number,
-      height: rectangle.height as number,
-    },
   };
 }
 

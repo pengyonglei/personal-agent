@@ -119,8 +119,6 @@ export interface RuntimeInfo {
   reasoningEffort: ReasoningEffort;
   workingDirectory: string;
   toolCount: number;
-  /** Browser tools and automatic frontend validation are globally enabled. */
-  browserValidationEnabled: boolean;
   plugins: Array<{ name: string; version: string; skills: number; tools: number }>;
   standaloneSkills: number;
   mcpServers: Array<{ name: string; connected: boolean; toolCount: number }>;

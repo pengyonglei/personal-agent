@@ -68,14 +68,11 @@ import {
   FontSizeOutlined,
   FolderAddOutlined,
   FolderOpenOutlined,
-  GlobalOutlined,
   HolderOutlined,
   InboxOutlined,
   InfoCircleOutlined,
   ItalicOutlined,
-  LeftOutlined,
   LinkOutlined,
-  LockOutlined,
   LoadingOutlined,
   MenuOutlined,
   MenuUnfoldOutlined,
@@ -91,7 +88,6 @@ import {
   PushpinOutlined,
   QuestionCircleOutlined,
   ReloadOutlined,
-  RightOutlined,
   RobotOutlined,
   SendOutlined,
   SettingOutlined,
@@ -154,17 +150,6 @@ import {
   computeLineDiff,
   toUnifiedDiffText,
 } from './file-diff';
-import {
-  appendBrowserActivity,
-  browserSessionState,
-  describeBrowserAction,
-  isBrowserTool,
-  parseBrowserSnapshot,
-  resolveBrowserSessionId,
-  screenshotFromResult,
-  updateBrowserActivity,
-  type BrowserActivityItem,
-} from './browser-activity';
 
 const { Header, Content, Sider } = Layout;
 const { Text, Title } = Typography;
@@ -288,10 +273,9 @@ interface QueuedMessage {
   time: string;
 }
 
-/** 右侧侧边栏的 Tab：前两个固定不可删除（概要 / 浏览器），其余为可关闭的计划文档/文件差异 Tab。 */
+/** 右侧侧边栏的 Tab：概要固定不可删除，其余为可关闭的计划文档/文件差异 Tab。 */
 type InspectorTab =
   | { key: string; title: string; kind: 'overview' }
-  | { key: string; title: string; kind: 'browser' }
   | { key: string; title: string; kind: 'plan-doc'; docId: string }
   | { key: string; title: string; kind: 'file-diff'; changeId: string };
 
@@ -322,8 +306,6 @@ interface ModelCallTrace {
 interface TaskViewSnapshot {
   timeline: TimelineItem[];
   modelCalls: ModelCallTrace[];
-  /** 浏览器工具活动流（侧边栏「浏览器」Tab 展示，随任务切换快照保存/恢复）。 */
-  browserActivity: BrowserActivityItem[];
   busy: boolean;
   contextUsage?: ContextUsage;
   planActive: boolean;
@@ -379,7 +361,6 @@ interface VisionSettingsInfo {
   enabled: boolean;
   provider?: ProviderId;
   model?: string;
-  prompt: string;
   configPath: string;
   models: Array<{
     provider: ProviderId;
@@ -811,10 +792,9 @@ function AgentWorkspace({
     inspectorWidthRef.current = inspectorWidth;
     localStorage.setItem('personal-agent-inspector-width', String(inspectorWidth));
   }, [inspectorWidth]);
-  // 侧边栏 Tab：前两个「概要」「浏览器」固定不可删除，其余为可关闭的计划文档 Tab
+  // 侧边栏 Tab：「概要」固定不可删除，其余为可关闭的计划文档或文件差异 Tab。
   const [inspectorTabs, setInspectorTabs] = useState<InspectorTab[]>([
     { key: 'overview', title: '概要', kind: 'overview' },
-    { key: 'browser', title: '浏览器', kind: 'browser' },
   ]);
   const inspectorTabsRef = useRef(inspectorTabs);
   useEffect(() => {
@@ -903,9 +883,6 @@ function AgentWorkspace({
   const [statsModalOpen, setStatsModalOpen] = useState(false);
   const [modelCalls, setModelCalls] = useState<ModelCallTrace[]>([]);
   const modelCallsRef = useRef<ModelCallTrace[]>([]);
-  // 浏览器工具活动流（侧边栏「浏览器」固定 Tab 实时展示）
-  const [browserActivity, setBrowserActivity] = useState<BrowserActivityItem[]>([]);
-  const browserActivityRef = useRef<BrowserActivityItem[]>([]);
   const [selectedModelCallId, setSelectedModelCallId] = useState<string>();
   const [rememberPermission, setRememberPermission] = useState(false);
   const [renamingTaskId, setRenamingTaskId] = useState<string>();
@@ -913,6 +890,19 @@ function AgentWorkspace({
   const [renamingProjectId, setRenamingProjectId] = useState<string>();
   const [renameProjectName, setRenameProjectName] = useState('');
   const [showArchived, setShowArchived] = useState(false);
+  // 点击侧边栏「刷新项目和任务」按钮后的加载状态（收到 project_list 后复位）
+  const [refreshingProjects, setRefreshingProjects] = useState(false);
+  const refreshSeqRef = useRef(0);
+  /** 「刷新项目和任务」的前后快照：用于在收到列表后对比数量并给出成功/无变化反馈。 */
+  const refreshSnapshotRef = useRef<{
+    seq: number;
+    beforeProjects: number;
+    beforeTasks: number;
+    afterProjects?: number;
+    afterTasks?: number;
+    taskCompared: boolean;
+    notified: boolean;
+  }>();
   const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(() =>
     loadStoredIds('pa-collapsed-projects'),
   );
@@ -955,7 +945,6 @@ function AgentWorkspace({
   const emptyTaskSnapshot = (): TaskViewSnapshot => ({
     timeline: [],
     modelCalls: [],
-    browserActivity: [],
     busy: false,
     contextUsage: undefined,
     planActive: false,
@@ -980,7 +969,6 @@ function AgentWorkspace({
     taskDataRef.current[taskId] = {
       timeline: timelineRef.current,
       modelCalls: modelCallsRef.current,
-      browserActivity: browserActivityRef.current,
       busy: stateRef.current.busy,
       contextUsage: stateRef.current.contextUsage,
       planActive: stateRef.current.planActive,
@@ -1003,8 +991,6 @@ function AgentWorkspace({
         setTimeline([]);
         setModelCalls([]);
         modelCallsRef.current = [];
-        browserActivityRef.current = [];
-        setBrowserActivity([]);
         setSelectedModelCallId(undefined);
         setQueuedMessages([]);
         activeResponseSequenceRef.current = 0;
@@ -1027,8 +1013,6 @@ function AgentWorkspace({
       setTimeline(data.timeline);
       setModelCalls(data.modelCalls);
       modelCallsRef.current = data.modelCalls;
-      browserActivityRef.current = data.browserActivity;
-      setBrowserActivity(data.browserActivity);
       setSelectedModelCallId(undefined);
       // 队列随任务切换：展示目标任务自己的排队消息
       setQueuedMessages(queuedByTaskRef.current[taskId] ?? []);
@@ -1158,9 +1142,8 @@ function AgentWorkspace({
     [patchState],
   );
 
-  /** 关闭侧边栏 Tab（「概要」「浏览器」固定不可删除）；关闭激活 Tab 后切回「概要」。 */
+  /** 关闭侧边栏 Tab；关闭激活 Tab 后切回「概要」。 */
   const removeInspectorTab = useCallback((key: string) => {
-    if (key === 'browser') return;
     setInspectorTabs((current) => current.filter((tab) => tab.key !== key));
     if (activeInspectorTabRef.current === key) setActiveInspectorTab('overview');
   }, []);
@@ -1366,6 +1349,25 @@ function AgentWorkspace({
     [messageApi],
   );
 
+  /** 刷新项目和任务：请求服务端从磁盘重新加载并下发最新列表。 */
+  const refreshProjectsAndTasks = useCallback(() => {
+    if (!send({ type: 'list_projects' })) return;
+    const seq = ++refreshSeqRef.current;
+    setRefreshingProjects(true);
+    // 记录刷新前的列表快照，收到新列表后对比数量，给出「已刷新/无变化」反馈。
+    refreshSnapshotRef.current = {
+      seq,
+      beforeProjects: stateRef.current.projects.length,
+      beforeTasks: stateRef.current.tasks.length,
+      taskCompared: false,
+      notified: false,
+    };
+    // 兜底：若服务端长时间无响应（如连接中断），超时后复位加载状态。
+    window.setTimeout(() => {
+      if (refreshSeqRef.current === seq) setRefreshingProjects(false);
+    }, 8000);
+  }, [send]);
+
   const updateUnreadTasks = useCallback((updater: (current: Set<string>) => Set<string>) => {
     const current = unreadTaskIdsRef.current;
     const next = updater(current);
@@ -1538,9 +1540,6 @@ function AgentWorkspace({
           setCompressing(false);
           setModelCalls([]);
           modelCallsRef.current = [];
-          // 浏览器活动是运行时状态（不落盘）：历史重放时清空，避免跨任务/刷新后残留。
-          browserActivityRef.current = [];
-          setBrowserActivity([]);
           setSelectedModelCallId(undefined);
           let restored: TimelineItem[] = [];
           const restoredToolOwners = new Map<string, number>();
@@ -1605,7 +1604,7 @@ function AgentWorkspace({
               const ownerIndex = restoredToolOwners.get(toolCallId);
               const owner = ownerIndex === undefined ? undefined : restored[ownerIndex];
               if (ownerIndex !== undefined && owner?.kind === 'message') {
-                const status = getRestoredToolStatus(text);
+                const status = getRestoredToolStatus(text, historyMessage);
                 const output = text || '(无输出)';
                 restored[ownerIndex] = {
                   ...owner,
@@ -1622,7 +1621,7 @@ function AgentWorkspace({
                   kind: 'tool',
                   toolCallId,
                   name: historyMessage.name ?? '历史工具结果',
-                  status: getRestoredToolStatus(text),
+                  status: getRestoredToolStatus(text, historyMessage),
                   output: text || '(无输出)',
                   restored: true,
                 });
@@ -1648,7 +1647,37 @@ function AgentWorkspace({
           }
           break;
         }
-        case 'project_list':
+        case 'project_list': {
+          setRefreshingProjects(false);
+          const snapshot = refreshSnapshotRef.current;
+          if (snapshot && snapshot.seq === refreshSeqRef.current) {
+            snapshot.afterProjects = incoming.projects.length;
+            // task_list 由服务端紧随 project_list 下发；留一个短窗口等待它到达，
+            // 以便在一条提示里同时反馈项目与任务的变化。无 activeProjectId 时服务端
+            // 不下发 task_list，超时后仅按项目数量变化提示。
+            window.setTimeout(() => {
+              if (snapshot.notified) return;
+              if (snapshot.taskCompared) return;
+              snapshot.notified = true;
+              const projectChanged =
+                snapshot.afterProjects !== undefined &&
+                snapshot.afterProjects !== snapshot.beforeProjects;
+              const taskChanged =
+                snapshot.afterTasks !== undefined && snapshot.afterTasks !== snapshot.beforeTasks;
+              if (projectChanged || taskChanged) {
+                const parts: string[] = [];
+                if (projectChanged) {
+                  parts.push(`项目 ${snapshot.beforeProjects} → ${snapshot.afterProjects} 个`);
+                }
+                if (taskChanged) {
+                  parts.push(`任务 ${snapshot.beforeTasks} → ${snapshot.afterTasks} 个`);
+                }
+                messageApi.success(`已刷新：${parts.join('、')}`);
+              } else {
+                messageApi.info('已刷新，项目与任务列表无变化');
+              }
+            }, 300);
+          }
           patchState((current) => ({
             projects: incoming.projects,
             activeProjectId:
@@ -1657,7 +1686,30 @@ function AgentWorkspace({
               current.activeProjectId,
           }));
           break;
+        }
         case 'task_list': {
+          const snapshot = refreshSnapshotRef.current;
+          if (snapshot && snapshot.seq === refreshSeqRef.current && !snapshot.notified) {
+            snapshot.afterTasks = incoming.tasks.length;
+            snapshot.taskCompared = true;
+            snapshot.notified = true;
+            const projectChanged =
+              snapshot.afterProjects !== undefined &&
+              snapshot.afterProjects !== snapshot.beforeProjects;
+            const taskChanged = snapshot.afterTasks !== snapshot.beforeTasks;
+            if (projectChanged || taskChanged) {
+              const parts: string[] = [];
+              if (projectChanged) {
+                parts.push(`项目 ${snapshot.beforeProjects} → ${snapshot.afterProjects} 个`);
+              }
+              if (taskChanged) {
+                parts.push(`任务 ${snapshot.beforeTasks} → ${snapshot.afterTasks} 个`);
+              }
+              messageApi.success(`已刷新：${parts.join('、')}`);
+            } else {
+              messageApi.info('已刷新，项目与任务列表无变化');
+            }
+          }
           const nextActive = pendingTaskDraftRef.current
             ? undefined
             : (incoming.activeTaskId ?? stateRef.current.activeTaskId);
@@ -1908,19 +1960,6 @@ function AgentWorkspace({
         }
         case 'tool_start': {
           const eventTaskId = incoming.taskId ?? stateRef.current.activeTaskId;
-          const browserItem: BrowserActivityItem | undefined = isBrowserTool(incoming.toolName)
-            ? {
-                id: incoming.toolCallId,
-                toolName: incoming.toolName,
-                status: 'running',
-                time: currentTimeWithSeconds(),
-                summary: describeBrowserAction(incoming.toolName, incoming.arguments),
-                url:
-                  incoming.toolName === 'browser_open' && typeof incoming.arguments.url === 'string'
-                    ? incoming.arguments.url
-                    : undefined,
-              }
-            : undefined;
           if (eventTaskId && eventTaskId !== stateRef.current.activeTaskId) {
             const data = taskDataRef.current[eventTaskId] ?? emptyTaskSnapshot();
             data.timeline = updateAssistantTurn(
@@ -1940,20 +1979,8 @@ function AgentWorkspace({
                 }),
               }),
             );
-            if (browserItem) {
-              data.browserActivity = appendBrowserActivity(data.browserActivity, browserItem);
-            }
             taskDataRef.current[eventTaskId] = data;
             break;
-          }
-          if (browserItem) {
-            const next = appendBrowserActivity(browserActivityRef.current, browserItem);
-            browserActivityRef.current = next;
-            setBrowserActivity(next);
-            if (desktopShell) {
-              setActiveInspectorTab('browser');
-              patchState({ inspectorOpen: true });
-            }
           }
           updateTimeline((items) =>
             updateAssistantTurn(
@@ -2013,25 +2040,6 @@ function AgentWorkspace({
         }
         case 'tool_end': {
           const eventTaskId = incoming.taskId ?? stateRef.current.activeTaskId;
-          // tool_end 不含 toolName：按 toolCallId 从浏览器活动流中反查是否属于浏览器工具。
-          const buildBrowserPatch = (): Partial<BrowserActivityItem> => {
-            const snapshot = incoming.result.success
-              ? parseBrowserSnapshot(incoming.result.content)
-              : null;
-            return {
-              status: incoming.result.metadata?.interrupted
-                ? 'interrupted'
-                : incoming.result.success
-                  ? 'success'
-                  : 'failed',
-              duration: incoming.result.metadata?.duration,
-              error: incoming.result.success ? undefined : incoming.result.error,
-              url: snapshot?.url,
-              title: snapshot?.title,
-              text: snapshot?.text,
-              screenshot: screenshotFromResult(incoming.result),
-            };
-          };
           if (eventTaskId && eventTaskId !== stateRef.current.activeTaskId) {
             const data = taskDataRef.current[eventTaskId] ?? emptyTaskSnapshot();
             data.timeline = updateAssistantTurn(
@@ -2055,24 +2063,8 @@ function AgentWorkspace({
                 })),
               }),
             );
-            if (data.browserActivity.some((item) => item.id === incoming.toolCallId)) {
-              data.browserActivity = updateBrowserActivity(
-                data.browserActivity,
-                incoming.toolCallId,
-                buildBrowserPatch(),
-              );
-            }
             taskDataRef.current[eventTaskId] = data;
             break;
-          }
-          if (browserActivityRef.current.some((item) => item.id === incoming.toolCallId)) {
-            const next = updateBrowserActivity(
-              browserActivityRef.current,
-              incoming.toolCallId,
-              buildBrowserPatch(),
-            );
-            browserActivityRef.current = next;
-            setBrowserActivity(next);
           }
           updateTimeline((items) =>
             updateAssistantTurn(
@@ -2541,7 +2533,6 @@ function AgentWorkspace({
 
   const activeProject = state.projects.find((project) => project.id === state.activeProjectId);
   const activeTask = state.tasks.find((task) => task.id === state.activeTaskId);
-  const browserSessionId = resolveBrowserSessionId(state.sessionId, activeTask?.sessionId);
   const rootPath = activeProject?.rootPath ?? state.runtime?.workingDirectory ?? '当前工作区';
   const workspaceTitle = draftTaskProjectId
     ? '新任务'
@@ -3093,7 +3084,8 @@ function AgentWorkspace({
         setProjectModalOpen(true);
       }}
       onCreateTask={createNewTask}
-      onRefresh={() => send({ type: 'list_projects' })}
+      onRefresh={refreshProjectsAndTasks}
+      refreshing={refreshingProjects}
       onOpenTask={openTask}
       onStartRename={startTaskRename}
       onRenameTitleChange={setRenameTitle}
@@ -3128,79 +3120,47 @@ function AgentWorkspace({
   const availableProviders = (Object.keys(providerLabels) as ProviderId[]).filter(
     (provider) => !providerSettings?.providers[provider].configured,
   );
-  // 是否有浏览器工具正在执行（侧边栏「浏览器」Tab 标签上的实时指示点）
-  const browserRunning = browserActivity.some((item) => item.status === 'running');
-  const browserValidationAvailable =
-    desktopShell && state.runtime?.browserValidationEnabled === true;
-  // 非桌面端或浏览器验证关闭时不展示浏览器 Tab。
-  const activeInspectorTabKey =
-    !browserValidationAvailable && activeInspectorTab === 'browser'
-      ? 'overview'
-      : activeInspectorTab;
-  useEffect(() => {
-    if (!browserValidationAvailable && activeInspectorTab === 'browser') {
-      setActiveInspectorTab('overview');
-    }
-  }, [activeInspectorTab, browserValidationAvailable]);
-
-  /** 右侧侧边栏面板：前两个固定 Tab「概要」「浏览器」（浏览器 Tab 仅桌面版），其余为可关闭的计划文档 Tab。 */
+  /** 右侧侧边栏面板：「概要」固定，其余为可关闭的计划文档或文件差异 Tab。 */
   const inspectorPanel = (
     <div className="pa-right-sidebar-panel">
       <Tabs
         type="editable-card"
         hideAdd
         size="small"
-        activeKey={activeInspectorTabKey}
+        activeKey={activeInspectorTab}
         onChange={setActiveInspectorTab}
         onEdit={(key, action) => {
           if (action === 'remove' && typeof key === 'string') removeInspectorTab(key);
         }}
-        items={inspectorTabs
-          // 浏览器 Tab 仅在桌面版且已开启浏览器验证时存在。
-          .filter((tab) => browserValidationAvailable || tab.kind !== 'browser')
-          .map((tab) => ({
-            key: tab.key,
-            closable: tab.kind !== 'overview' && tab.kind !== 'browser',
-            label:
-              tab.kind === 'overview' ? (
-                '概要'
-              ) : tab.kind === 'browser' ? (
-                <span className="pa-doc-tab-label" title="浏览器">
-                  <GlobalOutlined />
-                  <span>浏览器</span>
-                  {browserRunning && (
-                    <span className="pa-browser-tab-live" aria-label="浏览器活动中" />
-                  )}
-                </span>
-              ) : (
-                <span className="pa-doc-tab-label" title={tab.title}>
-                  {tab.kind === 'plan-doc' ? <FileTextOutlined /> : <DiffOutlined />}
-                  <span>{tab.title}</span>
-                </span>
-              ),
-            children:
-              tab.kind === 'overview' ? (
-                <Inspector
-                  state={state}
-                  activeProject={activeProject}
-                  activeTask={activeTask}
-                  rootPath={rootPath}
-                  onApprovePlan={() =>
-                    send({ type: 'approve_plan', taskId: stateRef.current.activeTaskId })
-                  }
-                />
-              ) : tab.kind === 'browser' ? (
-                <BrowserViewer
-                  activity={browserActivity}
-                  sessionId={browserSessionId}
-                  visible={state.inspectorOpen && activeInspectorTabKey === 'browser'}
-                />
-              ) : tab.kind === 'plan-doc' ? (
-                <PlanDocViewer doc={planDocs[tab.docId]} />
-              ) : (
-                <FileDiffViewer change={fileChanges[tab.changeId]} />
-              ),
-          }))}
+        items={inspectorTabs.map((tab) => ({
+          key: tab.key,
+          closable: tab.kind !== 'overview',
+          label:
+            tab.kind === 'overview' ? (
+              '概要'
+            ) : (
+              <span className="pa-doc-tab-label" title={tab.title}>
+                {tab.kind === 'plan-doc' ? <FileTextOutlined /> : <DiffOutlined />}
+                <span>{tab.title}</span>
+              </span>
+            ),
+          children:
+            tab.kind === 'overview' ? (
+              <Inspector
+                state={state}
+                activeProject={activeProject}
+                activeTask={activeTask}
+                rootPath={rootPath}
+                onApprovePlan={() =>
+                  send({ type: 'approve_plan', taskId: stateRef.current.activeTaskId })
+                }
+              />
+            ) : tab.kind === 'plan-doc' ? (
+              <PlanDocViewer doc={planDocs[tab.docId]} />
+            ) : (
+              <FileDiffViewer change={fileChanges[tab.changeId]} />
+            ),
+        }))}
       />
     </div>
   );
@@ -3970,6 +3930,7 @@ function SidebarContent({
   onCreateProject,
   onCreateTask,
   onRefresh,
+  refreshing,
   onOpenTask,
   onStartRename,
   onRenameTitleChange,
@@ -4008,6 +3969,7 @@ function SidebarContent({
   onCreateProject: () => void;
   onCreateTask: (projectId?: string) => void;
   onRefresh: () => void;
+  refreshing: boolean;
   onOpenTask: (taskId: string) => void;
   onStartRename: (task: TaskSummary) => void;
   onRenameTitleChange: (title: string) => void;
@@ -4181,7 +4143,14 @@ function SidebarContent({
             />
           </Tooltip>
           <Tooltip title="刷新项目和任务">
-            <Button type="text" size="small" icon={<ReloadOutlined />} onClick={onRefresh} />
+            <Button
+              type="text"
+              size="small"
+              icon={<ReloadOutlined spin={refreshing} />}
+              aria-label="刷新项目和任务"
+              disabled={refreshing}
+              onClick={onRefresh}
+            />
           </Tooltip>
         </Space>
       </div>
@@ -5113,79 +5082,8 @@ function ThinkingTool({ tool }: { tool: ToolTimelineItem }) {
       {askQuestion && <pre className="pa-tool-command">{askQuestion}</pre>}
       {tool.name === 'todo_write' && parseTodoTasks(tool) ? (
         <TodoTaskList tool={tool} />
-      ) : tool.name === 'frontend_validate' && tool.metadata?.validation ? (
-        <FrontendValidationCard tool={tool} />
       ) : (
         <pre className="pa-tool-output">{tool.output}</pre>
-      )}
-    </div>
-  );
-}
-
-function FrontendValidationCard({ tool }: { tool: ToolTimelineItem }) {
-  const validation = tool.metadata?.validation;
-  if (!validation) return null;
-  const passed = validation.status === 'passed';
-  const artifactUrl = (id: string) => {
-    const token = currentAuthToken();
-    const path = `/api/validation/artifacts/${encodeURIComponent(validation.projectHash)}/${encodeURIComponent(validation.runId)}/${encodeURIComponent(id)}`;
-    return token ? `${path}?token=${encodeURIComponent(token)}` : path;
-  };
-  return (
-    <div
-      className={`pa-validation-card ${validation.status}`}
-      data-testid="frontend-validation-card"
-    >
-      <div className="pa-validation-summary">
-        {passed ? <CheckCircleFilled /> : <BugOutlined />}
-        <strong>
-          {passed
-            ? '前端验证通过'
-            : validation.status === 'failed'
-              ? '前端验证失败'
-              : '验证环境异常'}
-        </strong>
-        <Tag color={passed ? 'success' : 'error'}>{validation.profile}</Tag>
-        <span>{validation.durationMs} ms</span>
-      </div>
-      <p>{validation.summary}</p>
-      <div className="pa-validation-steps">
-        {validation.steps.map((step, index) => (
-          <div key={`${index}-${step.name}`} className={step.status}>
-            {step.status === 'passed' ? <CheckCircleOutlined /> : <BugOutlined />}
-            <span>{step.name}</span>
-            <small>{step.durationMs} ms</small>
-          </div>
-        ))}
-      </div>
-      {validation.issues.length > 0 && (
-        <ul className="pa-validation-issues">
-          {validation.issues.map((issue, index) => (
-            <li key={`${index}-${issue.message}`}>
-              [{issue.source}] {issue.scenario ? `${issue.scenario}: ` : ''}
-              {issue.message}
-            </li>
-          ))}
-        </ul>
-      )}
-      {tool.metadata?.artifacts && tool.metadata.artifacts.length > 0 && (
-        <div className="pa-validation-artifacts">
-          {tool.metadata.artifacts.map((artifact) =>
-            artifact.kind === 'screenshot' ? (
-              <a key={artifact.id} href={artifactUrl(artifact.id)} target="_blank" rel="noreferrer">
-                <img src={artifactUrl(artifact.id)} alt={artifact.name} />
-                <span>{artifact.name}</span>
-              </a>
-            ) : (
-              <a key={artifact.id} href={artifactUrl(artifact.id)} target="_blank" rel="noreferrer">
-                {artifact.kind}: {artifact.name}
-              </a>
-            ),
-          )}
-        </div>
-      )}
-      {validation.vision.status === 'skipped' && validation.vision.reason && (
-        <small className="pa-validation-vision">视觉审查已降级：{validation.vision.reason}</small>
       )}
     </div>
   );
@@ -6703,8 +6601,6 @@ function GeneralSettingsPanel({
   const [saving, setSaving] = useState(false);
   const [maxTurns, setMaxTurns] = useState<number | null>(null);
   const [savingMaxTurns, setSavingMaxTurns] = useState(false);
-  const [browserValidationEnabled, setBrowserValidationEnabled] = useState<boolean | null>(null);
-  const [savingBrowserValidation, setSavingBrowserValidation] = useState(false);
   const [shell, setShell] = useState<'auto' | 'powershell' | 'bash' | null>(null);
   const [savingShell, setSavingShell] = useState(false);
   const [memoryEnabled, setMemoryEnabled] = useState<boolean | null>(null);
@@ -6715,7 +6611,6 @@ function GeneralSettingsPanel({
   const [visionEnabled, setVisionEnabled] = useState(false);
   const [visionProvider, setVisionProvider] = useState<ProviderId>();
   const [visionModel, setVisionModel] = useState<string>();
-  const [visionPrompt, setVisionPrompt] = useState('');
   const [savingVision, setSavingVision] = useState(false);
 
   useEffect(() => {
@@ -6751,7 +6646,6 @@ function GeneralSettingsPanel({
         setVisionEnabled(payload.enabled);
         setVisionProvider(payload.provider);
         setVisionModel(payload.model);
-        setVisionPrompt(payload.prompt);
       })
       .catch((err: unknown) => {
         if (!cancelled) messageApi.error(err instanceof Error ? err.message : String(err));
@@ -6769,14 +6663,12 @@ function GeneralSettingsPanel({
         return response.json() as Promise<{
           maxTurns: number;
           shell: 'auto' | 'powershell' | 'bash';
-          browserValidationEnabled: boolean;
         }>;
       })
       .then((payload) => {
         if (!cancelled) {
           setMaxTurns(payload.maxTurns);
           setShell(payload.shell);
-          setBrowserValidationEnabled(payload.browserValidationEnabled);
         }
       })
       .catch((err: unknown) => {
@@ -6827,38 +6719,6 @@ function GeneralSettingsPanel({
       setRecordPayloads((current) => (current === null ? null : !current));
     } finally {
       setSaving(false);
-    }
-  }
-
-  async function toggleBrowserValidation(value: boolean) {
-    setBrowserValidationEnabled(value);
-    setSavingBrowserValidation(true);
-    try {
-      const response = await apiFetch('/api/agent-config', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ browserValidationEnabled: value }),
-      });
-      const payload = (await response.json().catch(() => ({}))) as {
-        browserValidationEnabled?: boolean;
-        runtime?: RuntimeInfo;
-        error?: string;
-      };
-      if (!response.ok || typeof payload.browserValidationEnabled !== 'boolean') {
-        throw new Error(payload.error ?? `保存失败 (${response.status})`);
-      }
-      setBrowserValidationEnabled(payload.browserValidationEnabled);
-      if (payload.runtime) onRuntimeChange(payload.runtime);
-      messageApi.success(
-        payload.browserValidationEnabled
-          ? '已开启浏览器验证'
-          : '已关闭浏览器验证，浏览器会话已释放',
-      );
-    } catch (err) {
-      messageApi.error(`保存失败: ${err instanceof Error ? err.message : String(err)}`);
-      setBrowserValidationEnabled((current) => (current === null ? null : !current));
-    } finally {
-      setSavingBrowserValidation(false);
     }
   }
 
@@ -6989,11 +6849,6 @@ function GeneralSettingsPanel({
   }
 
   async function saveVisionSettingsForm() {
-    const prompt = visionPrompt.trim();
-    if (!prompt) {
-      messageApi.warning('请输入视觉审查提示词。');
-      return;
-    }
     if (visionEnabled && (!visionProvider || !visionModel)) {
       messageApi.warning('启用视觉模型前请选择供应商和模型。');
       return;
@@ -7007,7 +6862,6 @@ function GeneralSettingsPanel({
           enabled: visionEnabled,
           provider: visionEnabled ? visionProvider : undefined,
           model: visionEnabled ? visionModel : undefined,
-          prompt,
         }),
       });
       const payload = (await response.json()) as VisionSettingsInfo & {
@@ -7019,7 +6873,6 @@ function GeneralSettingsPanel({
       setVisionEnabled(payload.enabled);
       setVisionProvider(payload.provider);
       setVisionModel(payload.model);
-      setVisionPrompt(payload.prompt);
       // REST 响应直接回写，避免等待 WebSocket 广播时仍使用旧的 visionReady。
       if (payload.runtime) {
         onRuntimeChange(payload.runtime);
@@ -7115,24 +6968,6 @@ function GeneralSettingsPanel({
           labelCol={{ flex: '220px' }}
           style={{ maxWidth: 640 }}
         >
-          <Form.Item
-            label={
-              <Space size={4}>
-                开启浏览器验证（Beta）
-                <Tooltip title="默认关闭。开启后 Agent 可使用 browser_* 和 frontend_validate 工具，并在修改前端文件后执行浏览器验证。">
-                  <QuestionCircleOutlined className="pa-settings-help" />
-                </Tooltip>
-              </Space>
-            }
-          >
-            <Switch
-              data-testid="browser-validation-toggle"
-              checked={browserValidationEnabled ?? false}
-              disabled={browserValidationEnabled === null}
-              loading={savingBrowserValidation}
-              onChange={(value) => void toggleBrowserValidation(value)}
-            />
-          </Form.Item>
           <Form.Item
             label={
               <Space size={4}>
@@ -7302,19 +7137,6 @@ function GeneralSettingsPanel({
                 />
               </Form.Item>
             )}
-            <Form.Item
-              label="审查提示词"
-              extra={`${visionPrompt.length}/4000，用于描述需要重点检查的视觉问题。`}
-            >
-              <Input.TextArea
-                aria-label="视觉审查提示词"
-                value={visionPrompt}
-                maxLength={4000}
-                autoSize={{ minRows: 3, maxRows: 8 }}
-                disabled={savingVision}
-                onChange={(event) => setVisionPrompt(event.target.value)}
-              />
-            </Form.Item>
             <Form.Item label="保存位置">
               <code className="pa-inline-config-path" title={visionSettings.configPath}>
                 {visionSettings.configPath}
@@ -7948,378 +7770,6 @@ function PlanDocViewer({ doc }: { doc?: PlanDoc }) {
   );
 }
 
-// ---------------------------------------------------------------------------
-// 浏览器 Tab — 实时展示验证任务中的浏览器动作
-// ---------------------------------------------------------------------------
-
-/** 验证工件 URL（截图等），带 token 鉴权（与 FrontendValidationCard 一致）。 */
-function validationArtifactUrl(projectHash: string, runId: string, artifactId: string): string {
-  const token = currentAuthToken();
-  const path = `/api/validation/artifacts/${encodeURIComponent(projectHash)}/${encodeURIComponent(runId)}/${encodeURIComponent(artifactId)}`;
-  return token ? `${path}?token=${encodeURIComponent(token)}` : path;
-}
-
-function BrowserViewer({
-  activity,
-  sessionId,
-  visible,
-}: {
-  activity: BrowserActivityItem[];
-  sessionId?: string;
-  visible: boolean;
-}) {
-  const session = browserSessionState(activity);
-  const pageRef = useRef<HTMLDivElement | null>(null);
-  const [embeddedState, setEmbeddedState] = useState<DesktopBrowserViewState>();
-  // 最近的截图工件（按活动顺序向后查找）
-  const latestScreenshot = useMemo(() => {
-    for (let index = activity.length - 1; index >= 0; index -= 1) {
-      const shot = activity[index].screenshot;
-      if (shot) return shot;
-    }
-    return undefined;
-  }, [activity]);
-  // 最近一次的页面文本（含文本的最后一条活动）
-  const latestPageText = useMemo(() => {
-    for (let index = activity.length - 1; index >= 0; index -= 1) {
-      const item = activity[index];
-      if (item.text) return { item, text: item.text };
-    }
-    return undefined;
-  }, [activity]);
-  const running = activity.some((item) => item.status === 'running');
-  const activeState = embeddedState?.sessionId === sessionId ? embeddedState : undefined;
-  const locked = Boolean(activeState?.locked);
-  const currentUrl = activeState?.url || session.url || '';
-
-  useEffect(() => {
-    const desktopApi = window.personalAgentDesktop;
-    if (!desktopApi || !sessionId) {
-      setEmbeddedState(undefined);
-      return;
-    }
-    let disposed = false;
-    const acceptState = (next: DesktopBrowserViewState | null) => {
-      if (!disposed && next?.sessionId === sessionId) setEmbeddedState(next);
-    };
-    const unsubscribe = desktopApi.onBrowserViewState(acceptState);
-    // Browser creation may finish before this tab mounts. Querying after the
-    // subscription closes that event-delivery race without waiting for navigation.
-    void desktopApi
-      .getBrowserViewState(sessionId)
-      .then(acceptState)
-      .catch(() => undefined);
-    return () => {
-      disposed = true;
-      unsubscribe();
-    };
-  }, [sessionId]);
-
-  useEffect(() => {
-    if (embeddedState && embeddedState.sessionId !== sessionId) {
-      setEmbeddedState(undefined);
-    }
-  }, [embeddedState, sessionId]);
-
-  useLayoutEffect(() => {
-    const desktopApi = window.personalAgentDesktop;
-    const element = pageRef.current;
-    if (!desktopApi || !element || !sessionId) return;
-    let disposed = false;
-    let frame = 0;
-    let lastLayoutKey = '';
-
-    const report = () => {
-      const bounds = browserViewBounds(element);
-      const nextVisible = visible && browserViewIsUncovered(element, bounds);
-      const layoutKey = `${nextVisible ? 1 : 0}:${bounds.x}:${bounds.y}:${bounds.width}:${bounds.height}`;
-      if (layoutKey !== lastLayoutKey) {
-        lastLayoutKey = layoutKey;
-        void desktopApi
-          .setBrowserViewLayout({ sessionId, visible: nextVisible, bounds })
-          .catch(() => {
-            // Retry on the next frame if the desktop bridge was temporarily unavailable.
-            if (!disposed && lastLayoutKey === layoutKey) lastLayoutKey = '';
-          });
-      }
-    };
-
-    const scheduleReport = () => {
-      cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(report);
-    };
-    // WebContentsView lives outside the DOM compositor. Observe the slot and its
-    // layout chain so sidebar drags, collapsed logs, CSS transitions, and window
-    // changes cannot leave a stale native surface.
-    const resizeObserver = new ResizeObserver(scheduleReport);
-    let observed: HTMLElement | null = element;
-    while (observed) {
-      resizeObserver.observe(observed);
-      observed = observed.parentElement;
-    }
-    // Ant overlays are rendered through portals and do not necessarily resize the
-    // slot. Their DOM/class mutations must also trigger the native occlusion check.
-    const mutationObserver = new MutationObserver(scheduleReport);
-    if (visible) {
-      mutationObserver.observe(document.body, {
-        attributes: true,
-        attributeFilter: ['class', 'style', 'hidden', 'aria-hidden', 'open'],
-        childList: true,
-        subtree: true,
-      });
-    }
-    window.addEventListener('resize', scheduleReport);
-    window.addEventListener('scroll', scheduleReport, true);
-    window.addEventListener('transitionend', scheduleReport, true);
-    window.addEventListener('animationend', scheduleReport, true);
-    document.addEventListener('visibilitychange', scheduleReport);
-    window.visualViewport?.addEventListener('resize', scheduleReport);
-    window.visualViewport?.addEventListener('scroll', scheduleReport);
-    scheduleReport();
-    return () => {
-      disposed = true;
-      cancelAnimationFrame(frame);
-      resizeObserver.disconnect();
-      mutationObserver.disconnect();
-      window.removeEventListener('resize', scheduleReport);
-      window.removeEventListener('scroll', scheduleReport, true);
-      window.removeEventListener('transitionend', scheduleReport, true);
-      window.removeEventListener('animationend', scheduleReport, true);
-      document.removeEventListener('visibilitychange', scheduleReport);
-      window.visualViewport?.removeEventListener('resize', scheduleReport);
-      window.visualViewport?.removeEventListener('scroll', scheduleReport);
-      void desktopApi
-        .setBrowserViewLayout({
-          sessionId,
-          visible: false,
-          bounds: browserViewBounds(element),
-        })
-        .catch(() => undefined);
-    };
-  }, [sessionId, visible]);
-
-  const navigate = (action: 'back' | 'forward' | 'reload') => {
-    if (!sessionId || locked) return;
-    void window.personalAgentDesktop?.navigateBrowserView(sessionId, action).catch(() => undefined);
-  };
-
-  const statusLabel = activeState
-    ? activeState.status === 'creating'
-      ? '正在创建浏览器'
-      : activeState.status === 'loading'
-        ? '页面加载中'
-        : activeState.status === 'crashed'
-          ? '页面已崩溃'
-          : activeState.status === 'error'
-            ? '浏览器不可用'
-            : activeState.status === 'closed'
-              ? '浏览器已关闭'
-              : locked
-                ? 'Agent 操作中'
-                : '可交互'
-    : running
-      ? '正在启动浏览器'
-      : session.open
-        ? '等待嵌入页面'
-        : '浏览器未打开';
-
-  const logPanel = (
-    <div className="pa-browser-log-content">
-      {latestScreenshot && (
-        <a
-          href={validationArtifactUrl(
-            latestScreenshot.projectHash,
-            latestScreenshot.runId,
-            latestScreenshot.artifactId,
-          )}
-          target="_blank"
-          rel="noreferrer"
-        >
-          打开最近截图：{latestScreenshot.name}
-        </a>
-      )}
-      {activity.length === 0 ? (
-        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无浏览器操作日志" />
-      ) : (
-        <div className="pa-browser-feed">
-          {activity.map((item) => (
-            <div className={`pa-browser-feed-item ${item.status}`} key={item.id}>
-              <div className="pa-browser-feed-head">
-                {item.status === 'running' ? (
-                  <LoadingOutlined spin />
-                ) : item.status === 'success' ? (
-                  <CheckCircleOutlined />
-                ) : item.status === 'interrupted' ? (
-                  <StopOutlined />
-                ) : (
-                  <BugOutlined />
-                )}
-                <span className="pa-browser-feed-summary" title={item.summary}>
-                  {item.summary}
-                </span>
-                <span className="pa-browser-feed-time">
-                  {item.time}
-                  {typeof item.duration === 'number' ? ` · ${item.duration} ms` : ''}
-                </span>
-              </div>
-              {item.error && <div className="pa-browser-feed-error">{item.error}</div>}
-              {item.url && (
-                <div className="pa-browser-feed-url" title={item.url}>
-                  {item.url}
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-      {latestPageText && <pre className="pa-browser-page-text-content">{latestPageText.text}</pre>}
-    </div>
-  );
-
-  return (
-    <div className="pa-browser-viewer" data-testid="browser-viewer">
-      <div className="pa-browser-toolbar">
-        <Space.Compact size="small">
-          <Tooltip title="后退">
-            <Button
-              aria-label="后退"
-              icon={<LeftOutlined />}
-              disabled={locked || !activeState?.canGoBack}
-              onClick={() => navigate('back')}
-            />
-          </Tooltip>
-          <Tooltip title="前进">
-            <Button
-              aria-label="前进"
-              icon={<RightOutlined />}
-              disabled={locked || !activeState?.canGoForward}
-              onClick={() => navigate('forward')}
-            />
-          </Tooltip>
-          <Tooltip title="刷新">
-            <Button
-              aria-label="刷新"
-              icon={<ReloadOutlined spin={activeState?.status === 'loading'} />}
-              disabled={locked || !activeState || activeState.status === 'closed'}
-              onClick={() => navigate('reload')}
-            />
-          </Tooltip>
-        </Space.Compact>
-        <Input
-          size="small"
-          readOnly
-          className="pa-browser-url"
-          value={currentUrl}
-          placeholder="等待本地页面打开…"
-          title={currentUrl}
-          prefix={<GlobalOutlined />}
-        />
-        <span className={`pa-browser-native-status ${locked ? 'locked' : ''}`}>
-          {locked ? (
-            <LockOutlined />
-          ) : activeState?.status === 'loading' ? (
-            <LoadingOutlined spin />
-          ) : null}
-          {statusLabel}
-        </span>
-      </div>
-      <div ref={pageRef} className="pa-browser-embed" aria-label="嵌入式浏览器页面">
-        {(!activeState || ['creating', 'closed'].includes(activeState.status)) && (
-          <div className="pa-browser-embed-placeholder">
-            {running ? <Spin size="small" /> : <GlobalOutlined />}
-            <span>{statusLabel}</span>
-          </div>
-        )}
-        {(activeState?.status === 'error' || activeState?.status === 'crashed') && (
-          <Alert type="error" showIcon title={statusLabel} description={activeState.error} />
-        )}
-      </div>
-      <Collapse
-        size="small"
-        className="pa-browser-logs"
-        items={[
-          {
-            key: 'logs',
-            label: `操作与错误日志${activity.length ? `（${activity.length}）` : ''}`,
-            children: logPanel,
-          },
-        ]}
-      />
-    </div>
-  );
-}
-
-/** Convert the DOM content box to integer Electron view coordinates and clip it to the window. */
-function browserViewBounds(element: HTMLElement): {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-} {
-  const rect = element.getBoundingClientRect();
-  const viewportWidth = document.documentElement.clientWidth;
-  const viewportHeight = document.documentElement.clientHeight;
-  const contentLeft = Math.round(rect.left + element.clientLeft);
-  const contentTop = Math.round(rect.top + element.clientTop);
-  const left = Math.max(0, contentLeft);
-  const top = Math.max(0, contentTop);
-  const right = Math.min(viewportWidth, contentLeft + Math.max(0, element.clientWidth));
-  const bottom = Math.min(viewportHeight, contentTop + Math.max(0, element.clientHeight));
-  return {
-    x: left,
-    y: top,
-    width: Math.max(0, right - left),
-    height: Math.max(0, bottom - top),
-  };
-}
-
-/**
- * Native child views always render above the React renderer. Only expose the
- * browser surface while its DOM slot is actually topmost; opening an Ant modal,
- * drawer, dropdown, or another desktop overlay then moves the native view away.
- */
-function browserViewIsUncovered(
-  element: HTMLElement,
-  bounds: { x: number; y: number; width: number; height: number },
-): boolean {
-  if (
-    document.visibilityState !== 'visible' ||
-    !element.isConnected ||
-    bounds.width < 1 ||
-    bounds.height < 1
-  ) {
-    return false;
-  }
-  const style = getComputedStyle(element);
-  if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) {
-    return false;
-  }
-
-  const insetX = Math.min(4, Math.max(0, Math.floor(bounds.width / 4)));
-  const insetY = Math.min(4, Math.max(0, Math.floor(bounds.height / 4)));
-  const left = bounds.x + insetX;
-  const right = bounds.x + bounds.width - insetX - 1;
-  const top = bounds.y + insetY;
-  const bottom = bounds.y + bounds.height - insetY - 1;
-  const centerX = Math.floor((left + right) / 2);
-  const centerY = Math.floor((top + bottom) / 2);
-  const points = [
-    [left, top],
-    [centerX, top],
-    [right, top],
-    [left, centerY],
-    [centerX, centerY],
-    [right, centerY],
-    [left, bottom],
-    [centerX, bottom],
-    [right, bottom],
-  ];
-  return points.every(([x, y]) => {
-    const topmost = document.elementFromPoint(x, y);
-    return topmost === element || (topmost !== null && element.contains(topmost));
-  });
-}
-
 function Inspector({
   state,
   activeProject,
@@ -8642,10 +8092,19 @@ function updateTurnTool(
 function extractMessageText(message: UnifiedMessage): string {
   const content = message.displayContent ?? message.content;
   if (typeof content === 'string') return content;
-  return content
-    .filter((block) => block.type === 'text')
-    .map((block) => block.text)
-    .join('\n');
+  const parts: string[] = [];
+  for (const block of content) {
+    if (block.type === 'text') parts.push(block.text);
+    else if (block.type === 'tool_result') {
+      // 结构化工具结果：提取文本内容；错误消息优先展示 error 字段
+      const resultText =
+        typeof block.content === 'string'
+          ? block.content
+          : extractMessageText({ content: block.content } as UnifiedMessage);
+      parts.push(block.error && !resultText ? block.error : resultText);
+    }
+  }
+  return parts.join('\n');
 }
 
 function extractMessageImages(message: UnifiedMessage): MessageTimelineItem['images'] {
@@ -8748,10 +8207,22 @@ function tryParseToolArguments(raw: string): Record<string, unknown> | undefined
 
 function getRestoredToolStatus(
   output: string,
+  message?: UnifiedMessage,
 ): Extract<ToolTimelineItem['status'], 'success' | 'failed' | 'interrupted'> {
+  // 结构化 tool_result 块优先：isError / interrupted 是明确标志，不靠文本猜测
+  if (message && typeof message.content !== 'string') {
+    for (const block of message.content) {
+      if (block.type !== 'tool_result') continue;
+      if (block.isError) {
+        return block.metadata?.interrupted ? 'interrupted' : 'failed';
+      }
+      return 'success';
+    }
+  }
+  // 旧格式（纯字符串）回退：靠文本前缀猜测
   const normalized = output.trim();
   if (/tool (?:execution )?interrupted by user/iu.test(normalized)) return 'interrupted';
-  return /^(?:Error:|Permission denied:)/iu.test(normalized) ? 'failed' : 'success';
+  return /^(?:Error:|Permission denied:|\[tool error\])/iu.test(normalized) ? 'failed' : 'success';
 }
 
 function upsertById<T extends { id: string }>(items: T[], value: T): T[] {
@@ -9049,15 +8520,6 @@ function currentTime(): string {
   return new Date().toLocaleTimeString('zh-CN', {
     hour: '2-digit',
     minute: '2-digit',
-  });
-}
-
-/** 含秒的时间（浏览器活动流条目使用，便于区分连续动作）。 */
-function currentTimeWithSeconds(): string {
-  return new Date().toLocaleTimeString('zh-CN', {
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
   });
 }
 

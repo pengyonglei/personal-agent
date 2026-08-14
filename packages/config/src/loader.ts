@@ -42,14 +42,10 @@ export function loadConfig(options: ConfigLoadOptions = {}): AppConfig {
   // Layer 2: Project config
   const projectPath = resolve(cwd, '.personal-agent', 'config.yaml');
   if (existsSync(projectPath)) {
-    const projectConfig = loadYamlFile(projectPath) as Partial<AppConfig> & {
-      vision?: unknown;
-      validation?: unknown;
-    };
-    // Visual review and browser validation are intentionally global. A
-    // repository config must not silently enable either capability.
+    const projectConfig = loadYamlFile(projectPath) as Partial<AppConfig> & { vision?: unknown };
+    // The visual model is intentionally global. A repository config must not
+    // silently change the model used to process user-provided images.
     delete projectConfig.vision;
-    delete projectConfig.validation;
     config = mergeConfig(config, projectConfig);
   }
 

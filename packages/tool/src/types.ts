@@ -5,7 +5,6 @@ import type {
   UserAnswer,
   UserQuestion,
 } from '@personal-agent/shared';
-import type { ValidationBrowserHost } from '@personal-agent/validation';
 import { isAbsolute, relative, resolve } from 'node:path';
 
 // Re-export for convenience
@@ -22,17 +21,8 @@ export interface ToolContext {
   sessionId: string;
   workingDirectory: string;
   signal?: AbortSignal;
-  /** Electron injects an embedded browser host; CLI and Web leave this undefined. */
-  browserHost?: ValidationBrowserHost;
-  onProgress?: (message: string) => void;
   /** Interactive question handler (ask_user). Absent in non-interactive contexts. */
   askUser?: (question: UserQuestion, signal?: AbortSignal) => Promise<UserAnswer>;
-  /** Optional independent ImageInput model used by frontend screenshot review. */
-  reviewImage?: (input: {
-    screenshotPath: string;
-    scenario: string;
-    prompt: string;
-  }) => Promise<{ passed: boolean; summary: string }>;
 }
 
 export interface Tool {

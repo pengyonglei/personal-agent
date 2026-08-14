@@ -353,7 +353,6 @@ test('global vision settings only expose configured ImageInput models', async ()
       '    models: [gpt-4o, gpt-4o-mini]',
       'vision:',
       '  enabled: false',
-      '  prompt: 检查页面布局',
       'memory:',
       '  enabled: false',
       'plugins:',
@@ -384,11 +383,9 @@ test('global vision settings only expose configured ImageInput models', async ()
     assert.equal(settingsResponse.status, 200);
     const settings = (await settingsResponse.json()) as {
       enabled: boolean;
-      prompt: string;
       models: Array<{ provider: string; model: string }>;
     };
     assert.equal(settings.enabled, false);
-    assert.equal(settings.prompt, '检查页面布局');
     assert.deepEqual(settings.models, [
       {
         provider: 'openai',
@@ -455,7 +452,6 @@ test('global vision settings only expose configured ImageInput models', async ()
         enabled: true,
         provider: 'openai',
         model: 'gpt-4o',
-        prompt: '重点检查遮挡和文本裁切',
       }),
     });
     assert.equal(saveResponse.status, 200);
@@ -463,7 +459,6 @@ test('global vision settings only expose configured ImageInput models', async ()
       enabled: boolean;
       provider: string;
       model: string;
-      prompt: string;
       runtime: { visionReady: boolean };
     };
     assert.deepEqual(
@@ -471,13 +466,11 @@ test('global vision settings only expose configured ImageInput models', async ()
         enabled: saved.enabled,
         provider: saved.provider,
         model: saved.model,
-        prompt: saved.prompt,
       },
       {
         enabled: true,
         provider: 'openai',
         model: 'gpt-4o',
-        prompt: '重点检查遮挡和文本裁切',
       },
     );
     const persisted = await readFile(configPath, 'utf8');
@@ -495,7 +488,6 @@ test('global vision settings only expose configured ImageInput models', async ()
           enabled: true,
           provider: 'openai',
           model: 'gpt-4o-mini',
-          prompt: '检查页面布局',
         }),
       },
     );
@@ -936,80 +928,6 @@ test('agent-config API reads and persists the bash tool shell preference', async
       body: JSON.stringify({}),
     });
     assert.equal(empty.status, 400);
-  } finally {
-    await instance.close();
-    await rm(directory, { recursive: true, force: true });
-  }
-});
-
-test('browser validation is off by default and toggles its tools immediately', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'personal-agent-web-validation-setting-'));
-  const configPath = join(directory, 'config.yaml');
-  await writeFile(
-    configPath,
-    ['memory:', '  enabled: false', 'plugins:', '  enabled: false', 'mcp:', '  servers: []'].join(
-      '\n',
-    ),
-    'utf-8',
-  );
-  const clientBuildDirectory = join(directory, 'client');
-  await mkdir(clientBuildDirectory);
-  await writeFile(join(clientBuildDirectory, 'index.html'), '<h1>test client</h1>', 'utf8');
-
-  const instance = await createWebServer({
-    host: '127.0.0.1',
-    port: 0,
-    workingDirectory: directory,
-    configPath,
-    projectStoragePath: join(directory, 'projects.json'),
-    clientBuildDirectory,
-  });
-  const baseUrl = `http://127.0.0.1:${instance.port}`;
-
-  try {
-    const initial = await fetch(`${baseUrl}/api/agent-config`);
-    const initialPayload = (await initial.json()) as { browserValidationEnabled: boolean };
-    assert.equal(initialPayload.browserValidationEnabled, false);
-    const disabledToolCount = instance.runtime.getRuntimeInfo().toolCount;
-
-    const enabled = await fetch(`${baseUrl}/api/agent-config`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ browserValidationEnabled: true }),
-    });
-    assert.equal(enabled.status, 200);
-    const enabledPayload = (await enabled.json()) as {
-      browserValidationEnabled: boolean;
-      runtime: { toolCount: number; browserValidationEnabled: boolean };
-    };
-    assert.equal(enabledPayload.browserValidationEnabled, true);
-    assert.equal(enabledPayload.runtime.browserValidationEnabled, true);
-    assert.equal(enabledPayload.runtime.toolCount, disabledToolCount + 6);
-    assert.match(await readFile(configPath, 'utf8'), /validation:\s*\n\s*enabled: true/);
-    const reloaded = await fetch(`${baseUrl}/api/agent-config`);
-    assert.equal(
-      ((await reloaded.json()) as { browserValidationEnabled: boolean }).browserValidationEnabled,
-      true,
-    );
-
-    const invalid = await fetch(`${baseUrl}/api/agent-config`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ browserValidationEnabled: 'yes' }),
-    });
-    assert.equal(invalid.status, 400);
-
-    const disabled = await fetch(`${baseUrl}/api/agent-config`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ browserValidationEnabled: false }),
-    });
-    assert.equal(disabled.status, 200);
-    const disabledPayload = (await disabled.json()) as {
-      runtime: { toolCount: number; browserValidationEnabled: boolean };
-    };
-    assert.equal(disabledPayload.runtime.browserValidationEnabled, false);
-    assert.equal(disabledPayload.runtime.toolCount, disabledToolCount);
   } finally {
     await instance.close();
     await rm(directory, { recursive: true, force: true });

@@ -9,10 +9,9 @@ export interface VisionSettingsUpdate {
   enabled: boolean;
   provider?: ProviderId;
   model?: string;
-  prompt: string;
 }
 
-/** Persist the global visual-review settings without touching unrelated config. */
+/** Persist the global visual-model settings without touching unrelated config. */
 export async function saveVisionSettings(
   update: VisionSettingsUpdate,
   configPath?: string,
@@ -31,7 +30,6 @@ export async function saveVisionSettings(
     enabled: update.enabled,
     ...(update.provider ? { provider: update.provider } : {}),
     ...(update.model ? { model: update.model } : {}),
-    prompt: update.prompt,
   };
 
   await mkdir(dirname(targetPath), { recursive: true });

@@ -18,7 +18,7 @@ await Promise.all([
     format: 'esm',
     // electron-updater 为 CJS 且保持真实 node_modules 依赖（由 electron-builder 打进安装包），
     // 运行时经 __require（createRequire）加载，避免 ESM/CJS interop 问题
-    external: ['electron', 'electron-updater', 'playwright', 'playwright-core'],
+    external: ['electron', 'electron-updater'],
     minify: production,
     sourcemap: !production,
     banner: {

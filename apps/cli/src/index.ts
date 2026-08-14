@@ -21,7 +21,6 @@ import {
 } from '@personal-agent/core';
 import {
   BaseTool,
-  closeBrowserSession,
   describeShell,
   registerBuiltinTools,
   setDefaultShellPreference,
@@ -29,7 +28,6 @@ import {
   type ToolContext,
   type ToolResult,
 } from '@personal-agent/tool';
-import { FrontendValidationGate } from '@personal-agent/validation';
 import {
   createLogger,
   setLogLevel,
@@ -53,12 +51,6 @@ import {
 } from '@personal-agent/stats';
 import { MCPClientManager } from '@personal-agent/mcp';
 import { PluginLoader, parseSkillReferences } from '@personal-agent/plugin';
-import {
-  runFrontendValidation,
-  VALIDATION_CONFIG_PATH,
-  validationExitCode,
-  type ValidationProfileName,
-} from '@personal-agent/validation';
 import * as readline from 'node:readline';
 
 const log = createLogger('cli');
@@ -149,42 +141,6 @@ function buildPricingMap(provider: { getModelList?: () => ModelInfo[] }): Pricin
 const program = new Command();
 
 program
-  .command('validate')
-  .description('Validate a local frontend project with Playwright')
-  .option('--profile <profile>', 'Validation profile: quick or full', 'quick')
-  .option('-c, --config <path>', `Validation config path (default: ${VALIDATION_CONFIG_PATH})`)
-  .option('--json', 'Print the full machine-readable validation report')
-  .option('--headed', 'Show the browser window instead of running headless')
-  .action(
-    async (options: { profile: string; config?: string; json?: boolean; headed?: boolean }) => {
-      if (options.profile !== 'quick' && options.profile !== 'full') {
-        console.error(`Unknown validation profile: ${options.profile}. Use quick or full.`);
-        process.exitCode = 2;
-        return;
-      }
-      if (options.headed) process.env.PERSONAL_AGENT_HEADLESS = '0';
-      const result = await runFrontendValidation({
-        workingDirectory: process.cwd(),
-        configPath: options.config,
-        profile: options.profile as ValidationProfileName,
-        onProgress: options.json ? undefined : (message) => console.log(`[validate] ${message}`),
-      });
-      if (options.json) {
-        console.log(JSON.stringify(result, null, 2));
-      } else {
-        console.log(result.summary);
-        for (const issue of result.issues) {
-          console.error(
-            `- [${issue.source}] ${issue.scenario ? `${issue.scenario}: ` : ''}${issue.message}`,
-          );
-        }
-        console.log(`Artifacts: ${result.artifactDirectory}`);
-      }
-      process.exitCode = validationExitCode(result.status);
-    },
-  );
-
-program
   .name('personal-agent')
   .description('A powerful AI agent CLI tool')
   .version(VERSION)
@@ -253,9 +209,7 @@ program
       executor: toolExecutor,
       permissionManager,
       sandbox,
-    } = registerBuiltinTools({
-      browserValidationEnabled: mergedConfig.validation.enabled,
-    });
+    } = registerBuiltinTools();
 
     // Add default permission rules
     permissionManager.addRule({ tool: 'read_file', action: 'allow', scope: 'session' });
@@ -439,18 +393,6 @@ program
     );
     const planEngine = new PlanModeEngine();
     const planModeState: PlanModeState = { active: false };
-    const frontendValidationGate = new FrontendValidationGate();
-    let lastValidationNotice: string | undefined;
-    // 前端验证要求作为系统提示词动态段注入（每次 assemble 时求值）：
-    // 模型每轮都能看到最新要求，验证通过后自动消失；不伪装成用户输入污染历史。
-    contextAssembler.addSection({
-      name: 'frontend-validation-followup',
-      priority: 8,
-      conditional: () =>
-        mergedConfig.validation.enabled && Boolean(frontendValidationGate.requiredFollowup()),
-      content: () =>
-        mergedConfig.validation.enabled ? (frontendValidationGate.requiredFollowup() ?? '') : '',
-    });
 
     // Interactive ask_user wiring: readline fallback by default; TUI mode
     // replaces this with an ink QuestionCard bridge (see runTuiMode).
@@ -520,12 +462,6 @@ program
           input,
         });
         const result = await toolExecutor.executeWithPermission(name, input, toolCtx, true);
-        if (mergedConfig.validation.enabled) {
-          for (const path of result.metadata?.fileModified ?? []) {
-            frontendValidationGate.recordFile(path);
-          }
-          if (name === 'frontend_validate') frontendValidationGate.recordValidation(result.success);
-        }
         await pluginLoader.dispatchHook('on_tool_result', {
           sessionId: session.getSessionId(),
           toolName: name,
@@ -543,22 +479,6 @@ program
         }
         return promptUserPermission(toolName, params);
       },
-      drainPendingUserMessages: () => {
-        // 仅真正的用户注入消息走此通道；前端验证要求通过系统提示词动态段传达。
-        // 这里顺手把验证提醒打印给用户（内容变化时只打印一次），保持可见性。
-        const followup = mergedConfig.validation.enabled
-          ? frontendValidationGate.requiredFollowup()
-          : undefined;
-        if (followup && followup !== lastValidationNotice) {
-          lastValidationNotice = followup;
-          console.log(`\x1b[33m⚠ ${followup}\x1b[0m\n`);
-        } else if (!followup) {
-          lastValidationNotice = undefined;
-        }
-        return [];
-      },
-      hasPendingInstruction: () =>
-        mergedConfig.validation.enabled && Boolean(frontendValidationGate.requiredFollowup()),
     });
 
     // Initialize sub-agent manager and register spawn_sub_agent tool
@@ -667,7 +587,6 @@ When the user is satisfied, they will use /exit-plan to leave plan mode. Then yo
         sessionId: session.getSessionId(),
       });
       await subAgentManager.cancelAll();
-      await closeBrowserSession(session.getSessionId());
       await mcpManager.disconnectAll();
       await provider.dispose();
       process.exit(0);
@@ -695,7 +614,6 @@ When the user is satisfied, they will use /exit-plan to leave plan mode. Then yo
             sessionId: session.getSessionId(),
           });
           await subAgentManager.cancelAll();
-          await closeBrowserSession(session.getSessionId());
           await mcpManager.disconnectAll();
         },
       });
@@ -748,7 +666,6 @@ When the user is satisfied, they will use /exit-plan to leave plan mode. Then yo
               sessionId: session.getSessionId(),
             });
             await subAgentManager.cancelAll();
-            await closeBrowserSession(session.getSessionId());
             await mcpManager.disconnectAll();
             await provider.dispose();
             rl.close();
@@ -788,7 +705,6 @@ When the user is satisfied, they will use /exit-plan to leave plan mode. Then yo
         sessionId: session.getSessionId(),
       });
       await subAgentManager.cancelAll();
-      await closeBrowserSession(session.getSessionId());
       await mcpManager.disconnectAll();
       await provider.dispose();
       process.exit(0);

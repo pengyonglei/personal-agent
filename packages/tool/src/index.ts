@@ -40,18 +40,4 @@ export {
   AskUserTool,
   ASK_USER_MAX_OPTIONS,
 } from './tools/web';
-export {
-  BROWSER_VALIDATION_TOOL_NAMES,
-  registerBuiltinTools,
-  setBrowserValidationToolsEnabled,
-} from './register';
-export {
-  BrowserOpenTool,
-  BrowserSnapshotTool,
-  BrowserActTool,
-  BrowserScreenshotTool,
-  BrowserCloseTool,
-  FrontendValidateTool,
-  closeBrowserSession,
-  closeAllBrowserSessions,
-} from './tools/browser';
+export { registerBuiltinTools } from './register';
