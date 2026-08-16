@@ -186,3 +186,43 @@ test('removing a model from provider config auto-switches idle tasks and blocks 
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test('task reasoning effort persists alongside the task model and clears on model-only update', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'personal-agent-projects-'));
+  const storagePath = join(directory, 'projects.json');
+  const manager = new ProjectManager(storagePath);
+  await manager.initialize();
+  const project = await manager.createProject({ name: 'persist-effort', rootPath: directory });
+  const task = await manager.createTask({
+    projectId: project.id,
+    title: '持久化思考强度',
+    permissionMode: 'ask',
+  });
+
+  // 设置模型 + 思考强度后落盘
+  await manager.setTaskModel(task.id, 'ollama:qwen3:8b', 'max');
+
+  const reloaded = new ProjectManager(storagePath);
+  await reloaded.initialize();
+  const restored = reloaded.getTask(task.id);
+  assert.equal(restored?.model, 'ollama:qwen3:8b');
+  assert.equal(restored?.reasoningEffort, 'max');
+
+  // 仅更新模型（未指定档位）时清除持久化的思考强度覆盖（跟随新模型默认档）
+  await manager.setTaskModel(task.id, 'ollama:qwen3:8b');
+
+  const cleared = new ProjectManager(storagePath);
+  await cleared.initialize();
+  assert.equal(cleared.getTask(task.id)?.model, 'ollama:qwen3:8b');
+  assert.equal(cleared.getTask(task.id)?.reasoningEffort, undefined);
+
+  // 清除模型时同样清除思考强度
+  await manager.setTaskModel(task.id, undefined);
+
+  const fullyCleared = new ProjectManager(storagePath);
+  await fullyCleared.initialize();
+  assert.equal(fullyCleared.getTask(task.id)?.model, undefined);
+  assert.equal(fullyCleared.getTask(task.id)?.reasoningEffort, undefined);
+
+  await rm(directory, { recursive: true, force: true });
+});

@@ -21,9 +21,9 @@ import {
 } from '@personal-agent/core';
 import {
   BaseTool,
-  describeShell,
   registerBuiltinTools,
   setDefaultShellPreference,
+  warmShellDescription,
   type Tool,
   type ToolContext,
   type ToolResult,
@@ -146,7 +146,10 @@ program
   .version(VERSION)
   .argument('[prompt]', 'Single prompt to execute (non-interactive mode)')
   .option('-m, --model <model>', 'Model to use')
-  .option('-p, --provider <provider>', 'Provider to use (anthropic, openai, ollama, deepseek)')
+  .option(
+    '-p, --provider <provider>',
+    'Provider to use (anthropic, openai, ollama, deepseek, volcano, lmstudio)',
+  )
   .option('--max-turns <n>', 'Maximum turns per prompt', parseInt)
   .option('--temperature <n>', 'Temperature for generation', parseFloat)
   .option('--max-tokens <n>', 'Maximum output tokens', parseInt)
@@ -249,7 +252,10 @@ program
       {
         workingDirectory: process.cwd(),
         platform: `${process.platform} ${process.arch}`,
-        shell: describeShell(process.platform, mergedConfig.tools.shell),
+        shell: await warmShellDescription({
+          platform: process.platform,
+          prefer: mergedConfig.tools.shell,
+        }),
         model: provider.getModel(),
         provider: provider.providerId,
         mode: 'chat',
@@ -390,6 +396,9 @@ program
       resolveCliContextWindow(provider),
       8192,
       createLlmContextSummarizer(provider, promptOverrides),
+      // 压缩判断使用 API 上报的最近一次模型请求输入 token 数（与 Web 端
+      // 上下文仪表盘同一口径），由 onModelCallEnd 钩子持续更新。
+      () => session.getLastInputTokens(),
     );
     const planEngine = new PlanModeEngine();
     const planModeState: PlanModeState = { active: false };
@@ -429,7 +438,14 @@ program
 
     const agentLoop = new AgentLoop({
       onModelCallStart: (call) => statsRecorder?.onModelCallStart(call),
-      onModelCallEnd: (call) => statsRecorder?.onModelCallEnd(call),
+      onModelCallEnd: (call) => {
+        statsRecorder?.onModelCallEnd(call);
+        // 记录最近一次请求的输入 token 数，供 TokenBudget 压缩判断使用
+        // （与 Web 端上下文仪表盘一致的 API 上报口径）。
+        if (call.status === 'completed' && call.response.usage) {
+          session.setLastInputTokens(call.response.usage.inputTokens);
+        }
+      },
       provider,
       contextAssembler,
       tokenBudget,
@@ -1143,12 +1159,16 @@ function renderEvent(event: unknown): void {
 
     case 'tool_call_end': {
       const result = ev.result as ToolResult | undefined;
-      if (result?.success) {
-        const preview = (result.content ?? '').slice(0, 300);
-        process.stdout.write(`\x1b[32m✓\x1b[0m\n`);
+      // 失败时也展示工具的实际输出（如 bash 的 stderr），而不只是错误摘要。
+      const output = result?.success
+        ? result.content
+        : `${result?.content ?? ''}${result?.error ? `\n[error] ${result.error}` : ''}`;
+      if (result?.success || output?.trim()) {
+        const preview = (output ?? '').slice(0, 300);
+        process.stdout.write(result?.success ? `\x1b[32m✓\x1b[0m\n` : `\x1b[31m✗\x1b[0m\n`);
         if (preview) {
           process.stdout.write(
-            `\x1b[2m  ${preview.replace(/\n/g, '\n  ')}${result.content.length > 300 ? '...' : ''}\x1b[0m\n`,
+            `\x1b[2m  ${preview.replace(/\n/g, '\n  ')}${(output?.length ?? 0) > 300 ? '...' : ''}\x1b[0m\n`,
           );
         }
       } else {

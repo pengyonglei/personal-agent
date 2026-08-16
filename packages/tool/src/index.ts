@@ -23,6 +23,9 @@ export { BashTool } from './tools/shell';
 export {
   resolveShell,
   describeShell,
+  describeResolvedShell,
+  getCachedShellDescription,
+  warmShellDescription,
   resetShellCache,
   setDefaultShellPreference,
   getDefaultShellPreference,

@@ -5,6 +5,7 @@ import { OpenAIProvider } from './openai';
 import { DeepSeekProvider, normalizeDeepSeekModel } from './deepseek';
 import { VolcanoArkProvider } from './volcano';
 import { OllamaProvider } from './ollama';
+import { LMStudioProvider, DEFAULT_LMSTUDIO_BASE_URL } from './lmstudio';
 import { createLogger } from '@personal-agent/shared';
 
 const log = createLogger('provider-registry');
@@ -85,6 +86,19 @@ export class ProviderRegistry {
         providers.volcano.defaultModel,
         providers.volcano.baseURL,
         providers.volcano.models,
+      );
+      await provider.initialize();
+      registry.register(provider);
+    }
+
+    // LM Studio (local OpenAI-compatible server; no API key required by default)
+    if (providers.lmstudio) {
+      log.info('Registering LM Studio provider');
+      const provider = new LMStudioProvider(
+        providers.lmstudio.apiKey ?? 'lm-studio',
+        providers.lmstudio.defaultModel,
+        providers.lmstudio.baseURL ?? DEFAULT_LMSTUDIO_BASE_URL,
+        providers.lmstudio.models,
       );
       await provider.initialize();
       registry.register(provider);

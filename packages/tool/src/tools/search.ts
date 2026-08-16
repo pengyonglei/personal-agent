@@ -11,11 +11,36 @@ import fg from 'fast-glob';
 // glob — find files by pattern
 // ---------------------------------------------------------------------------
 
+/** 生成的/重型目录与文件：glob 与 grep 默认跳过，避免遍历 node_modules、
+ *  .git、构建产物等导致 CPU 打满或结果爆炸。 */
+const COMMON_IGNORED_PATHS = [
+  '**/node_modules/**',
+  '**/.git/**',
+  '**/.pnpm-store/**',
+  '**/.turbo/**',
+  '**/.next/**',
+  '**/.cache/**',
+  '**/dist/**',
+  '**/out/**',
+  '**/build/**',
+  '**/coverage/**',
+  '**/release/**',
+  '**/releases/**',
+  '**/make/**',
+  '**/*.tsbuildinfo',
+];
+
+/** glob 单次返回的最大条数：达到后立即停止遍历（防止宽泛模式全盘扫描）。 */
+const MAX_GLOB_RESULTS = 1000;
+/** glob 遍历超时：超时即中断并报错，避免长时间占用 CPU。 */
+const GLOB_TIMEOUT_MS = 30_000;
+
 export class GlobTool extends BaseTool {
   readonly name = 'glob';
-  readonly description = `Fast file pattern matching. Supports glob patterns like "**/*.js" or "src/**/*.ts". Returns matching file paths sorted by modification time.
+  readonly description = `Fast file pattern matching. Supports glob patterns like "**/*.js" or "src/**/*.ts". Returns matching file paths sorted by modification time (most recent first).
 - pattern: the glob pattern to match files against
-- path: the directory to search in (defaults to working directory)`;
+- path: the directory to search in (defaults to working directory)
+Generated/heavy directories (node_modules, .git, dist, build, coverage, ...) are skipped automatically. At most ${MAX_GLOB_RESULTS} results are returned and traversal stops early — prefer narrow patterns (e.g. "src/**/*.ts") over broad ones ("**/*").`;
   readonly category = 'file' as const;
   readonly requiresPermission = false;
 
@@ -28,37 +53,82 @@ export class GlobTool extends BaseTool {
     required: ['pattern'],
   };
 
+  constructor(private readonly limits?: { maxResults?: number; timeoutMs?: number }) {
+    super();
+  }
+
   async execute(params: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
     const pattern = params.pattern as string;
     const searchPath = (params.path as string) ?? context.workingDirectory;
+    const maxResults = this.limits?.maxResults ?? MAX_GLOB_RESULTS;
+    const timeoutMs = this.limits?.timeoutMs ?? GLOB_TIMEOUT_MS;
+
+    // fast-glob 的类型声明是 NodeJS.ReadableStream（最小接口，无 destroy），
+    // 运行时实际是 stream.Readable —— 这里断言出 destroy 以支持提前终止遍历。
+    const stream = fg.stream(pattern, {
+      cwd: searchPath,
+      absolute: false,
+      dot: false,
+      onlyFiles: true,
+      stats: true,
+      ignore: COMMON_IGNORED_PATHS,
+      // 遇到无权限/损坏的条目跳过而不是中断整个遍历
+      suppressErrors: true,
+    }) as unknown as { destroy(): void } & AsyncIterable<fg.Entry>;
+
+    // 流式收集：达到上限、超时或用户中断时 destroy() 立即停止底层遍历，
+    // 避免在超大目录树（如 node_modules）上长时间空转 CPU。
+    const entries: fg.Entry[] = [];
+    let timedOut = false;
+    let truncated = false;
+    const destroy = (): void => stream.destroy();
+    const timer = setTimeout(() => {
+      timedOut = true;
+      destroy();
+    }, timeoutMs);
+    const onAbort = (): void => destroy();
+    context.signal?.addEventListener('abort', onAbort, { once: true });
 
     try {
-      const files = await fg(pattern, {
-        cwd: searchPath,
-        absolute: false,
-        dot: false,
-        onlyFiles: true,
-        stats: true,
-      });
-
-      // Sort by modification time (most recent first)
-      const sorted = files.sort((a, b) => {
-        const aTime = a.stats?.mtimeMs ?? 0;
-        const bTime = b.stats?.mtimeMs ?? 0;
-        return bTime - aTime;
-      });
-
-      if (sorted.length === 0) {
-        return this.success('(no files matched)');
+      for await (const entry of stream) {
+        entries.push(entry);
+        if (entries.length >= maxResults) {
+          truncated = true;
+          destroy();
+          break;
+        }
       }
-
-      return this.success(sorted.map((f) => f.path).join('\n'), {
-        duration: 0,
-        truncated: sorted.length > 1000,
-      });
-    } catch (err) {
-      return this.error(`Glob failed: ${(err as Error).message}`);
+    } catch {
+      // 提前 destroy（上限/超时/中断）会令迭代器抛错，这里按正常流程收尾
+    } finally {
+      clearTimeout(timer);
+      context.signal?.removeEventListener('abort', onAbort);
     }
+
+    if (context.signal?.aborted) return interruptedSearchResult();
+    if (timedOut) {
+      return this.error(`Glob timed out after ${timeoutMs}ms (traversal aborted)`);
+    }
+
+    // Sort by modification time (most recent first)
+    const sorted = entries.sort((a, b) => {
+      const aTime = a.stats?.mtimeMs ?? 0;
+      const bTime = b.stats?.mtimeMs ?? 0;
+      return bTime - aTime;
+    });
+
+    if (sorted.length === 0) {
+      return this.success('(no files matched)');
+    }
+
+    const content =
+      sorted.map((f) => f.path).join('\n') +
+      (truncated ? `\n... [truncated: stopped after ${maxResults} results]` : '');
+
+    return this.success(content, {
+      duration: 0,
+      truncated,
+    });
   }
 }
 
@@ -124,7 +194,7 @@ export class GrepTool extends BaseTool {
         dot: false,
         onlyFiles: true,
         stats: true,
-        ignore: GREP_IGNORED_PATHS,
+        ignore: COMMON_IGNORED_PATHS,
       });
       if (context.signal?.aborted) return interruptedSearchResult();
 
@@ -203,23 +273,6 @@ export class GrepTool extends BaseTool {
     }
   }
 }
-
-const GREP_IGNORED_PATHS = [
-  '**/node_modules/**',
-  '**/.git/**',
-  '**/.pnpm-store/**',
-  '**/.turbo/**',
-  '**/.next/**',
-  '**/.cache/**',
-  '**/dist/**',
-  '**/out/**',
-  '**/build/**',
-  '**/coverage/**',
-  '**/release/**',
-  '**/releases/**',
-  '**/make/**',
-  '**/*.tsbuildinfo',
-];
 
 function interruptedSearchResult(): ToolResult {
   return {

@@ -58,7 +58,7 @@ const DEFAULT_ENVIRONMENT = `Current environment:
 - Date: ${'${date}'}
 
 Shell usage notes:
-- When the Shell is PowerShell (Windows), write commands in PowerShell syntax (e.g. $env:VAR, Get-ChildItem, dir works too; PowerShell 7 supports && and ||). Git and npm commands work the same as in other shells.
+- When the Shell is PowerShell (Windows), write commands in PowerShell syntax (e.g. $env:VAR, Get-ChildItem, dir works too). Join commands with ';' — && and || are NOT available on Windows PowerShell 5.1 (only PowerShell 7+ supports them). Git and npm commands work the same as in other shells.
 - When the Shell is bash (Git Bash), use bash syntax with Windows-style paths (C:\...).
 - When the Shell is bash (WSL), use bash syntax with Linux paths — Windows paths are exposed as /mnt/<drive>/... (e.g. D:\work maps to /mnt/d/work).`;
 
@@ -162,6 +162,15 @@ export class ContextAssembler {
 
   setMode(mode: AssemblerContext['mode']): void {
     this.ctx.mode = mode;
+  }
+
+  /**
+   * Live-update the shell description (e.g. after the async version probe
+   * resolves). The environment section is re-rendered on every assemble(),
+   * so the new value reaches the next prompt immediately.
+   */
+  setShell(shell: string): void {
+    this.ctx.shell = shell;
   }
 
   // -------------------------------------------------------------------
@@ -284,11 +293,24 @@ export class TokenBudget {
   private maxTokens: number;
   private reservedForOutput: number;
   private summarizer?: ContextSummarizer;
+  /**
+   * 权威的「已使用 token」来源（例如会话记录的最近一次模型请求输入 token 数，
+   * 即上下文仪表盘展示的 usedTokens）。提供后，压缩判断与仪表盘口径一致，
+   * 不再依赖本地字符估算；仅在未提供或返回 undefined 时兜底使用字符估算
+   * （如子 agent 首轮尚无任何模型请求）。
+   */
+  private getUsedTokens?: () => number | undefined;
 
-  constructor(maxTokens: number, reservedForOutput = 8192, summarizer?: ContextSummarizer) {
+  constructor(
+    maxTokens: number,
+    reservedForOutput = 8192,
+    summarizer?: ContextSummarizer,
+    getUsedTokens?: () => number | undefined,
+  ) {
     this.maxTokens = maxTokens;
     this.reservedForOutput = reservedForOutput;
     this.summarizer = summarizer;
+    this.getUsedTokens = getUsedTokens;
   }
 
   getMaxContextTokens(): number {
@@ -296,7 +318,7 @@ export class TokenBudget {
   }
 
   checkUsage(messages: UnifiedMessage[]): { used: number; limit: number; percentage: number } {
-    const used = countTotalTokens(messages);
+    const used = this.getUsedTokens?.() ?? countTotalTokens(messages);
     const limit = this.getMaxContextTokens();
     return { used, limit, percentage: Math.round((used / limit) * 100) };
   }

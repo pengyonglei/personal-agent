@@ -81,6 +81,8 @@ export interface ModelCallDebugEnd {
   callId: string;
   finishedAt: string;
   durationMs: number;
+  /** 首个内容 token（thinking/text）到达时间，相对调用开始（ms）。非流式或无 token 时缺省。 */
+  ttftMs?: number;
   status: 'completed' | 'error' | 'interrupted';
   response: {
     messageId?: string;
@@ -105,6 +107,10 @@ export class AgentLoop {
   private lastUsage: UsageInfo | null = null;
   private aborted = false;
   private controller = new AbortController();
+  /** 本次任务中所有模型调用的总耗时（ms），用于计算 token 输出速度。 */
+  private runTotalModelDurationMs = 0;
+  /** 本次任务中首个模型调用的 TTFT（ms）。 */
+  private runFirstTtftMs: number | undefined;
 
   constructor(config: AgentLoopConfig) {
     this.config = config;
@@ -148,6 +154,8 @@ export class AgentLoop {
     this.totalUsage = { inputTokens: 0, outputTokens: 0 };
     this.lastUsage = null;
     this.aborted = false;
+    this.runTotalModelDurationMs = 0;
+    this.runFirstTtftMs = undefined;
     // 新建 AbortController：本次运行所有异步操作（LLM 流、工具执行等）
     // 都挂载它的 signal，外部调用 interrupt() 即可随时中断整个循环
     this.controller = new AbortController();
@@ -197,13 +205,20 @@ export class AgentLoop {
         // 若当前历史消息估算的 Token 数超出预算阈值，则触发压缩
         if (this.config.tokenBudget.shouldCompact(history)) {
           log.info('Compacting conversation history');
-          // 调用 TokenBudget 的压缩策略（如摘要总结、丢弃早期消息等）
-          const compacted = await this.config.tokenBudget.compact(history);
-          // 用压缩后的消息替换原有历史（MVP 实现：先清空再逐条写入）
-          // system 消息（系统提示）不参与替换，保持其原始内容
-          this.config.contextAssembler.clearHistory();
-          for (const msg of compacted.filter((m) => m.role !== 'system')) {
-            this.config.contextAssembler.addMessage(msg);
+          // 通知前端：开始压缩（对话区显示「正在压缩上下文...」提示）
+          yield { type: 'context_compacting' };
+          try {
+            // 调用 TokenBudget 的压缩策略（如摘要总结、丢弃早期消息等）
+            const compacted = await this.config.tokenBudget.compact(history);
+            // 用压缩后的消息替换原有历史（MVP 实现：先清空再逐条写入）
+            // system 消息（系统提示）不参与替换，保持其原始内容
+            this.config.contextAssembler.clearHistory();
+            for (const msg of compacted.filter((m) => m.role !== 'system')) {
+              this.config.contextAssembler.addMessage(msg);
+            }
+          } finally {
+            // 无论压缩成功还是异常，都必须通知前端结束压缩提示
+            yield { type: 'context_compacted' };
           }
         }
 
@@ -248,14 +263,23 @@ export class AgentLoop {
         // onModelCallEnd 钩子都只会被触发一次（callFinished 幂等保护）。
         const callId = generateId();
         const callStartedAt = Date.now();
+        let callFirstTokenAt: number | undefined;
         let callFinished = false;
         const finishModelCall = (status: ModelCallDebugEnd['status'], error?: string): void => {
           if (callFinished) return;
           callFinished = true;
+          const durationMs = Date.now() - callStartedAt;
+          const ttftMs =
+            callFirstTokenAt === undefined ? undefined : callFirstTokenAt - callStartedAt;
+          this.runTotalModelDurationMs += durationMs;
+          if (ttftMs !== undefined && this.runFirstTtftMs === undefined) {
+            this.runFirstTtftMs = ttftMs;
+          }
           this.safeNotifyModelCallEnd({
             callId,
             finishedAt: new Date().toISOString(),
-            durationMs: Date.now() - callStartedAt,
+            durationMs,
+            ttftMs,
             status,
             response: {
               messageId: responseMessageId,
@@ -306,6 +330,7 @@ export class AgentLoop {
 
               // 思考增量：累积思考文本，并实时转发给前端展示（如推理过程）
               case 'thinking_delta':
+                if (callFirstTokenAt === undefined) callFirstTokenAt = Date.now();
                 assistantThinking += event.thinkingDelta;
                 yield {
                   type: 'assistant_thinking_delta',
@@ -316,6 +341,7 @@ export class AgentLoop {
 
               // 文本增量：累积回复文本，并实时转发给前端（打字机效果）
               case 'text_delta':
+                if (callFirstTokenAt === undefined) callFirstTokenAt = Date.now();
                 assistantText += event.textDelta;
                 yield {
                   type: 'assistant_text_delta',
@@ -387,6 +413,7 @@ export class AgentLoop {
                     type: 'done',
                     totalTurns: this.turnCount,
                     totalUsage: this.totalUsage,
+                    ...this.taskMetrics(),
                   };
                   return;
                 }
@@ -413,7 +440,7 @@ export class AgentLoop {
 
         // 流式调用结束后再次检查中断标志（中断可能发生在流结束后、工具执行前）
         if (this.aborted) {
-          yield { type: 'interrupted' };
+          yield { type: 'interrupted', ...this.taskMetrics() };
           return;
         }
 
@@ -582,13 +609,13 @@ export class AgentLoop {
                 turnNumber: this.turnCount,
               };
             }
-            yield { type: 'interrupted' };
+            yield { type: 'interrupted', ...this.taskMetrics() };
             return;
           }
 
           // 工具全部执行完毕后再次确认中断标志
           if (this.aborted) {
-            yield { type: 'interrupted' };
+            yield { type: 'interrupted', ...this.taskMetrics() };
             return;
           }
 
@@ -611,6 +638,7 @@ export class AgentLoop {
           type: 'done',
           totalTurns: this.turnCount,
           totalUsage: this.totalUsage,
+          ...this.taskMetrics(),
         };
         return;
       }
@@ -620,6 +648,7 @@ export class AgentLoop {
         type: 'done',
         totalTurns: this.turnCount,
         totalUsage: this.totalUsage,
+        ...this.taskMetrics(),
       };
     } catch (err) {
       // ---- 5. 兜底异常处理 ----
@@ -647,15 +676,35 @@ export class AgentLoop {
   /** 把本次任务总耗时写到最后一条 assistant 消息（即本次回复），供持久化展示。 */
   private stampAssistantDuration(runStartedAt: number): void {
     const durationMs = Date.now() - runStartedAt;
+    const metrics = this.taskMetrics();
     // getHistory() 返回浅拷贝数组，但消息对象是共享引用，直接改字段即生效；
     // 从未尾向前找，最后一条 assistant 消息即本次任务的最新回复。
     const history = this.config.contextAssembler.getHistory();
     for (let i = history.length - 1; i >= 0; i--) {
       if (history[i].role === 'assistant') {
         history[i].durationMs = durationMs;
+        history[i].finishedAt = metrics.finishedAt;
+        history[i].ttftMs = metrics.ttftMs;
+        history[i].tokensPerSecond = metrics.tokensPerSecond;
         break;
       }
     }
+  }
+
+  /** 汇总本次任务的结束时间、首 token 时间与输出 token 速度，供事件与落盘复用。 */
+  private taskMetrics(): {
+    finishedAt: string;
+    ttftMs?: number;
+    tokensPerSecond?: number;
+  } {
+    return {
+      finishedAt: new Date().toISOString(),
+      ttftMs: this.runFirstTtftMs,
+      tokensPerSecond:
+        this.runTotalModelDurationMs > 0
+          ? this.totalUsage.outputTokens / (this.runTotalModelDurationMs / 1000)
+          : undefined,
+    };
   }
 
   // -------------------------------------------------------------------

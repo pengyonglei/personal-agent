@@ -207,9 +207,11 @@ export class DeepSeekProvider extends BaseLLMProvider {
 
           const usage = chunk.usage;
           // DeepSeek 扩展字段（OpenAI SDK 的 CompletionUsage 类型未包含）
-          const deepseekUsage = usage as (typeof usage & {
-            prompt_cache_hit_tokens?: number;
-          }) | undefined;
+          const deepseekUsage = usage as
+            | (typeof usage & {
+                prompt_cache_hit_tokens?: number;
+              })
+            | undefined;
           yield {
             type: 'message_end',
             stopReason: mapOpenAIStopReason(chunk.choices[0].finish_reason),
@@ -291,9 +293,11 @@ export class DeepSeekProvider extends BaseLLMProvider {
     }
 
     // DeepSeek 扩展字段（OpenAI SDK 的 CompletionUsage 类型未包含）
-    const deepseekUsage = response.usage as (typeof response.usage & {
-      prompt_cache_hit_tokens?: number;
-    }) | undefined;
+    const deepseekUsage = response.usage as
+      | (typeof response.usage & {
+          prompt_cache_hit_tokens?: number;
+        })
+      | undefined;
     return {
       id: response.id,
       model: response.model,
@@ -337,6 +341,7 @@ function getDeepSeekThinkingOptions(
   if (effort === 'off') return { thinking: { type: 'disabled' } };
   return {
     thinking: { type: 'enabled' },
-    reasoning_effort: effort === 'max' ? 'max' : effort === 'high' ? 'high' : 'low',
+    reasoning_effort:
+      effort === 'max' || effort === 'xhigh' ? 'max' : effort === 'high' ? 'high' : 'low',
   };
 }

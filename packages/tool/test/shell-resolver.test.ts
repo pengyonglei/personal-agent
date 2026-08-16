@@ -2,11 +2,14 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   BashTool,
+  describeResolvedShell,
   describeShell,
+  getCachedShellDescription,
   resetShellCache,
   resolveShell,
   toWindowsPathLike,
   toWslPath,
+  warmShellDescription,
 } from '../src/index';
 
 test('describeShell reports the strategy-level shell label per platform', () => {
@@ -41,16 +44,63 @@ test('resolveShell on non-win32 platforms uses bash with -c', async () => {
   assert.equal(shell.label, 'bash (Unix)');
 });
 
+test('describeShell includes the version when provided', () => {
+  assert.equal(describeShell('win32', 'powershell', '5.1.26100.9168'), 'PowerShell 5.1.26100.9168 (Windows)');
+  assert.equal(describeShell('win32', 'auto', '7.4.6'), 'PowerShell 7.4.6 (Windows)');
+  assert.equal(describeShell('win32', 'bash', '5.2.26'), 'bash 5.2.26 (Git Bash or WSL)');
+  assert.equal(describeShell('linux', 'auto', '5.2.26'), 'bash 5.2.26 (Unix)');
+  // 无版本时保持原有标签
+  assert.equal(describeShell('win32', 'powershell'), 'PowerShell (Windows)');
+});
+
+test('describeResolvedShell composes a versioned label per shell kind', () => {
+  const base = {
+    args: (c: string) => ['-c', c],
+    toWorkingDirectory: (c: string) => c,
+  };
+  assert.equal(
+    describeResolvedShell({ ...base, kind: 'powershell', command: 'powershell.exe', label: 'PowerShell (Windows)', version: '5.1.26100.9168' }),
+    'PowerShell 5.1.26100.9168 (Windows)',
+  );
+  assert.equal(
+    describeResolvedShell({ ...base, kind: 'bash', command: 'bash.exe', label: 'bash (Git Bash)', version: '5.2.26' }),
+    'bash 5.2.26 (Git Bash)',
+  );
+  assert.equal(
+    describeResolvedShell({ ...base, kind: 'wsl-bash', command: 'bash', label: 'bash (WSL)', version: '5.2.15' }),
+    'bash 5.2.15 (WSL)',
+  );
+  assert.equal(
+    describeResolvedShell({ ...base, kind: 'bash', command: '/bin/bash', label: 'bash (Unix)' }),
+    'bash (Git Bash)',
+  );
+});
+
+test('warmShellDescription probes the real PowerShell version on win32 and caches it', async () => {
+  resetShellCache();
+  const description = await warmShellDescription({ platform: 'win32', prefer: 'powershell' });
+  // powershell.exe 在 Windows 上必定存在：探测成功时带版本号，
+  // 探测失败（如非 Windows CI 上执行）时回退为无版本标签。
+  assert.ok(
+    description === 'PowerShell (Windows)' || /^PowerShell \d+\./.test(description),
+    `unexpected: ${description}`,
+  );
+  // 同步读取返回与异步探测一致的结果（缓存已写入）
+  assert.equal(getCachedShellDescription({ platform: 'win32', prefer: 'powershell' }), description);
+});
+
 test('resolveShell on win32 defaults to PowerShell with -Command', async () => {
   resetShellCache();
   const shell = await resolveShell({ platform: 'win32', prefer: 'auto' });
   assert.equal(shell.kind, 'powershell');
   assert.ok(shell.command === 'pwsh' || shell.command === 'powershell.exe');
+  // UTF-8 前缀：强制 PowerShell 以 UTF-8 写管道输出，避免中文系统上
+  // Windows PowerShell 5.1 的 GBK 输出被 Node 按 UTF-8 解码成乱码。
   assert.deepEqual(shell.args('git status'), [
     '-NoProfile',
     '-NonInteractive',
     '-Command',
-    'git status',
+    '[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);git status',
   ]);
   assert.equal(shell.toWorkingDirectory('D:\\work'), 'D:\\work');
   assert.equal(shell.label, 'PowerShell (Windows)');

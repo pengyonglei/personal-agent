@@ -61,6 +61,7 @@ export class BashTool extends BaseTool {
       let stdout = '';
       let stderr = '';
       let killed = false;
+      const startedAt = Date.now();
 
       const proc = spawn(shell.command, shell.args(command), {
         cwd: shell.toWorkingDirectory(context.workingDirectory),
@@ -104,7 +105,7 @@ export class BashTool extends BaseTool {
               ? `Command timed out after ${timeout}ms`
               : `Exit code: ${code}`,
           metadata: {
-            duration: timeout, // approximate
+            duration: Date.now() - startedAt,
             truncated: output.length > 200000,
           },
         });

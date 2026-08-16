@@ -111,7 +111,7 @@ Use as few requests as possible for each task execution.`,
 - Date: ${'${date}'}
 
 Shell usage notes:
-- When the Shell is PowerShell (Windows), write commands in PowerShell syntax (e.g. $env:VAR, Get-ChildItem, dir works too; PowerShell 7 supports && and ||). Git and npm commands work the same as in other shells.
+- When the Shell is PowerShell (Windows), write commands in PowerShell syntax (e.g. $env:VAR, Get-ChildItem, dir works too). Join commands with ';' — && and || are NOT available on Windows PowerShell 5.1 (only PowerShell 7+ supports them). Git and npm commands work the same as in other shells.
 - When the Shell is bash (Git Bash), use bash syntax with Windows-style paths (C:\\...).
 - When the Shell is bash (WSL), use bash syntax with Linux paths — Windows paths are exposed as /mnt/<drive>/... (e.g. D:\\work maps to /mnt/d/work).`,
     dynamic: true,

@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { createLogger, generateId } from '@personal-agent/shared';
+import { createLogger, generateId, type ReasoningEffort } from '@personal-agent/shared';
 
 const log = createLogger('project');
 const DEFAULT_PROJECT_FILE = resolve(homedir(), '.personal-agent', 'projects.json');
@@ -27,6 +27,8 @@ export interface ProjectTask {
   sessionId?: string;
   /** 任务级模型覆盖（'provider:model'），刷新/重启后恢复任务模型用。 */
   model?: string;
+  /** 任务级思考强度覆盖，与 model 一样随任务持久化，刷新/重启后恢复。 */
+  reasoningEffort?: ReasoningEffort;
   /** 任务级计划模式开关，刷新/重启后恢复计划模式用。 */
   planMode?: boolean;
   permissionMode: ProjectTaskPermissionMode;
@@ -93,6 +95,7 @@ export class ProjectManager {
           title: task.title,
           sessionId: task.sessionId,
           model: task.model || undefined,
+          reasoningEffort: task.reasoningEffort || undefined,
           planMode: task.planMode === true || undefined,
           permissionMode: normalizePermissionMode(task.permissionMode),
           status: task.status === 'archived' ? 'archived' : 'active',
@@ -330,9 +333,18 @@ export class ProjectManager {
     return cloneTask(task);
   }
 
-  async setTaskModel(taskId: string, model: string | undefined): Promise<ProjectTask> {
+  /**
+   * 持久化任务级模型与思考强度覆盖。model 或 reasoningEffort 传 undefined
+   * 表示清除对应覆盖（任务回退全局默认 / 模型默认档）。
+   */
+  async setTaskModel(
+    taskId: string,
+    model: string | undefined,
+    reasoningEffort?: ReasoningEffort | undefined,
+  ): Promise<ProjectTask> {
     const task = this.requireTask(taskId);
     task.model = model ? model.trim() || undefined : undefined;
+    task.reasoningEffort = reasoningEffort || undefined;
     task.updatedAt = new Date();
     const project = this.projects.get(task.projectId);
     if (project) project.updatedAt = task.updatedAt;

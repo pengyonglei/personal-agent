@@ -160,6 +160,8 @@ export interface TaskSummary {
   running: boolean;
   /** Active model of this task's conversation ('provider:model'), when known. */
   model?: string;
+  /** 该任务当前生效的思考强度（任务模型默认档或任务级覆盖）。 */
+  reasoningEffort?: ReasoningEffort;
   createdAt: string;
   updatedAt: string;
 }
@@ -237,7 +239,17 @@ export type ServerMessage =
       taskId?: string;
     }
   | { type: 'turn_end'; turnNumber: number; usage: UsageInfo | null; taskId?: string }
-  | { type: 'done'; totalTurns: number; totalUsage: UsageInfo; taskId?: string }
+  | { type: 'context_compacting'; taskId?: string }
+  | { type: 'context_compacted'; taskId?: string }
+  | {
+      type: 'done';
+      totalTurns: number;
+      totalUsage: UsageInfo;
+      finishedAt?: string;
+      ttftMs?: number;
+      tokensPerSecond?: number;
+      taskId?: string;
+    }
   | {
       type: 'run_changes';
       /** 本批次落盘 id（服务端生成，客户端据此做确定性 change id，刷新后可恢复）。 */
@@ -248,7 +260,13 @@ export type ServerMessage =
       /** 本次执行对应的轮次序号（该任务的第几次用户请求，1-based），刷新后客户端按此把卡片插到对应轮次回复下方。 */
       requestSeq?: number;
     }
-  | { type: 'interrupted'; taskId?: string }
+  | {
+      type: 'interrupted';
+      finishedAt?: string;
+      ttftMs?: number;
+      tokensPerSecond?: number;
+      taskId?: string;
+    }
   | { type: 'permission_mode'; mode: PermissionMode; taskId?: string }
   | {
       type: 'plan';
@@ -603,7 +621,8 @@ function parseReasoningEffort(value: unknown): ReasoningEffort {
     value !== 'low' &&
     value !== 'medium' &&
     value !== 'high' &&
-    value !== 'max'
+    value !== 'max' &&
+    value !== 'xhigh'
   ) {
     throw new Error('reasoningEffort 格式无效');
   }

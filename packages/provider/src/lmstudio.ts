@@ -16,127 +16,73 @@ import { BaseLLMProvider } from './interface';
 import {
   buildOpenAIMessages,
   buildOpenAITools,
-  createModelInfo,
   mapOpenAIStopReason,
   safeJsonParse,
+  type ModelDefaults,
 } from './openai-compat';
 
 // ---------------------------------------------------------------------------
-// Volcano Ark (火山方舟) model definitions
+// LM Studio (OpenAI-compatible local server)
 // ---------------------------------------------------------------------------
-// The platform is OpenAI-compatible (https://ark.cn-beijing.volces.com/api/v3).
-// Models are referenced either by inference endpoint id (ep-xxxx) or by model
-// name; both work interchangeably, so the list below is only a convenience —
-// any custom id can be configured.
 
-const VOLCANO_ARK_MODELS: ModelInfo[] = [
-  {
-    id: 'doubao-seed-1-6-250615',
-    displayName: '豆包 Seed 1.6',
-    provider: 'volcano',
-    contextWindow: 256_000,
-    maxOutputTokens: 16_384,
-    features: [
-      ProviderFeature.Streaming,
-      ProviderFeature.ToolCalling,
-      ProviderFeature.ParallelToolCalls,
-    ],
-  },
-  {
-    id: 'doubao-1-5-pro-32k-250115',
-    displayName: '豆包 1.5 Pro 32K',
-    provider: 'volcano',
-    contextWindow: 32_000,
-    maxOutputTokens: 4_096,
-    features: [
-      ProviderFeature.Streaming,
-      ProviderFeature.ToolCalling,
-      ProviderFeature.ParallelToolCalls,
-    ],
-  },
-  {
-    id: 'doubao-seed-thinking-250615',
-    displayName: '豆包 Seed Thinking',
-    provider: 'volcano',
-    contextWindow: 256_000,
-    maxOutputTokens: 16_384,
-    features: [
-      ProviderFeature.Streaming,
-      ProviderFeature.ToolCalling,
-      ProviderFeature.ParallelToolCalls,
-      ProviderFeature.Thinking,
-    ],
-  },
-  {
-    id: 'deepseek-v3-250324',
-    displayName: 'DeepSeek V3（火山方舟）',
-    provider: 'volcano',
-    contextWindow: 64_000,
-    maxOutputTokens: 8_192,
-    features: [
-      ProviderFeature.Streaming,
-      ProviderFeature.ToolCalling,
-      ProviderFeature.ParallelToolCalls,
-    ],
-  },
-  {
-    id: 'deepseek-r1-250528',
-    displayName: 'DeepSeek R1（火山方舟）',
-    provider: 'volcano',
-    contextWindow: 64_000,
-    maxOutputTokens: 8_192,
-    features: [
-      ProviderFeature.Streaming,
-      ProviderFeature.ToolCalling,
-      ProviderFeature.ParallelToolCalls,
-      ProviderFeature.Thinking,
-    ],
-  },
-];
+/** LM Studio's default OpenAI-compatible endpoint. */
+export const DEFAULT_LMSTUDIO_BASE_URL = 'http://localhost:1234/v1';
+
+/** Placeholder model id shown until the user fills in their loaded model key. */
+export const DEFAULT_LMSTUDIO_MODEL = 'qwen3.8-27b-a3b-thinking';
 
 const MODEL_DEFAULTS = {
-  contextWindow: 256_000,
-  maxOutputTokens: 16_384,
+  contextWindow: 32_768,
+  maxOutputTokens: 8_192,
   features: [
     ProviderFeature.Streaming,
     ProviderFeature.ToolCalling,
     ProviderFeature.ParallelToolCalls,
+    ProviderFeature.Thinking,
   ],
 } satisfies Omit<ModelInfo, 'id' | 'displayName' | 'provider'>;
 
-/** Volcano Ark extra request fields (OpenAI-compatible API). */
-interface VolcanoThinkingOptions {
-  thinking: { type: 'enabled' | 'disabled' };
-  reasoning_effort?: 'low' | 'medium' | 'high';
+/**
+ * LM Studio reasoning_effort values accepted by its OpenAI-compatible
+ * /v1/chat/completions endpoint (superset of the OpenAI vocabulary).
+ * Qwen3-class GGUF models typically expose `xhigh` (default), `medium` and
+ * `low`; `none` disables thinking entirely.
+ */
+type LMStudioReasoningEffort = 'none' | 'low' | 'medium' | 'xhigh';
+
+interface LMStudioRequestOptions {
+  reasoning_effort?: LMStudioReasoningEffort;
 }
 
 // ---------------------------------------------------------------------------
 // Adapter
 // ---------------------------------------------------------------------------
 
-export class VolcanoArkProvider extends BaseLLMProvider {
-  readonly providerId = 'volcano';
-  readonly displayName = '火山方舟';
+export class LMStudioProvider extends BaseLLMProvider {
+  readonly providerId = 'lmstudio';
+  readonly displayName = 'LM Studio';
 
   private client: OpenAI | null = null;
   private readonly apiKey: string;
   private readonly baseURL: string;
 
   constructor(
-    apiKey: string,
-    defaultModel = 'doubao-seed-1-6-250615',
-    baseURL = 'https://ark.cn-beijing.volces.com/api/v3',
+    apiKey = 'lm-studio',
+    defaultModel = DEFAULT_LMSTUDIO_MODEL,
+    baseURL = DEFAULT_LMSTUDIO_BASE_URL,
     configuredModels: Array<string | ModelConfig> = [],
   ) {
     super(defaultModel);
     this.apiKey = apiKey;
     this.baseURL = baseURL.replace(/\/+$/, '');
-    this.models = [...VOLCANO_ARK_MODELS];
+    // LM Studio models are fully user-defined (any GGUF key), so there is no
+    // built-in model table — only the configured list plus the default model.
+    this.models = [];
     this.addConfiguredModels(configuredModels, (modelId, config) =>
-      createModelInfo(modelId, this.providerId, MODEL_DEFAULTS, config),
+      createLMStudioModelInfo(modelId, this.providerId, MODEL_DEFAULTS, config),
     );
     this.addConfiguredModels([this.currentModel], (modelId, config) =>
-      createModelInfo(modelId, this.providerId, MODEL_DEFAULTS, config),
+      createLMStudioModelInfo(modelId, this.providerId, MODEL_DEFAULTS, config),
     );
   }
 
@@ -168,7 +114,7 @@ export class VolcanoArkProvider extends BaseLLMProvider {
     if (!this.client) throw new Error('Provider not initialized. Call initialize() first.');
 
     const model = options.model ?? this.currentModel;
-    const thinking = getVolcanoThinkingOptions(options.reasoningEffort);
+    const reasoning = getLMStudioReasoningOptions(options.reasoningEffort);
 
     const openaiMessages = buildOpenAIMessages(messages, options.systemPrompt, true);
     const openaiTools = buildOpenAITools(tools);
@@ -177,13 +123,13 @@ export class VolcanoArkProvider extends BaseLLMProvider {
       const stream = await this.client.chat.completions.create({
         model,
         max_tokens: options.maxTokens,
-        temperature: thinking?.thinking.type === 'enabled' ? undefined : options.temperature,
+        temperature: options.temperature,
         messages: openaiMessages,
         tools: openaiTools.length > 0 ? openaiTools : undefined,
         stream: true,
         stream_options: { include_usage: true },
-        ...thinking,
-      } as OpenAI.Chat.ChatCompletionCreateParamsStreaming & VolcanoThinkingOptions);
+        ...reasoning,
+      } as OpenAI.Chat.ChatCompletionCreateParamsStreaming & LMStudioRequestOptions);
 
       let accumulatedToolCalls: Map<number, { id: string; name: string; arguments: string }> =
         new Map();
@@ -278,7 +224,7 @@ export class VolcanoArkProvider extends BaseLLMProvider {
     if (!this.client) throw new Error('Provider not initialized. Call initialize() first.');
 
     const model = options?.model ?? this.currentModel;
-    const thinking = getVolcanoThinkingOptions(options?.reasoningEffort);
+    const reasoning = getLMStudioReasoningOptions(options?.reasoningEffort);
 
     const openaiMessages = buildOpenAIMessages(messages, options?.systemPrompt, true);
     const openaiTools = tools && tools.length > 0 ? buildOpenAITools(tools) : undefined;
@@ -286,11 +232,11 @@ export class VolcanoArkProvider extends BaseLLMProvider {
     const response = await this.client.chat.completions.create({
       model,
       max_tokens: options?.maxTokens,
-      temperature: thinking?.thinking.type === 'enabled' ? undefined : options?.temperature,
+      temperature: options?.temperature,
       messages: openaiMessages,
       tools: openaiTools,
-      ...thinking,
-    } as OpenAI.Chat.ChatCompletionCreateParamsNonStreaming & VolcanoThinkingOptions);
+      ...reasoning,
+    } as OpenAI.Chat.ChatCompletionCreateParamsNonStreaming & LMStudioRequestOptions);
 
     const choice = response.choices[0];
     const content: UnifiedContentBlock[] = [];
@@ -344,20 +290,44 @@ export class VolcanoArkProvider extends BaseLLMProvider {
 // -----------------------------------------------------------------------
 
 /**
- * Volcano Ark thinking control. Unlike DeepSeek, ordinary Doubao models
- * reject the `thinking` parameter, so it is only sent when the caller
- * explicitly enables thinking; 'off' (or no effort) leaves the model's
- * default behavior untouched.
- *
- * Effort mapping: 'low' | 'medium' | 'high' pass through; 'max' and 'xhigh'
- * are not exposed by the API and map to 'high'.
+ * Map the project's reasoning-effort vocabulary onto LM Studio's
+ * reasoning_effort values. Qwen3-class GGUF models expose `xhigh` (default),
+ * `medium` and `low`; there is no plain `high` tier, so `high`/`max` both
+ * resolve to `xhigh` (the strongest supported level) and `off` disables
+ * thinking via `none`. When no effort is given the field is omitted so LM
+ * Studio falls back to the model's own default.
  */
-function getVolcanoThinkingOptions(
-  effort: ReasoningEffort | undefined,
-): VolcanoThinkingOptions | undefined {
-  if (!effort || effort === 'off') return undefined;
+function getLMStudioReasoningOptions(effort: ReasoningEffort | undefined): LMStudioRequestOptions {
+  switch (effort) {
+    case 'off':
+      return { reasoning_effort: 'none' };
+    case 'low':
+      return { reasoning_effort: 'low' };
+    case 'medium':
+      return { reasoning_effort: 'medium' };
+    case 'high':
+    case 'max':
+    case 'xhigh':
+      return { reasoning_effort: 'xhigh' };
+    default:
+      return {};
+  }
+}
+
+function createLMStudioModelInfo(
+  modelId: string,
+  provider: string,
+  defaults: ModelDefaults,
+  config?: ModelConfig,
+): ModelInfo {
+  const features = [...defaults.features];
+  if (config?.imageInput) features.push(ProviderFeature.ImageInput);
   return {
-    thinking: { type: 'enabled' },
-    reasoning_effort: effort === 'max' || effort === 'xhigh' ? 'high' : effort,
+    id: modelId,
+    displayName: modelId,
+    provider,
+    contextWindow: config?.contextWindow ?? defaults.contextWindow,
+    maxOutputTokens: config?.maxOutputTokens ?? defaults.maxOutputTokens,
+    features,
   };
 }

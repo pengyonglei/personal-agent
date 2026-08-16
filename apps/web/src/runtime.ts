@@ -32,6 +32,7 @@ import { PluginLoader, parseSkillReferences, type Skill } from '@personal-agent/
 import {
   AnthropicProvider,
   DeepSeekProvider,
+  LMStudioProvider,
   normalizeDeepSeekModel,
   OllamaProvider,
   OpenAIProvider,
@@ -53,9 +54,10 @@ import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import {
-  describeShell,
+  getCachedShellDescription,
   registerBuiltinTools,
   setDefaultShellPreference,
+  warmShellDescription,
   type PermissionManager,
   type ToolContext,
   type ToolExecutor,
@@ -410,6 +412,7 @@ export class WebAgentRuntime {
     workingDirectory = this.workingDirectory,
     providerOverride?: LLMProvider,
     taskId?: string,
+    reasoningEffortOverride?: ReasoningEffort,
   ): WebConversation {
     const provider = providerOverride ?? this.provider;
     if (!provider) {
@@ -424,6 +427,7 @@ export class WebAgentRuntime {
       workingDirectory,
       this.sessionsDirectory,
       taskId,
+      reasoningEffortOverride,
     );
     this.attachConversation(conversation);
     return conversation;
@@ -458,10 +462,14 @@ export class WebAgentRuntime {
             reasoningSupported,
             imageInputSupported: model.features.includes(ProviderFeature.ImageInput),
             reasoningEffort: reasoningSupported
-              ? resolveProviderReasoningEffort(providerId, this.config.providers[providerId])
+              ? resolveModelReasoningEffort(
+                  providerId,
+                  this.config.providers[providerId],
+                  model.id,
+                )
               : 'off',
             reasoningOptions: reasoningSupported
-              ? reasoningOptionsForProvider(providerId)
+              ? reasoningOptionsForModel(providerId, model)
               : ['off'],
           };
         }),
@@ -496,18 +504,25 @@ export class WebAgentRuntime {
   }
 
   getProviderSettings(): ProviderSettingsInfo {
-    const providerIds: ProviderId[] = ['anthropic', 'openai', 'ollama', 'deepseek', 'volcano'];
+    const providerIds: ProviderId[] = [
+      'anthropic',
+      'openai',
+      'ollama',
+      'deepseek',
+      'volcano',
+      'lmstudio',
+    ];
     const providers = Object.fromEntries(
       providerIds.map((id) => {
         const defaults = getProviderDefaults(id);
         const configured = this.config.providers[id];
-        const requiresApiKey = id !== 'ollama';
+        const requiresApiKey = id !== 'ollama' && id !== 'lmstudio';
         const configuredRecord = (configured ?? {}) as Record<string, unknown>;
         const hasApiKey = Boolean(configuredRecord.apiKey);
         return [
           id,
           {
-            configured: id === 'ollama' ? Boolean(configured) : hasApiKey,
+            configured: id === 'ollama' || id === 'lmstudio' ? Boolean(configured) : hasApiKey,
             hasApiKey,
             requiresApiKey,
             baseURL: configured?.baseURL ?? defaults.baseURL,
@@ -518,8 +533,19 @@ export class WebAgentRuntime {
             ),
             thinkingEffort:
               configured?.thinkingEffort ??
-              (id === 'deepseek' || id === 'volcano' ? defaults.thinkingEffort : 'off'),
-            reasoningSupported: id === 'deepseek' || id === 'volcano',
+              (id === 'deepseek' || id === 'volcano' || id === 'lmstudio'
+                ? defaults.thinkingEffort
+                : 'off'),
+            reasoningSupported:
+              id === 'deepseek' ||
+              id === 'volcano' ||
+              id === 'lmstudio' ||
+              // Ollama：只要有一个模型显式配置了 reasoningOptions 即视为支持思考
+              (id === 'ollama' &&
+                (configured?.models ?? []).some(
+                  (entry) =>
+                    typeof entry !== 'string' && Boolean(entry.reasoningOptions?.length),
+                )),
           },
         ];
       }),
@@ -622,7 +648,7 @@ export class WebAgentRuntime {
     );
     const thinkingEffort = normalizeRuntimeReasoningEffort(
       input.provider,
-      input.provider === 'deepseek' || input.provider === 'volcano'
+      input.provider === 'deepseek' || input.provider === 'volcano' || input.provider === 'lmstudio'
         ? (input.thinkingEffort ?? defaults.thinkingEffort)
         : 'off',
     );
@@ -646,7 +672,7 @@ export class WebAgentRuntime {
     current.thinkingEffort = thinkingEffort;
     providers[input.provider] = current;
 
-    if (input.provider !== 'ollama' && !current.apiKey) {
+    if (input.provider !== 'ollama' && input.provider !== 'lmstudio' && !current.apiKey) {
       throw new Error(`${providerLabel(input.provider)} 需要 API Key。`);
     }
 
@@ -779,14 +805,17 @@ export class WebAgentRuntime {
     const reasoningEffort = reasoningSupported
       ? normalizeRuntimeReasoningEffort(
           providerId,
-          input.reasoningEffort ?? resolveProviderReasoningEffort(providerId, current),
+          input.reasoningEffort ??
+            resolveModelReasoningEffort(providerId, current, modelInfo.id),
         )
       : 'off';
     const nextConfigValue = structuredClone(this.config);
     const nextProviderConfig = nextConfigValue.providers[providerId];
     if (!nextProviderConfig) throw new Error('当前供应商配置不存在。');
     nextProviderConfig.defaultModel = model;
-    nextProviderConfig.thinkingEffort = reasoningEffort;
+    // Ollama 的思考强度按模型配置（reasoningOptions），不持久化 Provider 级
+    // thinkingEffort，避免与按模型规则产生歧义。
+    if (providerId !== 'ollama') nextProviderConfig.thinkingEffort = reasoningEffort;
     nextConfigValue.providers.active = providerId;
     const nextConfig = appConfigSchema.parse(nextConfigValue);
 
@@ -795,7 +824,7 @@ export class WebAgentRuntime {
         provider: providerId,
         activate: true,
         defaultModel: model,
-        thinkingEffort: reasoningEffort,
+        thinkingEffort: providerId === 'ollama' ? undefined : reasoningEffort,
       },
       this.configPath,
     );
@@ -854,7 +883,10 @@ export class WebAgentRuntime {
     }
     const provider = await this.getProviderForTask(providerId, model);
     this.taskProviderOverrides.set(conversation.sessionId, provider);
-    await conversation.applyTaskModel(provider, reasoningEffort);
+    // 未显式指定思考强度时，重置为该模型自身的默认档（档位跟随模型：
+    // 切换模型后不再沿用旧模型的档位覆盖）。
+    const effectiveEffort = reasoningEffort ?? this.getReasoningEffortForModel(providerId, model);
+    await conversation.applyTaskModel(provider, effectiveEffort);
   }
 
   /**
@@ -972,8 +1004,8 @@ export class WebAgentRuntime {
             await this.projects.setTaskModel(conversation.taskId, `${pid}:${fallbackModel}`);
           }
         } else if (this.provider) {
-          // 供应商已无可用模型：回退全局默认
-          await conversation.applyTaskModel(this.provider);
+          // 供应商已无可用模型：回退全局默认（档位一并重置为全局默认档）
+          await conversation.applyTaskModel(this.provider, this.getReasoningEffort());
           if (conversation.taskId) {
             await this.projects.setTaskModel(conversation.taskId, undefined);
           }
@@ -1062,6 +1094,9 @@ export class WebAgentRuntime {
       case 'volcano':
         instance = new VolcanoArkProvider(apiKey ?? 'volcano', model, baseURL, models);
         break;
+      case 'lmstudio':
+        instance = new LMStudioProvider(apiKey ?? 'lm-studio', model, baseURL, models);
+        break;
     }
     if (!instance) throw new Error(`不支持的 Provider: ${providerId}`);
     await instance.initialize();
@@ -1070,8 +1105,15 @@ export class WebAgentRuntime {
 
   getReasoningEffort(): ReasoningEffort {
     if (!this.provider) return 'off';
-    const provider = this.config.providers[this.provider.providerId as ProviderId];
-    return resolveProviderReasoningEffort(this.provider.providerId as ProviderId, provider);
+    return this.getReasoningEffortForModel(
+      this.provider.providerId as ProviderId,
+      this.provider.getModel(),
+    );
+  }
+
+  /** 按指定 (provider, model) 解析默认思考强度（跟随该模型的配置）。 */
+  getReasoningEffortForModel(providerId: ProviderId, model: string): ReasoningEffort {
+    return resolveModelReasoningEffort(providerId, this.config.providers[providerId], model);
   }
 
   async listSessions(): Promise<SessionSummary[]> {
@@ -1369,7 +1411,12 @@ export class WebConversation {
   }
 
   getEffectiveReasoningEffort(): ReasoningEffort {
-    return this.reasoningEffortOverride ?? this.runtime.getReasoningEffort();
+    if (this.reasoningEffortOverride !== undefined) return this.reasoningEffortOverride;
+    // 未显式指定时跟随本任务当前模型自身的默认思考强度。
+    return this.runtime.getReasoningEffortForModel(
+      this.provider.providerId as ProviderId,
+      this.provider.getModel(),
+    );
   }
 
   /** 统一记录并推送主模型和视觉预处理模型的 Debug 调用。 */
@@ -1399,7 +1446,10 @@ export class WebConversation {
     public workingDirectory: string,
     private sessionsDirectory?: string,
     public taskId?: string,
+    reasoningEffortOverride?: ReasoningEffort,
   ) {
+    // 恢复持久化的任务级思考强度覆盖（刷新/重启后任务模型与档位一起还原）。
+    this.reasoningEffortOverride = reasoningEffortOverride;
     // Tag every outgoing event with this conversation's task id so the client
     // can route streaming output, permissions and status to the right task.
     if (taskId) {
@@ -1415,6 +1465,20 @@ export class WebConversation {
       this.emit = emit;
     }
     this.createState();
+    // 异步探测 shell 版本（如 PowerShell 5.1.x），探测完成后把版本号注入
+    // 系统提示词，让模型避开当前版本不支持的语法（如 PS 5.1 的 && / ||）。
+    // 同步阶段先用无版本的兜底描述；探测结果会写入缓存供后续会话直接复用。
+    const assembler = this.context;
+    void warmShellDescription({
+      platform: process.platform,
+      prefer: runtime.config.tools.shell,
+    })
+      .then((description) => {
+        if (this.context === assembler) assembler.setShell(description);
+      })
+      .catch(() => {
+        // 探测失败时保持兜底描述（无版本号），不影响工具执行。
+      });
   }
 
   get sessionId(): string {
@@ -1830,7 +1894,10 @@ When you need the user to make a decision, call ask_user with the question and u
       {
         workingDirectory: this.workingDirectory,
         platform: `${process.platform} ${process.arch}`,
-        shell: describeShell(process.platform, this.runtime.config.tools.shell),
+        shell: getCachedShellDescription({
+          platform: process.platform,
+          prefer: this.runtime.config.tools.shell,
+        }),
         model: this.provider.getModel(),
         provider: this.provider.providerId,
         mode: 'chat',
@@ -1847,6 +1914,10 @@ When you need the user to make a decision, call ask_user with the question and u
       this.getTotalContextWindow(),
       TOKEN_BUDGET_RESERVED_OUTPUT,
       createLlmContextSummarizer(this.provider, this.runtime.promptOverrides),
+      // 压缩判断使用上下文仪表盘同源的「已使用 tokens」：会话记录的最近一次
+      // 模型请求输入 token 数（API 上报，刷新/重启后从磁盘恢复），而不是
+      // 本地字符估算，保证仪表盘显示的用量与触发压缩的阈值判断一致。
+      () => this.session.getLastInputTokens(),
     );
     this.agentLoop = new AgentLoop({
       provider: this.provider,
@@ -1981,6 +2052,8 @@ When you need the user to make a decision, call ask_user with the question and u
       case 'turn_end':
       case 'done':
       case 'interrupted':
+      case 'context_compacting':
+      case 'context_compacted':
         this.emit(event);
         this.publishContextUsage();
         break;
@@ -2045,6 +2118,13 @@ function getProviderDefaults(provider: ProviderId): {
         ],
         thinkingEffort: 'off',
       };
+    case 'lmstudio':
+      return {
+        baseURL: 'http://localhost:1234/v1',
+        defaultModel: 'qwen3.8-27b-a3b-thinking',
+        models: ['qwen3.8-27b-a3b-thinking'],
+        thinkingEffort: 'xhigh',
+      };
   }
 }
 
@@ -2054,29 +2134,81 @@ function isProviderId(value: string): value is ProviderId {
     value === 'openai' ||
     value === 'ollama' ||
     value === 'deepseek' ||
-    value === 'volcano'
+    value === 'volcano' ||
+    value === 'lmstudio'
   );
 }
 
 function supportsRuntimeReasoning(providerId: ProviderId, model?: ModelInfo): boolean {
   return (
-    (providerId === 'deepseek' || providerId === 'volcano') &&
+    (providerId === 'deepseek' ||
+      providerId === 'volcano' ||
+      providerId === 'lmstudio' ||
+      providerId === 'ollama') &&
     Boolean(model?.features.includes(ProviderFeature.Thinking))
   );
+}
+
+/**
+ * 某模型可选的思考强度档位。Ollama 优先使用模型自身配置的 reasoningOptions
+ * 子集（未配置 = 不支持思考）；其余 Provider 沿用各自固定的档位表。
+ */
+function reasoningOptionsForModel(providerId: ProviderId, model?: ModelInfo): ReasoningEffort[] {
+  if (providerId === 'ollama') {
+    return model?.reasoningOptions?.length ? [...model.reasoningOptions] : ['off'];
+  }
+  return reasoningOptionsForProvider(providerId);
 }
 
 function reasoningOptionsForProvider(providerId: ProviderId): ReasoningEffort[] {
   if (providerId === 'deepseek') return ['off', 'low', 'high', 'max'];
   if (providerId === 'volcano') return ['off', 'low', 'medium', 'high'];
+  // LM Studio 上 Qwen3 类 GGUF 模型的思考强度档位：xhigh（默认）/ medium / low
+  if (providerId === 'lmstudio') return ['off', 'low', 'medium', 'xhigh'];
   return ['off'];
+}
+
+/** 在供应商配置中查找指定模型的显式配置（对象形式，不含纯字符串模型）。 */
+function findModelConfig(
+  providerConfig: AppConfig['providers'][ProviderId] | undefined,
+  modelId: string,
+): ModelConfig | undefined {
+  if (!providerConfig?.models) return undefined;
+  return providerConfig.models.find(
+    (entry): entry is ModelConfig =>
+      typeof entry !== 'string' && entry.id.trim() === modelId.trim(),
+  );
+}
+
+/**
+ * 解析「当前模型」生效的思考强度。Ollama 规则：只有显式配置了 reasoningOptions
+ * 的模型才开启思考；默认档取模型 thinkingEffort（须在档位子集内），否则取子集中
+ * 第一个非 off 档，子集全为 off 时同样关闭思考。
+ */
+function resolveModelReasoningEffort(
+  providerId: ProviderId,
+  providerConfig: AppConfig['providers'][ProviderId],
+  modelId: string,
+): ReasoningEffort {
+  if (providerId === 'ollama') {
+    const modelConfig = findModelConfig(providerConfig, modelId);
+    if (!modelConfig?.reasoningOptions?.length) return 'off';
+    const options = modelConfig.reasoningOptions;
+    const preferred = modelConfig.thinkingEffort;
+    if (preferred && options.includes(preferred)) return preferred;
+    return options.find((option) => option !== 'off') ?? 'off';
+  }
+  return resolveProviderReasoningEffort(providerId, providerConfig);
 }
 
 function resolveProviderReasoningEffort(
   providerId: ProviderId,
   providerConfig: AppConfig['providers'][ProviderId],
 ): ReasoningEffort {
-  if (providerId !== 'deepseek' && providerId !== 'volcano') return 'off';
-  const fallback = providerId === 'deepseek' ? 'high' : 'off';
+  if (providerId !== 'deepseek' && providerId !== 'volcano' && providerId !== 'lmstudio') {
+    return 'off';
+  }
+  const fallback = providerId === 'deepseek' ? 'high' : providerId === 'lmstudio' ? 'xhigh' : 'off';
   return normalizeRuntimeReasoningEffort(providerId, providerConfig?.thinkingEffort ?? fallback);
 }
 
@@ -2084,15 +2216,26 @@ function normalizeRuntimeReasoningEffort(
   providerId: ProviderId,
   effort: ReasoningEffort,
 ): ReasoningEffort {
+  if (providerId === 'ollama') {
+    // Ollama 思考强度原样透传（xhigh / max 不归一化，交给模型侧解释）。
+    return effort;
+  }
   if (providerId === 'deepseek') {
     // DeepSeek exposes off / low / high / max; 'medium' is not supported and
-    // maps to 'low' (the closest supported level).
+    // maps to 'low' (the closest supported level), 'xhigh' maps to 'max'.
     if (effort === 'medium') return 'low';
+    if (effort === 'xhigh') return 'max';
     return effort;
   }
   if (providerId === 'volcano') {
-    // Volcano Ark exposes low/medium/high; 'max' is not supported.
-    if (effort === 'max') return 'high';
+    // Volcano Ark exposes low/medium/high; 'max' and 'xhigh' are not supported.
+    if (effort === 'max' || effort === 'xhigh') return 'high';
+    return effort;
+  }
+  if (providerId === 'lmstudio') {
+    // LM Studio 上的 Qwen3 类模型只暴露 xhigh / medium / low 三档（外加
+    // none 关闭思考）。项目词汇中的 high/max 都归到最接近的 xhigh。
+    if (effort === 'high' || effort === 'max') return 'xhigh';
     return effort;
   }
   return 'off';
@@ -2172,6 +2315,7 @@ function providerLabel(provider: ProviderId): string {
     ollama: 'Ollama',
     deepseek: 'DeepSeek',
     volcano: '火山方舟',
+    lmstudio: 'LM Studio',
   }[provider];
 }
 

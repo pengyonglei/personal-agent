@@ -4,6 +4,7 @@ import {
   generateId,
   type ChatOptions,
   type ModelInfo,
+  type ReasoningEffort,
   type StreamOptions,
   type UnifiedContentBlock,
   type UnifiedMessage,
@@ -12,12 +13,15 @@ import {
   type UnifiedToolDefinition,
 } from '@personal-agent/shared';
 import { BaseLLMProvider } from './interface';
+import { extractToolResult } from './openai-compat';
 
 interface OllamaChatResponse {
   model?: string;
   message?: {
     role?: string;
     content?: string;
+    /** 思考内容（reasoning 模型流式时按块返回）。 */
+    reasoning?: string;
     tool_calls?: OllamaToolCall[];
   };
   done?: boolean;
@@ -79,6 +83,7 @@ export class OllamaProvider extends BaseLLMProvider {
         messages: messages.map(toOllamaMessage),
         tools: tools.length > 0 ? tools.map(toOllamaTool) : undefined,
         stream: true,
+        ...getOllamaThinkingOptions(options.reasoningEffort),
         options: {
           temperature: options.temperature,
           num_predict: options.maxTokens,
@@ -107,6 +112,9 @@ export class OllamaProvider extends BaseLLMProvider {
       for (const line of lines) {
         if (!line.trim()) continue;
         const event = JSON.parse(line) as OllamaChatResponse;
+        if (event.message?.reasoning) {
+          yield { type: 'thinking_delta', thinkingDelta: event.message.reasoning };
+        }
         if (event.message?.content) {
           yield { type: 'text_delta', textDelta: event.message.content };
         }
@@ -139,6 +147,9 @@ export class OllamaProvider extends BaseLLMProvider {
 
     if (buffer.trim()) {
       const event = JSON.parse(buffer) as OllamaChatResponse;
+      if (event.message?.reasoning) {
+        yield { type: 'thinking_delta', thinkingDelta: event.message.reasoning };
+      }
       if (event.message?.content) {
         yield { type: 'text_delta', textDelta: event.message.content };
       }
@@ -169,6 +180,7 @@ export class OllamaProvider extends BaseLLMProvider {
         tools: tools.length > 0 ? tools.map(toOllamaTool) : undefined,
         stream: false,
         format: options.jsonMode ? 'json' : undefined,
+        ...getOllamaThinkingOptions(options.reasoningEffort),
         options: {
           temperature: options.temperature,
           num_predict: options.maxTokens,
@@ -179,6 +191,9 @@ export class OllamaProvider extends BaseLLMProvider {
     if (!response.ok) throw new Error(await formatOllamaError(response));
     const result = (await response.json()) as OllamaChatResponse;
     const content: UnifiedContentBlock[] = [];
+    if (result.message?.reasoning) {
+      content.push({ type: 'thinking', thinking: result.message.reasoning });
+    }
     if (result.message?.content) {
       content.push({ type: 'text', text: result.message.content });
     }
@@ -221,16 +236,24 @@ export class OllamaProvider extends BaseLLMProvider {
 
 function toOllamaMessage(message: UnifiedMessage): Record<string, unknown> {
   const blocks = typeof message.content === 'string' ? [] : message.content;
-  const result: Record<string, unknown> = {
-    role: message.role,
-    content:
-      typeof message.content === 'string'
-        ? message.content
-        : blocks
-            .filter((block) => block.type === 'text')
-            .map((block) => block.text)
-            .join('\n'),
-  };
+  const result: Record<string, unknown> = { role: message.role };
+
+  // tool 消息：结构化内容是 tool_result 块（不是 text 块），必须提取出来，
+  // 否则 Ollama 收到的 content 为空字符串，模型会认为工具"什么都没返回"。
+  // 与 OpenAI 兼容层一致：失败加 [tool error] 前缀、空输出兜底 '(no output)'。
+  if (message.role === 'tool') {
+    const toolResult = extractToolResult(message);
+    result.content =
+      (toolResult.isError ? '[tool error] ' : '') + (toolResult.text || '(no output)');
+  } else if (typeof message.content === 'string') {
+    result.content = message.content;
+  } else {
+    result.content = blocks
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text)
+      .join('\n');
+  }
+
   const images = blocks
     .filter((block) => block.type === 'image')
     .map((block) => block.source.data);
@@ -280,6 +303,8 @@ function createModelInfo(name: string, config?: ModelConfig): ModelInfo {
     ProviderFeature.ParallelToolCalls,
   ];
   if (config?.imageInput) features.push(ProviderFeature.ImageInput);
+  // 显式配置了 reasoningOptions 的模型才具备思考能力（未配置 = 不开启思考）。
+  if (config?.reasoningOptions?.length) features.push(ProviderFeature.Thinking);
   return {
     id: name,
     displayName: name,
@@ -287,7 +312,27 @@ function createModelInfo(name: string, config?: ModelConfig): ModelInfo {
     contextWindow: config?.contextWindow ?? 128_000,
     maxOutputTokens: config?.maxOutputTokens ?? 32_768,
     features,
+    reasoningOptions: config?.reasoningOptions?.length
+      ? [...config.reasoningOptions]
+      : undefined,
   };
+}
+
+/**
+ * Map the project's reasoning-effort vocabulary onto Ollama's wire parameters.
+ *
+ * Ollama exposes a `think` boolean toggle plus a `reasoning_effort` value for
+ * models whose template supports it (e.g. Qwen3). The effort level is passed
+ * through verbatim — the model ecosystem keeps evolving (xhigh/max may gain
+ * real meaning later), so we don't collapse levels here; a model that doesn't
+ * understand a given level simply ignores it. `off` (or missing) disables
+ * thinking.
+ */
+function getOllamaThinkingOptions(
+  effort: ReasoningEffort | undefined,
+): Record<string, unknown> {
+  if (!effort || effort === 'off') return { think: false };
+  return { think: true, reasoning_effort: effort };
 }
 
 function mapStopReason(reason: string | undefined): UnifiedResponse['stopReason'] {

@@ -16,6 +16,7 @@ import {
   Empty,
   Form,
   Grid,
+  Image,
   Input,
   InputNumber,
   Layout,
@@ -43,7 +44,6 @@ import zhCN from 'antd/es/locale/zh_CN';
 import type { TextAreaRef } from 'antd/es/input/TextArea';
 import {
   AppstoreOutlined,
-  ArrowDownOutlined,
   BarChartOutlined,
   BoldOutlined,
   BugOutlined,
@@ -51,7 +51,9 @@ import {
   CaretRightOutlined,
   CheckCircleFilled,
   CheckCircleOutlined,
+  CheckOutlined,
   ClockCircleOutlined,
+  CloseCircleFilled,
   CloseOutlined,
   CodeOutlined,
   CommentOutlined,
@@ -72,9 +74,9 @@ import {
   InboxOutlined,
   InfoCircleOutlined,
   ItalicOutlined,
+  LeftOutlined,
   LinkOutlined,
   LoadingOutlined,
-  MenuOutlined,
   MenuUnfoldOutlined,
   MinusCircleOutlined,
   MinusOutlined,
@@ -88,6 +90,7 @@ import {
   PushpinOutlined,
   QuestionCircleOutlined,
   ReloadOutlined,
+  RightOutlined,
   RobotOutlined,
   SendOutlined,
   SettingOutlined,
@@ -97,6 +100,7 @@ import {
   ToolOutlined,
   UnorderedListOutlined,
   UserOutlined,
+  UpOutlined,
 } from '@ant-design/icons';
 import {
   useCallback,
@@ -157,7 +161,7 @@ const { TextArea } = Input;
 
 type ColorMode = 'light' | 'dark';
 type ConnectionState = 'connecting' | 'online' | 'offline';
-type ProviderId = 'openai' | 'anthropic' | 'deepseek' | 'ollama' | 'volcano';
+type ProviderId = 'openai' | 'anthropic' | 'deepseek' | 'ollama' | 'volcano' | 'lmstudio';
 type PlanMessage = Extract<ServerMessage, { type: 'plan' }>;
 type PermissionRequest = Extract<ServerMessage, { type: 'permission_request' }>;
 type AskUserRequest = Extract<ServerMessage, { type: 'ask_user_request' }>;
@@ -207,6 +211,12 @@ interface MessageTimelineItem {
   startedAt?: number;
   /** 任务完成/中断时计算的总耗时（ms），存在则展示在消息内容底部。 */
   durationMs?: number;
+  /** 任务结束时间（ISO 字符串），由服务端在任务结束时写入，刷新后可恢复。 */
+  finishedAt?: string;
+  /** 首 token 时间（TTFT，ms）。 */
+  ttftMs?: number;
+  /** 模型输出 token 速度（token/秒）。 */
+  tokensPerSecond?: number;
 }
 
 /** 一次 LLM 调用（turn）的内容分组。 */
@@ -299,6 +309,7 @@ interface ModelCallTrace {
   status: 'running' | ModelCallEnd['status'];
   finishedAt?: string;
   durationMs?: number;
+  ttftMs?: number;
   response?: ModelCallEnd['response'];
   error?: string;
 }
@@ -323,6 +334,9 @@ interface ProviderModelRow {
   contextWindow?: number;
   maxOutputTokens?: number;
   imageInput?: boolean;
+  /** Ollama 专属：该模型可选的思考强度档位（未配置 = 不开启思考）。 */
+  reasoningOptions?: ReasoningEffort[];
+  thinkingEffort?: ReasoningEffort;
 }
 
 interface ProviderFormValues {
@@ -493,6 +507,7 @@ const reasoningOptions = [
   { value: 'medium', label: 'Medium' },
   { value: 'high', label: 'High' },
   { value: 'max', label: 'Max' },
+  { value: 'xhigh', label: 'xHigh' },
 ];
 
 const providerLabels: Record<ProviderId, string> = {
@@ -501,6 +516,7 @@ const providerLabels: Record<ProviderId, string> = {
   deepseek: 'DeepSeek',
   ollama: 'Ollama（本地）',
   volcano: '火山方舟',
+  lmstudio: 'LM Studio（本地）',
 };
 
 /** Brand icons for providers, keyed by provider id (see public/icons). */
@@ -510,6 +526,7 @@ const providerIcons: Partial<Record<ProviderId, string>> = {
   deepseek: '/icons/deepseek-color.svg',
   ollama: '/icons/ollama.svg',
   volcano: '/icons/volcengine-color.svg',
+  lmstudio: '/icons/lmstudio.svg',
 };
 
 function getInitialColorMode(): ColorMode {
@@ -861,6 +878,7 @@ function AgentWorkspace({
     images?: PromptImageInput[];
     permissionMode?: PermissionMode;
     taskModel?: { provider: string; model: string };
+    reasoningEffort?: ReasoningEffort;
     planMode?: boolean;
   }>();
   const [projectModalOpen, setProjectModalOpen] = useState(false);
@@ -877,6 +895,8 @@ function AgentWorkspace({
   const [providerSaving, setProviderSaving] = useState(false);
   const [providerDeleting, setProviderDeleting] = useState<ProviderId>();
   const [compressing, setCompressing] = useState(false);
+  /** 自动触发上下文压缩时（Token 超 75% 阈值），对话区显示「正在压缩上下文...」提示。 */
+  const [contextCompacting, setContextCompacting] = useState(false);
   const [providerSettings, setProviderSettings] = useState<ProviderSettingsInfo | null>(null);
   const [appVersion, setAppVersion] = useState(VERSION);
   const [debugModalOpen, setDebugModalOpen] = useState(false);
@@ -1576,8 +1596,11 @@ function AgentWorkspace({
                   text: '',
                   turns: [{ turnNumber: (groupTurnSeq += 1), thinking, text, tools }],
                   time: currentTime(),
-                  // 服务端持久化的本次任务耗时（刷新后恢复展示）
+                  // 服务端持久化的本次任务耗时与各指标（刷新后恢复展示）
                   durationMs: historyMessage.durationMs,
+                  finishedAt: historyMessage.finishedAt,
+                  ttftMs: historyMessage.ttftMs,
+                  tokensPerSecond: historyMessage.tokensPerSecond,
                 });
                 groupAssistantIndex = itemIndex;
               } else {
@@ -1589,6 +1612,9 @@ function AgentWorkspace({
                     // 一次任务可能因工具调用产生多条 assistant 历史消息；
                     // 服务端把任务总耗时写在最后一条上，合并回放时需同步到整条回复。
                     durationMs: historyMessage.durationMs ?? current.durationMs,
+                    finishedAt: historyMessage.finishedAt ?? current.finishedAt,
+                    ttftMs: historyMessage.ttftMs ?? current.ttftMs,
+                    tokensPerSecond: historyMessage.tokensPerSecond ?? current.tokensPerSecond,
                     turns: [
                       ...(current.turns ?? []),
                       { turnNumber: (groupTurnSeq += 1), thinking, text, tools },
@@ -1782,17 +1808,19 @@ function AgentWorkspace({
             const initialPrompt = pendingTaskDraftRef.current.prompt ?? '';
             const initialImages = pendingTaskDraftRef.current.images ?? [];
             const draftTaskModel = pendingTaskDraftRef.current.taskModel;
+            const draftReasoningEffort = pendingTaskDraftRef.current.reasoningEffort;
             const draftPlanMode = pendingTaskDraftRef.current.planMode;
             pendingTaskDraftRef.current = undefined;
             setDraftTaskProjectId(undefined);
             followOutputRef.current = true;
-            // 草稿中的任务模型/计划模式：先应用（任务空闲），再发 prompt。
+            // 草稿中的任务模型/思考强度/计划模式：先应用（任务空闲），再发 prompt。
             if (draftTaskModel) {
               send({
                 type: 'set_task_model',
                 taskId: incoming.task.id,
                 providerId: draftTaskModel.provider,
                 model: draftTaskModel.model,
+                reasoningEffort: draftReasoningEffort,
               });
             }
             if (draftPlanMode) {
@@ -1852,6 +1880,8 @@ function AgentWorkspace({
           if (!incoming.busy) {
             // 当前任务执行结束：自动按序执行排队消息
             flushQueuedMessages(eventTaskId);
+            // 兜底清除压缩提示（正常情况下 context_compacted 已先到达并清除）
+            setContextCompacting(false);
             updateTimeline((items) =>
               items.map((item) =>
                 item.kind === 'message' && item.streaming ? { ...item, streaming: false } : item,
@@ -1862,6 +1892,20 @@ function AgentWorkspace({
         }
         case 'turn_start':
           break;
+        case 'context_compacting': {
+          const eventTaskId = incoming.taskId ?? stateRef.current.activeTaskId;
+          if (!eventTaskId || eventTaskId === stateRef.current.activeTaskId) {
+            setContextCompacting(true);
+          }
+          break;
+        }
+        case 'context_compacted': {
+          const eventTaskId = incoming.taskId ?? stateRef.current.activeTaskId;
+          if (!eventTaskId || eventTaskId === stateRef.current.activeTaskId) {
+            setContextCompacting(false);
+          }
+          break;
+        }
         case 'llm_call_start': {
           const eventTaskId = incoming.taskId ?? stateRef.current.activeTaskId;
           if (eventTaskId && eventTaskId !== stateRef.current.activeTaskId) {
@@ -2055,9 +2099,14 @@ function AgentWorkspace({
                     : incoming.result.success
                       ? 'success'
                       : 'failed',
-                  output:
-                    (incoming.result.success ? incoming.result.content : incoming.result.error) ||
-                    '(无输出)',
+                  output: (() => {
+                    // 失败时也要展示工具的实际输出（如 bash 的 stderr），
+                    // 而不是只显示 "Exit code: 1" 这类错误摘要。
+                    const c = incoming.result.content || '';
+                    const e = incoming.result.error || '';
+                    if (c && e) return `${c}\n\n[error] ${e}`;
+                    return c || e || '(无输出)';
+                  })(),
                   duration: incoming.result.metadata?.duration,
                   metadata: incoming.result.metadata,
                 })),
@@ -2080,9 +2129,14 @@ function AgentWorkspace({
                     : incoming.result.success
                       ? 'success'
                       : 'failed',
-                  output:
-                    (incoming.result.success ? incoming.result.content : incoming.result.error) ||
-                    '(无输出)',
+                  output: (() => {
+                    // 失败时也要展示工具的实际输出（如 bash 的 stderr），
+                    // 而不是只显示 "Exit code: 1" 这类错误摘要。
+                    const c = incoming.result.content || '';
+                    const e = incoming.result.error || '';
+                    if (c && e) return `${c}\n\n[error] ${e}`;
+                    return c || e || '(无输出)';
+                  })(),
                   duration: incoming.result.metadata?.duration,
                   metadata: incoming.result.metadata,
                 })),
@@ -2181,6 +2235,9 @@ function AgentWorkspace({
                     ...item,
                     streaming: false,
                     durationMs: completedDurationMs(item) ?? item.durationMs,
+                    finishedAt: incoming.finishedAt,
+                    ttftMs: incoming.ttftMs,
+                    tokensPerSecond: incoming.tokensPerSecond,
                   }
                 : item,
             );
@@ -2195,6 +2252,9 @@ function AgentWorkspace({
                     ...item,
                     streaming: false,
                     durationMs: completedDurationMs(item) ?? item.durationMs,
+                    finishedAt: incoming.finishedAt,
+                    ttftMs: incoming.ttftMs,
+                    tokensPerSecond: incoming.tokensPerSecond,
                   }
                 : item,
             ),
@@ -2273,6 +2333,9 @@ function AgentWorkspace({
                   ...item,
                   streaming: false,
                   durationMs: completedDurationMs(item) ?? item.durationMs,
+                  finishedAt: incoming.finishedAt,
+                  ttftMs: incoming.ttftMs,
+                  tokensPerSecond: incoming.tokensPerSecond,
                   tools: item.tools?.map((tool) =>
                     tool.status === 'running' ? { ...tool, status: 'interrupted' } : tool,
                   ),
@@ -2301,6 +2364,9 @@ function AgentWorkspace({
                   ...item,
                   streaming: false,
                   durationMs: completedDurationMs(item) ?? item.durationMs,
+                  finishedAt: incoming.finishedAt,
+                  ttftMs: incoming.ttftMs,
+                  tokensPerSecond: incoming.tokensPerSecond,
                   tools: item.tools?.map((tool) =>
                     tool.status === 'running' ? { ...tool, status: 'interrupted' } : tool,
                   ),
@@ -2386,6 +2452,7 @@ function AgentWorkspace({
         case 'error': {
           const eventTaskId = incoming.taskId ?? stateRef.current.activeTaskId;
           setCompressing(false);
+          setContextCompacting(false);
           messageApi.error(incoming.message);
           if (
             incoming.code === 'AGENT_ERROR' &&
@@ -2608,7 +2675,8 @@ function AgentWorkspace({
     const draft = pendingTaskDraftRef.current;
     if (draft) {
       // 新建任务草稿：任务还不存在，先记住模型选择，任务创建后随 prompt 应用。
-      pendingTaskDraftRef.current = { ...draft, taskModel: selection };
+      // 换了模型后清掉草稿中旧的思考强度（档位跟随新模型默认档）。
+      pendingTaskDraftRef.current = { ...draft, taskModel: selection, reasoningEffort: undefined };
       patchState({});
       return;
     }
@@ -3330,6 +3398,11 @@ function AgentWorkspace({
                   );
                 })
               )}
+              {contextCompacting && (
+                <div className="pa-compacting-hint" role="status">
+                  <LoadingOutlined spin /> 正在压缩上下文...
+                </div>
+              )}
             </div>
           </div>
 
@@ -3364,6 +3437,11 @@ function AgentWorkspace({
             runtime={state.runtime}
             runtimeModelValue={runtimeModelValue}
             taskModelValue={taskModelOptionValue}
+            taskReasoningEffort={
+              // 草稿（新建任务）：显示草稿中已选的思考强度；否则显示任务当前生效档位。
+              pendingTaskDraftRef.current?.reasoningEffort ??
+              state.tasks.find((task) => task.id === state.activeTaskId)?.reasoningEffort
+            }
             runtimeModels={runtimeModels}
             onTaskModelChange={changeTaskModel}
             runtimeReasoningOptions={runtimeReasoningOptions}
@@ -3423,6 +3501,39 @@ function AgentWorkspace({
               );
             }}
             onReasoningChange={(reasoningEffort) => {
+              // 新建任务草稿：任务还不存在，把思考强度（连同生效模型）记进草稿，
+              // 任务创建后随 set_task_model 一起应用——绝不能改写全局运行时
+              // （否则会把全局模型/档位改成 deepseek-v4-flash 之类）。
+              const draft = pendingTaskDraftRef.current;
+              if (draft) {
+                const selection = parseRuntimeModelSelectValue(taskModelOptionValue);
+                if (selection) {
+                  pendingTaskDraftRef.current = {
+                    ...draft,
+                    taskModel: selection,
+                    reasoningEffort,
+                  };
+                  patchState({});
+                }
+                return;
+              }
+              // 输入框属于当前任务：思考强度修改作用于该任务（任务级覆盖，
+              // set_task_model 带档位）。模型继承全局时同样按任务生效——
+              // 对 Ollama 而言全局保存不落地（档位按模型配置），必须走任务。
+              const taskId = stateRef.current.activeTaskId;
+              if (taskId) {
+                const selection = parseRuntimeModelSelectValue(taskModelOptionValue);
+                if (selection) {
+                  send({
+                    type: 'set_task_model',
+                    taskId,
+                    providerId: selection.provider,
+                    model: selection.model,
+                    reasoningEffort,
+                  });
+                  return;
+                }
+              }
               if (!state.runtime?.provider || !state.runtime.model) return;
               saveRuntimeSelection(state.runtime.provider, state.runtime.model, reasoningEffort);
             }}
@@ -3778,6 +3889,11 @@ function AgentWorkspace({
                   <Form.Item
                     name="defaultModel"
                     label="默认模型"
+                    extra={
+                      selectedProvider === 'lmstudio'
+                        ? '填写 LM Studio 中加载的模型标识（可在 LM Studio 的模型面板复制）。'
+                        : undefined
+                    }
                     rules={[{ required: true, message: '请输入默认模型' }]}
                   >
                     <AutoComplete options={providerModelOptions} placeholder="模型 ID" />
@@ -3786,22 +3902,29 @@ function AgentWorkspace({
                     label="可选模型"
                     extra={
                       selectedProvider === 'ollama'
-                        ? '为每个模型配置 token 限制；视觉模型请开启“图片输入”，开启后可在通用设置中选作视觉模型。'
-                        : '为每个模型配置总上下文长度与输出长度（单位 token）；留空使用内置默认值。'
+                        ? '为每个模型配置 token 限制与思考档位：勾选「思考档位」后，该模型才会开启思考，任务中会自动按模型显示可选强度；未勾选则完全不开启思考。视觉模型请开启“图片输入”。'
+                        : selectedProvider === 'lmstudio'
+                          ? '为每个模型配置 token 限制；视觉模型请开启“图片输入”，开启后可在通用设置中选作视觉模型。'
+                          : '为每个模型配置总上下文长度与输出长度（单位 token）；留空使用内置默认值。'
                     }
                   >
                     <Form.List name="models">
                       {(fields, { add, remove }) => (
                         <div
                           className={`pa-model-list${
-                            selectedProvider === 'ollama' ? ' pa-model-list-ollama' : ''
+                            selectedProvider === 'ollama' || selectedProvider === 'lmstudio'
+                              ? ' pa-model-list-ollama'
+                              : ''
                           }`}
                         >
                           <div className="pa-model-list-head">
                             <span>模型 ID</span>
                             <span>上下文长度</span>
                             <span>输出长度</span>
-                            {selectedProvider === 'ollama' && <span>图片输入</span>}
+                            {(selectedProvider === 'ollama' || selectedProvider === 'lmstudio') && (
+                              <span>图片输入</span>
+                            )}
+                            {selectedProvider === 'ollama' && <span>思考档位</span>}
                             <span />
                           </div>
                           {fields.map((field) => (
@@ -3832,12 +3955,33 @@ function AgentWorkspace({
                                   style={{ width: '100%' }}
                                 />
                               </Form.Item>
-                              {selectedProvider === 'ollama' && (
+                              {(selectedProvider === 'ollama' ||
+                                selectedProvider === 'lmstudio') && (
                                 <Form.Item
                                   name={[field.name, 'imageInput']}
                                   valuePropName="checked"
                                 >
                                   <Switch aria-label="支持图片输入" />
+                                </Form.Item>
+                              )}
+                              {selectedProvider === 'ollama' && (
+                                <Form.Item name={[field.name, 'reasoningOptions']}>
+                                  <Select
+                                    mode="multiple"
+                                    allowClear
+                                    placeholder="不开启思考"
+                                    maxTagCount="responsive"
+                                    aria-label="思考档位"
+                                    options={getReasoningOptions([
+                                      'off',
+                                      'low',
+                                      'medium',
+                                      'high',
+                                      'max',
+                                      'xhigh',
+                                    ])}
+                                    style={{ width: '100%' }}
+                                  />
                                 </Form.Item>
                               )}
                               <Button
@@ -3859,6 +4003,7 @@ function AgentWorkspace({
                                 contextWindow: undefined,
                                 maxOutputTokens: undefined,
                                 imageInput: false,
+                                reasoningOptions: undefined,
                               })
                             }
                           >
@@ -3868,21 +4013,27 @@ function AgentWorkspace({
                       )}
                     </Form.List>
                   </Form.Item>
-                  {(selectedProvider === 'deepseek' || selectedProvider === 'volcano') && (
+                  {(selectedProvider === 'deepseek' ||
+                    selectedProvider === 'volcano' ||
+                    selectedProvider === 'lmstudio') && (
                     <Form.Item
                       name="thinkingEffort"
                       label="默认思考强度"
                       extra={
                         selectedProvider === 'deepseek'
                           ? 'DeepSeek 支持 off / low / high / max；medium 不支持，将按 low 处理。'
-                          : '火山方舟仅深度思考模型（如 doubao-seed-thinking）支持思考，普通模型请选择「关闭」。'
+                          : selectedProvider === 'lmstudio'
+                            ? 'LM Studio 上 Qwen3 类模型支持 xhigh（默认）/ medium / low 三档思考强度，选择「关闭」可关闭思考模式。'
+                            : '火山方舟仅深度思考模型（如 doubao-seed-thinking）支持思考，普通模型请选择「关闭」。'
                       }
                     >
                       <Select
                         options={getReasoningOptions(
                           selectedProvider === 'deepseek'
                             ? ['off', 'low', 'high', 'max']
-                            : ['off', 'low', 'medium', 'high'],
+                            : selectedProvider === 'lmstudio'
+                              ? ['off', 'low', 'medium', 'xhigh']
+                              : ['off', 'low', 'medium', 'high'],
                         )}
                       />
                     </Form.Item>
@@ -4759,6 +4910,16 @@ function TimelineEntry({
       .then(() => messageApi.success('用户输入已复制'))
       .catch(() => messageApi.error('复制失败，请手动选择文本'));
   };
+  const copyAssistantMessage = (): void => {
+    const text = messageText || item.text;
+    if (!text.trim()) {
+      messageApi.info('这条回复没有可复制的文字。');
+      return;
+    }
+    void copyTextToClipboard(text)
+      .then(() => messageApi.success('回复已复制'))
+      .catch(() => messageApi.error('复制失败，请手动选择文本'));
+  };
   const avatar = (
     <Avatar
       className={`pa-message-avatar ${item.role}`}
@@ -4790,14 +4951,16 @@ function TimelineEntry({
         >
           {user && item.images && item.images.length > 0 && (
             <div className="pa-message-images">
-              {item.images.map((image, index) => (
-                <img
-                  key={`${image.name}-${index}`}
-                  src={image.src}
-                  alt={image.name}
-                  title={image.name}
-                />
-              ))}
+              <Image.PreviewGroup>
+                {item.images.map((image, index) => (
+                  <Image
+                    key={`${image.name}-${index}`}
+                    src={image.src}
+                    alt={image.name}
+                    title={image.name}
+                  />
+                ))}
+              </Image.PreviewGroup>
             </div>
           )}
           {system
@@ -4849,7 +5012,39 @@ function TimelineEntry({
             </div>
           )}
           {!user && !system && !item.streaming && typeof item.durationMs === 'number' && (
-            <div className="pa-message-duration">耗时：{formatElapsedChinese(item.durationMs)}</div>
+            <div className="pa-message-meta">
+              <Tooltip title="复制">
+                <Button
+                  className="pa-message-copy"
+                  type="text"
+                  size="small"
+                  aria-label="复制回复"
+                  icon={<CopyOutlined />}
+                  onClick={copyAssistantMessage}
+                />
+              </Tooltip>
+              {item.finishedAt && (
+                <span className="pa-message-meta-item">{formatClockTime(item.finishedAt)}</span>
+              )}
+              <span className="pa-message-meta-sep">·</span>
+              <span className="pa-message-meta-item">
+                用时 {formatElapsedChinese(item.durationMs)}
+              </span>
+              {typeof item.ttftMs === 'number' && (
+                <>
+                  <span className="pa-message-meta-sep">·</span>
+                  <span className="pa-message-meta-item">首 token {formatTtft(item.ttftMs)}</span>
+                </>
+              )}
+              {typeof item.tokensPerSecond === 'number' && (
+                <>
+                  <span className="pa-message-meta-sep">·</span>
+                  <span className="pa-message-meta-item">
+                    {formatTokenSpeed(item.tokensPerSecond)}
+                  </span>
+                </>
+              )}
+            </div>
           )}
         </div>
       )}
@@ -5149,23 +5344,28 @@ function TodoTaskList({ tool }: { tool: ToolTimelineItem }) {
 
 function MarkdownContent({ text }: { text: string }) {
   return (
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
-      components={{
-        a: ({ children, ...props }) => (
-          <a {...props} target="_blank" rel="noreferrer">
-            {children}
-          </a>
-        ),
-        code: ({ children, className, ...props }) => (
-          <code className={className} {...props}>
-            {children}
-          </code>
-        ),
-      }}
-    >
-      {text}
-    </ReactMarkdown>
+    <Image.PreviewGroup>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          a: ({ children, ...props }) => (
+            <a {...props} target="_blank" rel="noreferrer">
+              {children}
+            </a>
+          ),
+          code: ({ children, className, ...props }) => (
+            <code className={className} {...props}>
+              {children}
+            </code>
+          ),
+          img: ({ src, alt, title }) => (
+            <Image src={src} alt={alt ?? ''} title={title} />
+          ),
+        }}
+      >
+        {text}
+      </ReactMarkdown>
+    </Image.PreviewGroup>
   );
 }
 
@@ -5333,6 +5533,7 @@ function Composer({
   onModelChange,
   onTaskModelChange,
   onReasoningChange,
+  taskReasoningEffort,
 }: {
   /** 是否显示「滚动到最新消息」悬浮按钮（由对话区滚动状态驱动）。 */
   showScrollButton: boolean;
@@ -5355,6 +5556,8 @@ function Composer({
   runtime?: RuntimeInfo;
   runtimeModelValue?: string;
   taskModelValue: string;
+  /** 当前任务生效的思考强度（任务级覆盖或模型默认档），无任务时为 undefined。 */
+  taskReasoningEffort?: ReasoningEffort;
   runtimeModels: RuntimeModelGroup[];
   runtimeReasoningOptions: ReasoningEffort[];
   runtimeDisabled: boolean;
@@ -5391,6 +5594,10 @@ function Composer({
   const [skillMenuOpen, setSkillMenuOpen] = useState(false);
   /** 「+」附件菜单（图片上传 / 计划模式）是否打开。 */
   const [plusMenuOpen, setPlusMenuOpen] = useState(false);
+  /** 模型/推理等级选择浮层是否打开（截图样式：输入框内摘要按钮 + 列表式浮层）。 */
+  const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  /** 浮层当前层级：root（参数行）/ model（模型列表）/ reasoning（推理等级列表）。 */
+  const [modelPickerView, setModelPickerView] = useState<'root' | 'model' | 'reasoning'>('root');
 
   /** 「+」附件菜单打开时：点击菜单与触发按钮之外的区域关闭。 */
   useEffect(() => {
@@ -5583,6 +5790,13 @@ function Composer({
   const taskModelInfo = taskModelSelection
     ? findRuntimeModel(runtime, taskModelSelection.provider, taskModelSelection.model)
     : undefined;
+  // 思考强度选择器跟随「任务生效模型」（任务覆盖优先，否则全局默认）：
+  // 选项、当前值、是否支持思考都按该模型解析，切换任务模型时自动变化。
+  const reasoningSupported = taskModelInfo?.reasoningSupported ?? runtime?.reasoningSupported;
+  const reasoningOptions: ReasoningEffort[] =
+    taskModelInfo?.reasoningOptions ?? runtimeReasoningOptions;
+  const reasoningEffortValue =
+    taskReasoningEffort ?? taskModelInfo?.reasoningEffort ?? runtime?.reasoningEffort;
   const activeModelLabel =
     taskModelInfo?.displayName ||
     taskModelSelection?.model ||
@@ -5590,6 +5804,110 @@ function Composer({
     runtime?.model ||
     '选择模型';
   const activeModelTitle = activeModelLabel;
+  /** 推理等级展示文案（如 High），用于摘要按钮与浮层当前值。 */
+  const reasoningEffortLabel = getReasoningOptions(reasoningOptions).find(
+    (option) => option.value === reasoningEffortValue,
+  )?.label ?? reasoningEffortValue ?? '';
+
+  /** 模型/推理等级选择浮层内容：一级为参数行（模型 / 推理等级），点击进入对应选项列表。 */
+  const renderModelPickerContent = (): ReactNode => {
+    const close = () => setModelPickerOpen(false);
+    if (modelPickerView === 'model') {
+      return (
+        <div className="pa-model-picker">
+          <button
+            type="button"
+            className="pa-model-picker-back"
+            onClick={() => setModelPickerView('root')}
+          >
+            <LeftOutlined /> 模型
+          </button>
+          {runtimeModels.length === 0 ? (
+            <div className="pa-model-picker-empty">未配置</div>
+          ) : (
+            runtimeModels.map((group) => (
+              <div key={group.label} className="pa-model-picker-group">
+                <div className="pa-model-picker-group-label">{group.label}</div>
+                {group.options.map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    className={`pa-model-picker-option${
+                      option.value === taskModelValue ? ' active' : ''
+                    }`}
+                    onClick={() => {
+                      onTaskModelChange(option.value);
+                      close();
+                    }}
+                  >
+                    <span className="pa-model-picker-option-label">{option.label}</span>
+                    {option.value === taskModelValue && (
+                      <CheckOutlined className="pa-model-picker-check" aria-hidden="true" />
+                    )}
+                  </button>
+                ))}
+              </div>
+            ))
+          )}
+        </div>
+      );
+    }
+    if (modelPickerView === 'reasoning') {
+      return (
+        <div className="pa-model-picker">
+          <button
+            type="button"
+            className="pa-model-picker-back"
+            onClick={() => setModelPickerView('root')}
+          >
+            <LeftOutlined /> 推理等级
+          </button>
+          {getReasoningOptions(reasoningOptions).map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              className={`pa-model-picker-option${
+                option.value === reasoningEffortValue ? ' active' : ''
+              }`}
+              onClick={() => {
+                onReasoningChange(option.value as ReasoningEffort);
+                close();
+              }}
+            >
+              <span className="pa-model-picker-option-label">{option.label}</span>
+              {option.value === reasoningEffortValue && (
+                <CheckOutlined className="pa-model-picker-check" aria-hidden="true" />
+              )}
+            </button>
+          ))}
+        </div>
+      );
+    }
+    return (
+      <div className="pa-model-picker">
+        <button
+          type="button"
+          className="pa-model-picker-row"
+          onClick={() => setModelPickerView('model')}
+        >
+          <span className="pa-model-picker-label">模型</span>
+          <span className="pa-model-picker-value">{activeModelLabel}</span>
+          <RightOutlined className="pa-model-picker-chevron" aria-hidden="true" />
+        </button>
+        {reasoningSupported && (
+          <button
+            type="button"
+            className="pa-model-picker-row"
+            onClick={() => setModelPickerView('reasoning')}
+          >
+            <span className="pa-model-picker-label">推理等级</span>
+            <span className="pa-model-picker-value">{reasoningEffortLabel}</span>
+            <RightOutlined className="pa-model-picker-chevron" aria-hidden="true" />
+          </button>
+        )}
+      </div>
+    );
+  };
 
   return (
     <footer className="pa-composer-wrap">
@@ -5714,7 +6032,7 @@ function Composer({
         <Tooltip title="滚动到最新消息">
           <Button
             className="pa-scroll-latest"
-            icon={<ArrowDownOutlined />}
+            icon={<DownOutlined />}
             aria-label="滚动到最新消息"
             onClick={onScrollToLatest}
           />
@@ -5908,7 +6226,11 @@ function Composer({
           <div className="pa-composer-images" data-testid="prompt-image-list">
             {images.map((image, index) => (
               <div className="pa-composer-image" key={`${image.name}-${index}`}>
-                <img src={promptImageSrc(image)} alt={image.name} />
+                <Image
+                  src={promptImageSrc(image)}
+                  alt={image.name}
+                  preview={{ mask: null }}
+                />
                 <span title={image.name}>{image.name}</span>
                 <Button
                   type="text"
@@ -6047,27 +6369,40 @@ function Composer({
             </Tooltip>
           </div>
           <div className="pa-composer-right">
-            <Select
-              value={taskModelValue}
-              options={runtimeModels.length ? runtimeModels : [{ label: '未配置', options: [] }]}
+            <Dropdown
+              trigger={['click']}
+              open={modelPickerOpen}
+              onOpenChange={(open) => {
+                setModelPickerOpen(open);
+                if (open) setModelPickerView('root');
+              }}
+              placement="topRight"
+              classNames={{ root: 'pa-model-picker-overlay' }}
+              popupRender={() => renderModelPickerContent()}
               disabled={runtimeDisabled}
-              className="pa-model-select"
-              popupMatchSelectWidth={false}
-              style={{ width: getModelSelectWidth(activeModelLabel) }}
-              title={`${activeModelTitle}（当前任务模型，可独立于其他任务）`}
-              aria-label="切换当前任务模型"
-              onChange={onTaskModelChange}
-            />
-            {runtime?.reasoningSupported && (
-              <Select
-                value={runtime.reasoningEffort}
-                options={getReasoningOptions(runtimeReasoningOptions)}
+            >
+              <button
+                type="button"
+                className="pa-model-summary"
                 disabled={runtimeDisabled}
-                className="pa-reasoning-select"
-                aria-label="设置思考强度"
-                onChange={(value: ReasoningEffort) => onReasoningChange(value)}
-              />
-            )}
+                title={`${activeModelTitle}（当前任务模型，可独立于其他任务）${
+                  reasoningSupported && reasoningEffortLabel ? ` · 推理等级 ${reasoningEffortLabel}` : ''
+                }`}
+                aria-label="切换当前任务模型与思考强度"
+              >
+                <span className="pa-model-summary-text">
+                  {activeModelLabel}
+                  {reasoningSupported && reasoningEffortLabel && (
+                    <span className="pa-model-summary-effort">{reasoningEffortLabel}</span>
+                  )}
+                </span>
+                {modelPickerOpen ? (
+                  <UpOutlined className="pa-model-summary-arrow" aria-hidden="true" />
+                ) : (
+                  <DownOutlined className="pa-model-summary-arrow" aria-hidden="true" />
+                )}
+              </button>
+            </Dropdown>
             {busy && (
               <Tooltip title="停止生成">
                 <button
@@ -7815,15 +8150,20 @@ function Inspector({
               showInfo={false}
               status={state.planProgress.failed ? 'exception' : 'active'}
             />
-            <div className="pa-inspector-list">
+            <div className="pa-inspector-list pa-plan-steps">
               {state.plan.steps.map((step) => (
-                <div className="pa-inspector-list-item" key={`${step.order}-${step.title}`}>
+                <div
+                  className={`pa-inspector-list-item ${step.status}`}
+                  key={`${step.order}-${step.title}`}
+                >
                   <Avatar size={24} className={`pa-plan-step ${step.status}`}>
-                    {step.status === 'completed'
-                      ? '✓'
-                      : step.status === 'failed'
-                        ? '!'
-                        : step.order}
+                    {step.status === 'completed' ? (
+                      <CheckCircleFilled />
+                    ) : step.status === 'failed' ? (
+                      <CloseCircleFilled />
+                    ) : (
+                      step.order
+                    )}
                   </Avatar>
                   <div className="pa-inspector-list-copy">
                     <div className="pa-inspector-list-title">{step.title}</div>
@@ -8333,12 +8673,20 @@ function parseModelRows(rows: ProviderModelRow[]): Array<string | ProviderModelR
     const id = (row?.id ?? '').trim();
     if (!id || seen.has(id)) continue;
     seen.add(id);
-    if (row.contextWindow || row.maxOutputTokens || row.imageInput) {
+    if (
+      row.contextWindow ||
+      row.maxOutputTokens ||
+      row.imageInput ||
+      row.reasoningOptions?.length ||
+      row.thinkingEffort
+    ) {
       models.push({
         id,
         contextWindow: row.contextWindow,
         maxOutputTokens: row.maxOutputTokens,
         imageInput: row.imageInput || undefined,
+        reasoningOptions: row.reasoningOptions?.length ? row.reasoningOptions : undefined,
+        thinkingEffort: row.thinkingEffort,
       });
     } else {
       models.push(id);
@@ -8356,6 +8704,8 @@ function modelConfigListToRows(models: Array<string | ProviderModelRow>): Provid
           contextWindow: model.contextWindow,
           maxOutputTokens: model.maxOutputTokens,
           imageInput: model.imageInput ?? false,
+          reasoningOptions: model.reasoningOptions,
+          thinkingEffort: model.thinkingEffort,
         },
   );
 }
@@ -8491,21 +8841,14 @@ function getReasoningOptions(options: ReasoningEffort[]) {
   return reasoningOptions.filter((option) => allowed.has(option.value as ReasoningEffort));
 }
 
-function getModelSelectWidth(label: string): number {
-  const textWidth = Array.from(label).reduce(
-    (width, character) => width + (/[\u2E80-\u9FFF\uF900-\uFAFF]/u.test(character) ? 14 : 8),
-    0,
-  );
-  return Math.max(180, Math.min(480, textWidth + 54));
-}
-
 function isProviderId(value: string): value is ProviderId {
   return (
     value === 'openai' ||
     value === 'anthropic' ||
     value === 'deepseek' ||
     value === 'ollama' ||
-    value === 'volcano'
+    value === 'volcano' ||
+    value === 'lmstudio'
   );
 }
 
@@ -8553,6 +8896,26 @@ function formatElapsedChinese(milliseconds: number): string {
   if (hours > 0) return `${hours}小时${minutes}分${seconds}秒`;
   if (totalMinutes > 0) return `${minutes}分${seconds}秒`;
   return `${seconds}秒`;
+}
+
+/** 任务结束时间：HH:MM 格式（与消息头部的时间口径一致）。 */
+function formatClockTime(value: string): string {
+  return new Date(value).toLocaleTimeString('zh-CN', {
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+/** 首 token 时间（TTFT）：保留 1 位小数的秒数。 */
+function formatTtft(milliseconds: number): string {
+  return `${(milliseconds / 1000).toFixed(1)}秒`;
+}
+
+/** 模型输出 token 速度：≥100 取整，<100 保留 1 位小数。 */
+function formatTokenSpeed(tokensPerSecond: number): string {
+  const value =
+    tokensPerSecond >= 100 ? Math.round(tokensPerSecond) : Math.round(tokensPerSecond * 10) / 10;
+  return `${value} tok/s`;
 }
 
 function modelCallStatusLabel(status: ModelCallTrace['status']): string {

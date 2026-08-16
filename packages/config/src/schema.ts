@@ -17,6 +17,18 @@ export const modelConfigSchema = z.object({
   maxOutputTokens: z.number().int().min(1).max(10_000_000).optional(),
   /** Whether this model accepts image content blocks. */
   imageInput: z.boolean().optional(),
+  /**
+   * 该模型可选的思考强度档位（6 档中任选子集）。配置了该字段才开启该模型的
+   * 思考能力；未配置 = 不开启思考。选中的档位原样透传给模型（如 Ollama 的
+   * reasoning_effort），off 表示关闭思考。
+   */
+  reasoningOptions: z
+    .array(z.enum(['off', 'low', 'medium', 'high', 'max', 'xhigh']))
+    .min(1)
+    .max(6)
+    .optional(),
+  /** 该模型的默认思考强度（需在 reasoningOptions 内；缺省取第一个非 off 档）。 */
+  thinkingEffort: z.enum(['off', 'low', 'medium', 'high', 'max', 'xhigh']).optional(),
 });
 
 const providerConfigSchema = z.object({
@@ -27,7 +39,7 @@ const providerConfigSchema = z.object({
     .array(z.union([z.string().min(1).max(256), modelConfigSchema]))
     .max(100)
     .optional(),
-  thinkingEffort: z.enum(['off', 'low', 'medium', 'high', 'max']).optional(),
+  thinkingEffort: z.enum(['off', 'low', 'medium', 'high', 'max', 'xhigh']).optional(),
 });
 
 const planModeSchema = z.object({
@@ -112,14 +124,16 @@ const statsConfigSchema = z.object({
 /** 全局视觉模型配置，由 Web 设置面板管理。 */
 const visionConfigSchema = z.object({
   enabled: z.boolean().default(false),
-  provider: z.enum(['anthropic', 'openai', 'ollama', 'deepseek', 'volcano']).optional(),
+  provider: z.enum(['anthropic', 'openai', 'ollama', 'deepseek', 'volcano', 'lmstudio']).optional(),
   model: z.string().min(1).max(256).optional(),
 });
 
 export const appConfigSchema = z.object({
   providers: z
     .object({
-      active: z.enum(['anthropic', 'openai', 'ollama', 'deepseek', 'volcano']).optional(),
+      active: z
+        .enum(['anthropic', 'openai', 'ollama', 'deepseek', 'volcano', 'lmstudio'])
+        .optional(),
       anthropic: providerConfigSchema.optional(),
       openai: providerConfigSchema.optional(),
       ollama: providerConfigSchema
@@ -129,6 +143,11 @@ export const appConfigSchema = z.object({
         .optional(),
       deepseek: providerConfigSchema.optional(),
       volcano: providerConfigSchema.optional(),
+      lmstudio: providerConfigSchema
+        .extend({
+          baseURL: z.string().default('http://localhost:1234/v1'),
+        })
+        .optional(),
     })
     .default({}),
   agent: z

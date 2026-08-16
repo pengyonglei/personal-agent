@@ -1109,8 +1109,12 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
             message.model,
             message.reasoningEffort,
           );
-          // 持久化任务模型：刷新/重启后按它恢复会话模型。
-          await runtime.projects.setTaskModel(routedTaskId!, `${providerId}:${message.model}`);
+          // 持久化任务模型与思考强度：刷新/重启后按它恢复会话模型与档位。
+          await runtime.projects.setTaskModel(
+            routedTaskId!,
+            `${providerId}:${message.model}`,
+            message.reasoningEffort,
+          );
           // 提示信息由 conversation.replaceProvider 统一发出（仅一次），
           // 避免切换模型时出现重复提示。
           sendProjectState();
@@ -1155,6 +1159,8 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
             project.rootPath,
             taskOverride,
             task.id,
+            // 恢复持久化的任务级思考强度覆盖（与任务模型一起还原）。
+            task.reasoningEffort,
           );
           await conv.start();
           if (task.sessionId) {
@@ -1314,6 +1320,7 @@ export async function createWebServer(options: WebServerOptions = {}): Promise<{
                 model: conv
                   ? `${conv.providerInstance.providerId}:${conv.providerInstance.getModel()}`
                   : undefined,
+                reasoningEffort: conv?.getEffectiveReasoningEffort(),
               });
             }),
           activeTaskId,
@@ -1391,7 +1398,8 @@ function parseProviderSettings(value: unknown): ProviderSettingsInput {
     input.provider !== 'openai' &&
     input.provider !== 'ollama' &&
     input.provider !== 'deepseek' &&
-    input.provider !== 'volcano'
+    input.provider !== 'volcano' &&
+    input.provider !== 'lmstudio'
   ) {
     throw new Error('provider 格式无效。');
   }
@@ -1400,7 +1408,8 @@ function parseProviderSettings(value: unknown): ProviderSettingsInput {
     input.provider !== 'openai' &&
     input.provider !== 'ollama' &&
     input.provider !== 'deepseek' &&
-    input.provider !== 'volcano'
+    input.provider !== 'volcano' &&
+    input.provider !== 'lmstudio'
   ) {
     throw new Error('不支持的 Provider。');
   }
@@ -1434,6 +1443,8 @@ function parseProviderSettings(value: unknown): ProviderSettingsInput {
       const contextWindow = model.contextWindow;
       const maxOutputTokens = model.maxOutputTokens;
       const imageInput = model.imageInput;
+      const reasoningOptions = model.reasoningOptions;
+      const thinkingEffort = model.thinkingEffort;
       if (
         typeof model.id !== 'string' ||
         !model.id.trim() ||
@@ -1448,7 +1459,13 @@ function parseProviderSettings(value: unknown): ProviderSettingsInput {
             !Number.isInteger(maxOutputTokens) ||
             maxOutputTokens < 1 ||
             maxOutputTokens > 10_000_000)) ||
-        (imageInput !== undefined && typeof imageInput !== 'boolean')
+        (imageInput !== undefined && typeof imageInput !== 'boolean') ||
+        (reasoningOptions !== undefined &&
+          (!Array.isArray(reasoningOptions) ||
+            reasoningOptions.length < 1 ||
+            reasoningOptions.length > 6 ||
+            !reasoningOptions.every((option) => isReasoningEffort(option)))) ||
+        (thinkingEffort !== undefined && !isReasoningEffort(thinkingEffort))
       ) {
         throw new Error('models 格式无效。');
       }
@@ -1473,7 +1490,8 @@ function parseVisionSettings(value: unknown): VisionSettingsInput {
     input.provider !== 'openai' &&
     input.provider !== 'ollama' &&
     input.provider !== 'deepseek' &&
-    input.provider !== 'volcano'
+    input.provider !== 'volcano' &&
+    input.provider !== 'lmstudio'
   ) {
     throw new Error('不支持的视觉模型供应商。');
   }
@@ -1493,7 +1511,8 @@ function parseProviderId(value: string): ProviderSettingsInput['provider'] {
     value !== 'openai' &&
     value !== 'ollama' &&
     value !== 'deepseek' &&
-    value !== 'volcano'
+    value !== 'volcano' &&
+    value !== 'lmstudio'
   ) {
     throw new Error('不支持的 Provider。');
   }
@@ -1511,7 +1530,8 @@ function parseRuntimeModelSettings(value: unknown): RuntimeModelSettingsInput {
     input.provider !== 'openai' &&
     input.provider !== 'ollama' &&
     input.provider !== 'deepseek' &&
-    input.provider !== 'volcano'
+    input.provider !== 'volcano' &&
+    input.provider !== 'lmstudio'
   ) {
     throw new Error('provider 格式无效。');
   }
@@ -1526,14 +1546,14 @@ function parseRuntimeModelSettings(value: unknown): RuntimeModelSettingsInput {
   };
 }
 
-function parseReasoningEffort(value: unknown): 'off' | 'low' | 'medium' | 'high' | 'max' {
-  if (
-    value !== 'off' &&
-    value !== 'low' &&
-    value !== 'medium' &&
-    value !== 'high' &&
-    value !== 'max'
-  ) {
+const REASONING_EFFORTS = ['off', 'low', 'medium', 'high', 'max', 'xhigh'] as const;
+
+function isReasoningEffort(value: unknown): value is (typeof REASONING_EFFORTS)[number] {
+  return typeof value === 'string' && (REASONING_EFFORTS as readonly string[]).includes(value);
+}
+
+function parseReasoningEffort(value: unknown): 'off' | 'low' | 'medium' | 'high' | 'max' | 'xhigh' {
+  if (!isReasoningEffort(value)) {
     throw new Error('thinkingEffort 格式无效。');
   }
   return value;
@@ -1658,18 +1678,26 @@ function serializeTask(
     title: string;
     sessionId?: string;
     model?: TaskSummary['model'];
+    reasoningEffort?: TaskSummary['reasoningEffort'];
     permissionMode?: TaskSummary['permissionMode'];
     status: 'active' | 'archived';
     createdAt: Date;
     updatedAt: Date;
   },
-  extra: { running?: boolean; model?: string } = {},
+  extra: {
+    running?: boolean;
+    model?: string;
+    reasoningEffort?: TaskSummary['reasoningEffort'];
+  } = {},
 ): TaskSummary {
   return {
     ...task,
     permissionMode: task.permissionMode ?? 'ask',
     running: extra.running ?? false,
     model: extra.model ?? task.model,
+    // extra 未携带时保留任务持久化的档位，避免 task_renamed 等消息
+    // 用 undefined 覆盖掉已设置的思考强度。
+    reasoningEffort: extra.reasoningEffort ?? task.reasoningEffort,
     createdAt: task.createdAt.toISOString(),
     updatedAt: task.updatedAt.toISOString(),
   };

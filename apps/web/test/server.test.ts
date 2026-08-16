@@ -335,6 +335,109 @@ test('web server exposes health and websocket readiness without a configured pro
   }
 });
 
+test('LM Studio provider configures without an API key and exposes xhigh thinking strength', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'personal-agent-web-lmstudio-'));
+  const configPath = join(directory, 'config.yaml');
+  await writeFile(
+    configPath,
+    ['memory:', '  enabled: false', 'plugins:', '  enabled: false', 'mcp:', '  servers: []'].join(
+      '\n',
+    ),
+    'utf8',
+  );
+  const instance = await createWebServer({
+    host: '127.0.0.1',
+    port: 0,
+    workingDirectory: directory,
+    configPath,
+    projectStoragePath: join(directory, 'projects.json'),
+  });
+
+  try {
+    const initialResponse = await fetch(`http://127.0.0.1:${instance.port}/api/provider-settings`);
+    const initial = (await initialResponse.json()) as {
+      providers: Record<string, { requiresApiKey: boolean; baseURL: string }>;
+    };
+    assert.equal(initial.providers.lmstudio.requiresApiKey, false);
+    assert.equal(initial.providers.lmstudio.baseURL, 'http://localhost:1234/v1');
+
+    const configureResponse = await fetch(
+      `http://127.0.0.1:${instance.port}/api/provider-settings`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: 'lmstudio',
+          activate: true,
+          baseURL: 'http://localhost:1234/v1',
+          defaultModel: 'qwen3.8-27b-a3b-thinking',
+          models: ['qwen3.8-27b-a3b-thinking', 'qwen3-14b'],
+          thinkingEffort: 'xhigh',
+        }),
+      },
+    );
+    assert.equal(configureResponse.status, 200);
+    const configured = (await configureResponse.json()) as {
+      runtime: {
+        configured: boolean;
+        provider: string;
+        model: string;
+        reasoningSupported: boolean;
+        reasoningEffort: string;
+        models: Array<{
+          provider: string;
+          id: string;
+          reasoningSupported: boolean;
+          reasoningOptions: string[];
+        }>;
+      };
+      settings: {
+        active: string;
+        providers: Record<string, Record<string, unknown>>;
+      };
+    };
+    assert.equal(configured.runtime.configured, true);
+    assert.equal(configured.runtime.provider, 'lmstudio');
+    assert.equal(configured.runtime.model, 'qwen3.8-27b-a3b-thinking');
+    assert.equal(configured.runtime.reasoningSupported, true);
+    assert.equal(configured.runtime.reasoningEffort, 'xhigh');
+    assert.equal(configured.settings.active, 'lmstudio');
+    assert.equal(configured.settings.providers.lmstudio.reasoningSupported, true);
+    assert.equal(configured.settings.providers.lmstudio.thinkingEffort, 'xhigh');
+    assert.equal('apiKey' in configured.settings.providers.lmstudio, false);
+    assert.deepEqual(
+      configured.runtime.models.find((model) => model.id === 'qwen3.8-27b-a3b-thinking')
+        ?.reasoningOptions,
+      ['off', 'low', 'medium', 'xhigh'],
+    );
+
+    const switchResponse = await fetch(`http://127.0.0.1:${instance.port}/api/runtime/model`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        provider: 'lmstudio',
+        model: 'qwen3-14b',
+        reasoningEffort: 'medium',
+      }),
+    });
+    assert.equal(switchResponse.status, 200);
+    const switched = (await switchResponse.json()) as {
+      runtime: { provider: string; model: string; reasoningEffort: string };
+    };
+    assert.equal(switched.runtime.provider, 'lmstudio');
+    assert.equal(switched.runtime.model, 'qwen3-14b');
+    assert.equal(switched.runtime.reasoningEffort, 'medium');
+
+    const persisted = await readFile(configPath, 'utf8');
+    assert.match(persisted, /active: lmstudio/);
+    assert.match(persisted, /defaultModel: qwen3-14b/);
+    assert.match(persisted, /thinkingEffort: medium/);
+  } finally {
+    await instance.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('remote listening requires an explicit access token', async () => {
   await assert.rejects(createWebServer({ host: '0.0.0.0', port: 0 }), /PERSONAL_AGENT_WEB_TOKEN/);
 });
@@ -1039,6 +1142,120 @@ test('web-config API reads defaults, persists theme to config.yaml and restores 
     } finally {
       await restarted.close();
     }
+  } finally {
+    await instance.close().catch(() => undefined);
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('ollama per-model reasoning options drive runtime options and defaults', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'personal-agent-web-'));
+  const configPath = join(directory, 'config.yaml');
+  await writeFile(
+    configPath,
+    ['memory:', '  enabled: false', 'plugins:', '  enabled: false', 'mcp:', '  servers: []'].join(
+      '\n',
+    ),
+    'utf-8',
+  );
+  const browsableRoot = join(directory, 'browse-root');
+  const clientBuildDirectory = join(directory, 'client');
+  await mkdir(browsableRoot);
+  await mkdir(clientBuildDirectory);
+  await writeFile(join(clientBuildDirectory, 'index.html'), '<h1>client</h1>', 'utf8');
+
+  const instance = await createWebServer({
+    host: '127.0.0.1',
+    port: 0,
+    workingDirectory: directory,
+    configPath,
+    projectStoragePath: join(directory, 'projects.json'),
+    clientBuildDirectory,
+  });
+
+  try {
+    const baseUrl = `http://127.0.0.1:${instance.port}`;
+
+    const configureResponse = await fetch(`${baseUrl}/api/provider-settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        provider: 'ollama',
+        activate: true,
+        baseURL: 'http://localhost:11434',
+        defaultModel: 'qwen3:8b',
+        models: [
+          { id: 'qwen3:8b', reasoningOptions: ['off', 'medium', 'high', 'max'] },
+          { id: 'deepseek-r1:7b', reasoningOptions: ['off', 'high'] },
+          { id: 'llama3.1' },
+        ],
+      }),
+    });
+    assert.equal(configureResponse.status, 200);
+    const configured = (await configureResponse.json()) as {
+      runtime: {
+        provider: string;
+        model: string;
+        reasoningSupported: boolean;
+        reasoningEffort: string;
+        models: Array<{
+          id: string;
+          provider: string;
+          reasoningSupported: boolean;
+          reasoningOptions: string[];
+          reasoningEffort: string;
+        }>;
+      };
+    };
+    assert.equal(configured.runtime.provider, 'ollama');
+    assert.equal(configured.runtime.model, 'qwen3:8b');
+    // 激活模型带档位子集 → 支持思考，默认档取第一个非 off。
+    assert.equal(configured.runtime.reasoningSupported, true);
+    assert.equal(configured.runtime.reasoningEffort, 'medium');
+    const models = configured.runtime.models.filter((model) => model.provider === 'ollama');
+    const qwen3 = models.find((model) => model.id === 'qwen3:8b');
+    assert.equal(qwen3?.reasoningSupported, true);
+    assert.deepEqual(qwen3?.reasoningOptions, ['off', 'medium', 'high', 'max']);
+    assert.equal(qwen3?.reasoningEffort, 'medium');
+    const r1 = models.find((model) => model.id === 'deepseek-r1:7b');
+    assert.equal(r1?.reasoningSupported, true);
+    assert.deepEqual(r1?.reasoningOptions, ['off', 'high']);
+    assert.equal(r1?.reasoningEffort, 'high');
+    const llama = models.find((model) => model.id === 'llama3.1');
+    assert.equal(llama?.reasoningSupported, false);
+    assert.deepEqual(llama?.reasoningOptions, ['off']);
+    assert.equal(llama?.reasoningEffort, 'off');
+
+    // 切到未配置 reasoningOptions 的模型 → 不开启思考。
+    const switchPlain = await fetch(`${baseUrl}/api/runtime/model`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'llama3.1' }),
+    });
+    assert.equal(switchPlain.status, 200);
+    const switchedPlain = (await switchPlain.json()) as {
+      runtime: { model: string; reasoningSupported: boolean; reasoningEffort: string };
+    };
+    assert.equal(switchedPlain.runtime.model, 'llama3.1');
+    assert.equal(switchedPlain.runtime.reasoningSupported, false);
+    assert.equal(switchedPlain.runtime.reasoningEffort, 'off');
+
+    // 切回 qwen3:8b（不带显式档位）→ 默认档跟随该模型。
+    const switchBack = await fetch(`${baseUrl}/api/runtime/model`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'qwen3:8b' }),
+    });
+    assert.equal(switchBack.status, 200);
+    const switchedBack = (await switchBack.json()) as {
+      runtime: { model: string; reasoningEffort: string };
+    };
+    assert.equal(switchedBack.runtime.reasoningEffort, 'medium');
+
+    const persisted = await readFile(configPath, 'utf8');
+    assert.match(persisted, /reasoningOptions:\s*\n\s*- off/);
+    // Ollama 的思考强度按模型配置，Provider 级 thinkingEffort 不应被写入。
+    assert.doesNotMatch(persisted, /thinkingEffort: medium/);
   } finally {
     await instance.close().catch(() => undefined);
     await rm(directory, { recursive: true, force: true });

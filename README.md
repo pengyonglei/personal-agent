@@ -289,7 +289,18 @@ providers:
 
   ollama:
     baseURL: http://localhost:11434
-    defaultModel: llama3.1
+    defaultModel: qwen3:8b
+    # 思考强度按模型配置：给某个模型配置 reasoningOptions 才开启该模型的思考，
+    # 任务中会自动按当前模型显示可选档位。档位原样透传为 Ollama 的
+    # reasoning_effort（off 发送 think: false 关闭思考）。
+    models:
+      - id: qwen3:8b
+        reasoningOptions: [off, medium, high, max]
+      - id: deepseek-r1:7b
+        reasoningOptions: [off, high]
+        thinkingEffort: high
+      - id: llama3.1
+    # 未配置 reasoningOptions 的模型（如上面的 llama3.1）完全不开启思考。
 
   deepseek:
     baseURL: https://api.deepseek.com
@@ -303,6 +314,16 @@ providers:
     models:
       - doubao-seed-1-6-250615
       - doubao-seed-thinking-250615
+
+  lmstudio:
+    # LM Studio 本地推理服务器（OpenAI 兼容接口），无需 API Key
+    baseURL: http://localhost:1234/v1
+    # 模型 ID 与 LM Studio 中加载的模型标识一致，可自定义任意模型
+    defaultModel: qwen3.8-27b-a3b-thinking
+    models:
+      - qwen3.8-27b-a3b-thinking
+    # Qwen3 类模型思考强度：xhigh（默认）| medium | low；off 关闭思考
+    thinkingEffort: xhigh
 
 agent:
   maxTurns: 100           # 最大循环轮数（1-500），也可在 Web UI「设置 -> 通用」中修改
@@ -381,12 +402,14 @@ skills:
 
 | 配置项（YAML 路径） | 类型 / 可选值 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `providers.active` | `anthropic` / `openai` / `ollama` / `deepseek` / `volcano` | 无 | 当前激活的 Provider |
+| `providers.active` | `anthropic` / `openai` / `ollama` / `deepseek` / `volcano` / `lmstudio` | 无 | 当前激活的 Provider |
 | `providers.<id>.apiKey` | string | 无 | Provider API Key（推荐用环境变量注入） |
 | `providers.<id>.baseURL` | string | Provider 内置默认地址 | API 服务地址 |
 | `providers.<id>.defaultModel` | string | Provider 内置默认模型 | 默认模型 |
-| `providers.<id>.models` | `string[]` 或 `{id, contextWindow, maxOutputTokens}[]` | Provider 内置模型列表 | 可用模型列表 |
-| `providers.<id>.thinkingEffort` | `off` / `low` / `medium` / `high` / `max` | 无 | 思考类模型的推理强度 |
+| `providers.<id>.models` | `string[]` 或 `{id, contextWindow, maxOutputTokens, imageInput, reasoningOptions, thinkingEffort}[]` | Provider 内置模型列表 | 可用模型列表 |
+| `providers.<id>.thinkingEffort` | `off` / `low` / `medium` / `high` / `max` / `xhigh` | 无 | Provider 级默认思考强度（DeepSeek / 火山 / LM Studio） |
+| `providers.<id>.models[].reasoningOptions` | `off` / `low` / `medium` / `high` / `max` / `xhigh` 任选子集 | 无 | 仅 Ollama：配置后该模型才开启思考，任务中按模型显示这些档位；档位原样透传 |
+| `providers.<id>.models[].thinkingEffort` | `off` / `low` / `medium` / `high` / `max` / `xhigh` | 子集中第一个非 `off` 档 | 仅 Ollama：该模型的默认思考档位 |
 | `agent.maxTurns` | number（1-500） | `100` | 单次任务最大循环轮数（Web 通用设置最低 50） |
 | `agent.maxTokens` | number | 无 | 单次模型输出最大 Token 数 |
 | `agent.temperature` | number（0-2） | `0` | 模型采样温度 |
@@ -485,13 +508,14 @@ description: Use when reviewing code, pull requests, or merge requests
 
 | 环境变量                           | 用途                                   |
 | ---------------------------------- | -------------------------------------- |
-| `PERSONAL_AGENT_PROVIDER`          | 默认激活的 Provider（anthropic/openai/ollama/deepseek/volcano） |
+| `PERSONAL_AGENT_PROVIDER`          | 默认激活的 Provider（anthropic/openai/ollama/deepseek/volcano/lmstudio） |
 | `PERSONAL_AGENT_MODEL`             | 默认模型名（作用于当前激活的 Provider） |
 | `PERSONAL_AGENT_ANTHROPIC_API_KEY` | Anthropic API Key                      |
 | `PERSONAL_AGENT_OPENAI_API_KEY`    | OpenAI API Key                         |
 | `PERSONAL_AGENT_DEEPSEEK_API_KEY`  | DeepSeek API Key，并补充默认地址和模型 |
 | `PERSONAL_AGENT_VOLCANO_API_KEY`   | 火山方舟 API Key，并补充默认地址和模型 |
 | `PERSONAL_AGENT_OLLAMA_BASE_URL`   | Ollama 服务地址                        |
+| `PERSONAL_AGENT_LMSTUDIO_BASE_URL` | LM Studio 服务地址                     |
 | `PERSONAL_AGENT_MAX_TURNS`         | 单次 Agent 运行的最大轮次              |
 | `PERSONAL_AGENT_MAX_TOKENS`        | 最大输出 Token 数                      |
 | `PERSONAL_AGENT_TEMPERATURE`       | 模型温度                               |

@@ -1,0 +1,183 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "personal-agent Runtime Architecture",
+    "output": "personal-agent-architecture.html",
+    "quality_profile": "showcase",
+    "viewBox": [1500, 528],
+    "views": [
+      {
+        "id": "primary-path",
+        "label": "Primary path",
+        "focus": ["user", "cli", "web", "server", "session", "context", "loop", "provider", "llm"],
+        "note": "A prompt flows from the entry points into the agent runtime and out to the LLM."
+      },
+      {
+        "id": "plan-mode",
+        "label": "Plan mode",
+        "focus": ["plan", "context", "loop"],
+        "note": "Read-only planning restricts the exposed tools and injects plan sections."
+      },
+      {
+        "id": "tools-persistence",
+        "label": "Tools & persistence",
+        "focus": ["loop", "tools", "stores", "context"],
+        "note": "Tool calls are sandboxed; memory and model-call stats persist locally."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "user",
+      "type": "external",
+      "label": "User",
+      "sublabel": "terminal · browser",
+      "pos": [40, 240],
+      "size": [120, 60]
+    },
+    {
+      "id": "cli",
+      "type": "frontend",
+      "label": "CLI / TUI",
+      "sublabel": "commander · readline · Ink",
+      "pos": [230, 240],
+      "size": [150, 64]
+    },
+    {
+      "id": "web",
+      "type": "frontend",
+      "label": "Web UI · Desktop",
+      "sublabel": "React + AntD · Electron shell",
+      "pos": [230, 420],
+      "size": [150, 64]
+    },
+    {
+      "id": "server",
+      "type": "backend",
+      "label": "Web Server",
+      "sublabel": "Express · WebSocket",
+      "pos": [440, 420],
+      "size": [160, 64]
+    },
+    {
+      "id": "session",
+      "type": "backend",
+      "label": "Session & Project Manager",
+      "sublabel": "JSON checkpoints · projects.json",
+      "pos": [440, 240],
+      "size": [160, 64]
+    },
+    {
+      "id": "context",
+      "type": "backend",
+      "label": "ContextAssembler",
+      "sublabel": "system prompt · history · memory",
+      "pos": [660, 240],
+      "size": [160, 64]
+    },
+    {
+      "id": "loop",
+      "type": "backend",
+      "label": "AgentLoop",
+      "sublabel": "streaming turns · token budget",
+      "tag": "@personal-agent/core",
+      "pos": [880, 256],
+      "size": [170, 70]
+    },
+    {
+      "id": "plan",
+      "type": "backend",
+      "label": "PlanModeEngine",
+      "sublabel": "read-only plan · submit · execute",
+      "pos": [620, 60],
+      "size": [160, 64]
+    },
+    {
+      "id": "provider",
+      "type": "backend",
+      "label": "Provider Registry",
+      "sublabel": "Anthropic · OpenAI · DeepSeek · Ollama · Volcano",
+      "pos": [1100, 240],
+      "size": [190, 64]
+    },
+    {
+      "id": "llm",
+      "type": "external",
+      "label": "LLM APIs",
+      "sublabel": "remote streaming chat",
+      "pos": [1320, 240],
+      "size": [150, 60]
+    },
+    {
+      "id": "tools",
+      "type": "backend",
+      "label": "Tool Executor",
+      "sublabel": "registry · permission · sandbox",
+      "pos": [860, 420],
+      "size": [170, 70]
+    },
+    {
+      "id": "stores",
+      "type": "database",
+      "label": "Memory & Stats",
+      "sublabel": "memory JSON + Fuse.js · SQLite",
+      "pos": [660, 420],
+      "size": [160, 64]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Local persistence · ~/.personal-agent",
+      "wraps": ["stores"],
+      "pad": 22
+    }
+  ],
+  "connections": [
+    { "id": "user-cli", "from": "user", "to": "cli" },
+    { "id": "user-web", "from": "user", "to": "web" },
+    { "id": "cli-session", "from": "cli", "to": "session", "label": "sessions · tasks", "labelAt": [410, 318] },
+    { "id": "web-server", "from": "web", "to": "server", "label": "HTTP + WebSocket", "labelAt": [410, 498] },
+    { "id": "server-session", "from": "server", "to": "session", "label": "tasks · projects" },
+    { "id": "session-context", "from": "session", "to": "context", "label": "history · metadata", "labelAt": [630, 318] },
+    { "id": "context-loop", "from": "context", "to": "loop", "label": "assembled prompt", "labelAt": [850, 340] },
+    { "id": "loop-provider", "from": "loop", "to": "provider", "label": "streamChat", "variant": "emphasis", "labelAt": [1075, 340] },
+    { "id": "provider-llm", "from": "provider", "to": "llm", "label": "HTTPS · SSE", "labelAt": [1295, 318] },
+    { "id": "plan-loop", "from": "plan", "to": "loop", "label": "plan mode · read-only tools", "fromSide": "bottom", "toSide": "top" },
+    { "id": "loop-tools", "from": "loop", "to": "tools", "label": "executeTool · permission · sandbox", "variant": "security", "fromSide": "bottom", "toSide": "top" },
+    { "id": "stores-context", "from": "stores", "to": "context", "label": "relevant memories", "variant": "dashed" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Tools & extensions",
+      "items": [
+        "Built-ins: file · search · shell · web · todo · ask_user",
+        "MCP client (stdio · SSE · streamable-http) wraps remote tools",
+        "Plugin loader: tools · markdown skills · lifecycle hooks",
+        "Sub-agent manager for parallel work"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Foundation & config",
+      "items": [
+        "@personal-agent/shared: unified message · tool · event types + token counting",
+        "Zod-validated config merged from YAML · env · CLI flags",
+        "TokenBudget compacts history when it exceeds the budget",
+        "Plan tools: get_plan · submit_plan · update_plan_step; mode injects context sections"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Safety & observability",
+      "items": [
+        "Permission modes: allow · ask · approval",
+        "Path sandbox + dangerous-shell-command guard",
+        "SQLite stats: tokens · latency · status per model call (/stats)",
+        "Sessions, projects and plans persisted as JSON under ~/.personal-agent"
+      ]
+    }
+  ]
+}

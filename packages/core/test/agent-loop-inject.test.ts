@@ -241,3 +241,55 @@ test('unhandled injected messages fall back into history when maxTurns is exhaus
   );
   assert.equal(injected.length, 0, '注入队列应被清空');
 });
+
+test('context compaction emits context_compacting then context_compacted events', async () => {
+  const provider = new FakeProvider(() => finalAnswerStream('完成'));
+  // 注入的 used-tokens 来源恒报告超阈值：每轮都会触发压缩
+  const tokenBudget = new TokenBudget(100_000, 8192, undefined, () => 90_000);
+  const assembler = new ContextAssembler({
+    workingDirectory: 'C:\\work',
+    platform: 'win32 x64',
+    shell: 'powershell',
+    model: 'fake-model',
+    provider: 'fake',
+    mode: 'chat',
+  });
+  // 预置 8 条非 system 历史（超过 keepRecent=6），保证压缩会真正生成摘要消息
+  for (let index = 0; index < 4; index += 1) {
+    assembler.addMessage({ role: 'user', content: `早期问题 ${index + 1}` });
+    assembler.addMessage({ role: 'assistant', content: `早期回答 ${index + 1}` });
+  }
+  const loop = new AgentLoop({
+    provider,
+    contextAssembler: assembler,
+    tokenBudget,
+    toolDefinitions: [{ name: 'read_file', description: 'Read a file' } as never],
+    maxTurns: 2,
+    executeTool: async (): Promise<ToolResult> => ({ success: true, content: 'file content' }),
+  });
+
+  const events: AgentEvent[] = [];
+  for await (const event of loop.run('请分析项目')) {
+    events.push(event);
+  }
+
+  const compacting = events.filter((event) => event.type === 'context_compacting');
+  const compacted = events.filter((event) => event.type === 'context_compacted');
+  assert.equal(compacting.length, 1, '压缩开始时恰好发出一次 context_compacting 事件');
+  assert.equal(compacted.length, 1, '压缩结束恰好发出一次 context_compacted 事件');
+  assert.ok(
+    events.findIndex((event) => event.type === 'context_compacting') <
+      events.findIndex((event) => event.type === 'context_compacted'),
+    'context_compacting 应先于 context_compacted 发出',
+  );
+  // 压缩应把早期历史折叠为一条 user 摘要消息，且最终正常产出 done 事件
+  assert.ok(events.some((event) => event.type === 'done'), '压缩后循环应正常完成');
+  const historyTexts = assembler
+    .getHistory()
+    .map((message) => String(message.content))
+    .join('\n');
+  assert.ok(
+    historyTexts.includes('[Earlier conversation summary]'),
+    '压缩后历史应包含早期对话的摘要消息',
+  );
+});

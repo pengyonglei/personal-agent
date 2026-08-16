@@ -26,7 +26,7 @@
     "format:check": "prettier --check \"**/*.{ts,tsx,js,json,md}\"",
     "clean": "turbo run clean",
     "cli": "cd apps/cli && node --import tsx src/index.ts",
-    "web": "pnpm build && pnpm --filter @personal-agent/web dev",
+    "web": "pnpm --filter @personal-agent/web dev",
     "desktop": "pnpm --filter @personal-agent/desktop start",
     "desktop:package": "node apps/desktop/scripts/release.mjs package",
     "desktop:make": "node apps/desktop/scripts/release.mjs make",

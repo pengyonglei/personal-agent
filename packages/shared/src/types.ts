@@ -19,6 +19,12 @@ export interface UnifiedMessage {
   toolCalls?: UnifiedToolCall[]; // for assistant messages: tool calls the assistant requested
   /** 该条 assistant 回复的总耗时（ms）。由 AgentLoop 在任务结束时写入，随会话持久化；前端刷新后从 history 恢复展示。 */
   durationMs?: number;
+  /** 该条 assistant 回复所属任务结束时间（ISO 字符串）。由 AgentLoop 在任务结束时写入，随会话持久化。 */
+  finishedAt?: string;
+  /** 该条 assistant 回复的首 token 时间（TTFT，ms），取本次任务中首个模型调用的首个内容 token 到达时间。 */
+  ttftMs?: number;
+  /** 该条 assistant 回复的模型输出 token 速度（token/秒）= 总输出 token 数 / 模型总耗时。 */
+  tokensPerSecond?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -165,7 +171,7 @@ export interface UsageInfo {
 // Streaming options
 // ---------------------------------------------------------------------------
 
-export type ReasoningEffort = 'off' | 'low' | 'medium' | 'high' | 'max';
+export type ReasoningEffort = 'off' | 'low' | 'medium' | 'high' | 'max' | 'xhigh';
 
 export interface StreamOptions {
   temperature?: number;
@@ -272,6 +278,11 @@ export interface ModelInfo {
   contextWindow: number;
   maxOutputTokens: number;
   features: ProviderFeature[];
+  /**
+   * 该模型可选的思考强度档位（6 档中任选的子集）。仅当模型显式配置了
+   * reasoningOptions 时存在；未配置 = 不支持/不开启思考。
+   */
+  reasoningOptions?: ReasoningEffort[];
   pricing?: {
     inputPer1k: number;
     outputPer1k: number;
@@ -299,9 +310,23 @@ export type AgentEvent =
   | { type: 'tool_call_end'; toolCallId: string; result: ToolResult; turnNumber: number }
   | { type: 'permission_request'; toolName: string; params: Record<string, unknown> }
   | { type: 'turn_end'; turnNumber: number; usage: UsageInfo | null }
+  | { type: 'context_compacting' }
+  | { type: 'context_compacted' }
   | { type: 'error'; error: Error; turnNumber: number }
-  | { type: 'interrupted' }
-  | { type: 'done'; totalTurns: number; totalUsage: UsageInfo };
+  | {
+      type: 'interrupted';
+      finishedAt?: string;
+      ttftMs?: number;
+      tokensPerSecond?: number;
+    }
+  | {
+      type: 'done';
+      totalTurns: number;
+      totalUsage: UsageInfo;
+      finishedAt?: string;
+      ttftMs?: number;
+      tokensPerSecond?: number;
+    };
 
 // ---------------------------------------------------------------------------
 // Session types

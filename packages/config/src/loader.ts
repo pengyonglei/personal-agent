@@ -111,6 +111,7 @@ function deepMerge(target: Record<string, unknown>, source: Record<string, unkno
  *   PERSONAL_AGENT_MAX_TURNS=100
  *   PERSONAL_AGENT_TEMPERATURE=0.5
  *   PERSONAL_AGENT_OLLAMA_BASE_URL=http://...
+ *   PERSONAL_AGENT_LMSTUDIO_BASE_URL=http://localhost:1234/v1
  */
 function mergeEnvVars(config: AppConfig): AppConfig {
   const result = structuredClone(config);
@@ -133,6 +134,11 @@ function mergeEnvVars(config: AppConfig): AppConfig {
     } else if (path === 'ollama_base_url') {
       result.providers.ollama = {
         ...result.providers.ollama,
+        baseURL: value,
+      };
+    } else if (path === 'lmstudio_base_url') {
+      result.providers.lmstudio = {
+        ...result.providers.lmstudio,
         baseURL: value,
       };
     } else if (path === 'deepseek_api_key') {

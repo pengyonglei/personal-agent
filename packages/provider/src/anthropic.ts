@@ -13,6 +13,7 @@ import type {
 } from '@personal-agent/shared';
 import { ProviderFeature } from '@personal-agent/shared';
 import { BaseLLMProvider } from './interface';
+import { extractToolResult } from './openai-compat';
 
 // ---------------------------------------------------------------------------
 // Anthropic model definitions
@@ -425,13 +426,18 @@ function buildAnthropicMessage(msg: UnifiedMessage): unknown {
   }
 
   if (msg.role === 'tool') {
+    // 结构化 tool_result 块必须提取为文本（joinText 只取 text 块，会丢掉
+    // 工具结果导致模型以为工具返回空）；失败标记用 Anthropic 原生的
+    // is_error 字段传递，空输出兜底 '(no output)'。
+    const toolResult = extractToolResult(msg);
     return {
       role: 'user',
       content: [
         {
           type: 'tool_result',
           tool_use_id: msg.toolCallId ?? '',
-          content: typeof msg.content === 'string' ? msg.content : joinText(msg.content),
+          content: toolResult.text || '(no output)',
+          ...(toolResult.isError ? { is_error: true } : {}),
         },
       ],
     };

@@ -23,6 +23,8 @@ export interface ResolvedShell {
   toWorkingDirectory: (cwd: string) => string;
   /** Human-readable shell label used in system prompts. */
   label: string;
+  /** Detected shell version (e.g. '5.1.26100.9168', '7.4.6', '5.2.26'). */
+  version?: string;
 }
 
 /** Translate a Windows path to its WSL /mnt/ form (non-drive paths unchanged). */
@@ -43,13 +45,36 @@ export function toWindowsPathLike(wslPath: string): string {
 /**
  * Synchronous shell description for system prompts. Kept cheap on purpose —
  * the runtime only needs the strategy-level label, not the async probing.
+ * Pass a detected `version` to include it (e.g. 'PowerShell 7.4.6 (Windows)').
  */
 export function describeShell(
   platform: NodeJS.Platform = process.platform,
   prefer: ShellPreference = 'auto',
+  version?: string,
 ): string {
-  if (platform !== 'win32') return 'bash (Unix)';
-  return prefer === 'bash' ? 'bash (Git Bash or WSL)' : 'PowerShell (Windows)';
+  const withVersion = (label: string): string =>
+    version ? label.replace('(', `${version} (`) : label;
+  if (platform !== 'win32') return withVersion('bash (Unix)');
+  return prefer === 'bash' ? withVersion('bash (Git Bash or WSL)') : withVersion('PowerShell (Windows)');
+}
+
+/**
+ * Compose the model-facing shell description from a resolved shell, including
+ * the detected version so the model knows which syntax features are available
+ * (e.g. PowerShell 5.1 lacks `&&`/`||`, PowerShell 7 has them).
+ */
+export function describeResolvedShell(shell: ResolvedShell): string {
+  const version = shell.version;
+  const withVersion = (label: string): string =>
+    version ? label.replace('(', `${version} (`) : label;
+  switch (shell.kind) {
+    case 'powershell':
+      return withVersion('PowerShell (Windows)');
+    case 'wsl-bash':
+      return withVersion('bash (WSL)');
+    case 'bash':
+      return withVersion('bash (Git Bash)');
+  }
 }
 
 async function commandExists(executable: string): Promise<string | null> {
@@ -79,6 +104,34 @@ async function detectWsl(bashPath: string): Promise<boolean> {
   }
 }
 
+/** Probe the PowerShell version string (e.g. '5.1.26100.9168' or '7.4.6'). */
+async function probePowerShellVersion(command: string): Promise<string | undefined> {
+  try {
+    const probe = await execFileAsync(command, [
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      // UTF-8 前缀保证管道输出可被 Node 正确解码（PS 5.1 默认按系统 ANSI 代码页输出）。
+      POWERSHELL_UTF8_PREFIX + '$PSVersionTable.PSVersion.ToString()',
+    ], { timeout: 5000 });
+    const version = probe.stdout.trim().split(/\r?\n/)[0]?.trim();
+    return version || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Probe the bash version string (e.g. '5.2.26' from `bash --version`). */
+async function probeBashVersion(bashPath: string): Promise<string | undefined> {
+  try {
+    const probe = await execFileAsync(bashPath, ['--version'], { timeout: 5000 });
+    const match = /version\s+([0-9][0-9.]*)/i.exec(probe.stdout);
+    return match?.[1] ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function resolveWindowsBash(): Promise<ResolvedShell> {
   // Prefer Git Bash (native Windows paths) over any bash found in PATH.
   const gitBashCandidates = [
@@ -93,6 +146,7 @@ async function resolveWindowsBash(): Promise<ResolvedShell> {
       args: (command) => ['-c', command],
       toWorkingDirectory: (cwd) => cwd,
       label: 'bash (Git Bash)',
+      version: await probeBashVersion(gitBash),
     };
   }
   const pathBash = await commandExists('bash');
@@ -110,8 +164,20 @@ async function resolveWindowsBash(): Promise<ResolvedShell> {
     // working directory so commands run in the intended folder.
     toWorkingDirectory: (cwd) => (isWsl ? toWslPath(cwd) : cwd),
     label: isWsl ? 'bash (WSL)' : 'bash (Git Bash)',
+    version: await probeBashVersion(pathBash),
   };
 }
+
+/**
+ * Prefix that forces UTF-8 on PowerShell's pipe output.
+ *
+ * Windows PowerShell 5.1 writes to redirected/piped stdout using the system
+ * ANSI codepage (GBK on Chinese Windows), which Node's UTF-8 decoding turns
+ * into mojibake (U+FFFD) — the bash tool then "returns no readable content".
+ * Setting [Console]::OutputEncoding normalizes everything (PowerShell's own
+ * output AND native commands like git/npx/tsc) to UTF-8 on both PS 5.1 and 7.
+ */
+const POWERSHELL_UTF8_PREFIX = '[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);';
 
 async function resolveWindowsPowerShell(): Promise<ResolvedShell> {
   // Prefer PowerShell 7 (pwsh) when installed, fall back to the built-in
@@ -121,9 +187,10 @@ async function resolveWindowsPowerShell(): Promise<ResolvedShell> {
   return {
     kind: 'powershell',
     command,
-    args: (cmd) => ['-NoProfile', '-NonInteractive', '-Command', cmd],
+    args: (cmd) => ['-NoProfile', '-NonInteractive', '-Command', POWERSHELL_UTF8_PREFIX + cmd],
     toWorkingDirectory: (cwd) => cwd,
     label: 'PowerShell (Windows)',
+    version: await probePowerShellVersion(command),
   };
 }
 
@@ -185,4 +252,53 @@ export function resolveShell(options?: {
 /** Clear the module-level shell resolution cache (mainly for tests). */
 export function resetShellCache(): void {
   shellCache.clear();
+  shellDescriptionCache.clear();
+}
+
+// ---------------------------------------------------------------------------
+// Versioned shell description (for system prompts)
+// ---------------------------------------------------------------------------
+//
+// resolveShell() is async, but runtimes often build the prompt context
+// synchronously (e.g. a conversation constructor). These helpers expose a
+// sync cached description that is warmed asynchronously once, so the model
+// sees the detected version (e.g. 'PowerShell 5.1.26100.9168 (Windows)')
+// without blocking startup.
+
+const shellDescriptionCache = new Map<string, string>();
+
+function descriptionKey(platform: NodeJS.Platform, prefer: ShellPreference): string {
+  return `${platform}:${prefer}`;
+}
+
+/**
+ * Synchronous best-effort description: returns the versioned description when
+ * the async probe has already completed, otherwise the plain strategy label.
+ */
+export function getCachedShellDescription(
+  options?: { platform?: NodeJS.Platform; prefer?: ShellPreference },
+): string {
+  const platform = options?.platform ?? process.platform;
+  const prefer = options?.prefer ?? defaultPreference;
+  return shellDescriptionCache.get(descriptionKey(platform, prefer)) ?? describeShell(platform, prefer);
+}
+
+/**
+ * Resolve the shell and warm the description cache with the detected version.
+ * Never throws: falls back to the plain label when probing fails.
+ */
+export async function warmShellDescription(options?: {
+  platform?: NodeJS.Platform;
+  prefer?: ShellPreference;
+}): Promise<string> {
+  const platform = options?.platform ?? process.platform;
+  const prefer = options?.prefer ?? defaultPreference;
+  try {
+    const shell = await resolveShell({ platform, prefer });
+    const description = describeResolvedShell(shell);
+    shellDescriptionCache.set(descriptionKey(platform, prefer), description);
+    return description;
+  } catch {
+    return describeShell(platform, prefer);
+  }
 }

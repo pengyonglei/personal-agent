@@ -124,14 +124,10 @@ select {
   white-space: nowrap;
 }
 
-.pa-brand-logo,
-.pa-welcome-logo {
+.pa-brand-logo {
   display: block;
   flex: 0 0 auto;
   object-fit: contain;
-}
-
-.pa-brand-logo {
   width: 32px;
   height: 32px;
 }
@@ -434,6 +430,14 @@ select {
   font-size: 10px;
 }
 
+/* 查看更多与任务标题左对齐：按钮内容靠左，且左侧内边距与 .pa-task-main 一致（8px），
+   文字起点 = 36px（行内边距）+ 8px = 44px，与任务标题文字对齐 */
+.pa-project-tasks-more.ant-btn {
+  justify-content: flex-start;
+  padding-left: 8px;
+  text-align: left;
+}
+
 .pa-project-tasks-more:hover,
 .pa-project-tasks-more:focus-visible {
   color: var(--pa-accent);
@@ -620,6 +624,21 @@ select {
   padding: 28px 20px 32px;
 }
 
+/* 自动上下文压缩进行中的提示条（对话区末尾） */
+.pa-compacting-hint {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 16px;
+  padding: 10px 16px;
+  border: 1px dashed var(--pa-border);
+  border-radius: 10px;
+  color: var(--pa-muted);
+  font-size: 13px;
+  background: var(--pa-panel-soft);
+}
+
 /* 对话轮次导航：贴近侧边菜单栏的横向线条，悬停变长并弹出浅色 tooltip 显示用户输入预览 */
 .pa-turn-nav {
   position: absolute;
@@ -734,6 +753,9 @@ select {
 }
 
 .pa-welcome-logo {
+  display: block;
+  flex: 0 0 auto;
+  object-fit: contain;
   width: 58px;
   height: 58px;
   margin-bottom: 26px;
@@ -929,14 +951,73 @@ select {
   background: var(--pa-panel);
 }
 
-/* 任务完成后显示在消息内容底部的耗时 */
-.pa-message-duration {
+/* antd Image 包裹层：块级展示避免基线间隙，预览遮罩圆角与图片一致 */
+.pa-message-images .ant-image {
+  display: block;
+}
+
+.pa-message-images .ant-image-mask {
+  border-radius: 8px;
+}
+
+/* Markdown 内的图片：限制最大宽度避免溢出，支持点击放大预览 */
+.pa-message-content .ant-image {
+  display: inline-block;
+  max-width: 100%;
+  vertical-align: middle;
+}
+
+.pa-message-content .ant-image img,
+.pa-message-content img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+}
+
+.pa-message-content .ant-image-mask {
+  border-radius: 6px;
+}
+
+/* 任务完成后显示在消息内容底部的指标栏（复制 + 结束时间 + 耗时 + 首 token + 速度） */
+.pa-message-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
   margin-top: 0.72em;
   padding-top: 0.6em;
   border-top: 1px dashed var(--pa-border);
   color: var(--pa-faint);
   font-size: 12px;
   line-height: 1.4;
+}
+
+.pa-message-meta-item {
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+}
+
+.pa-message-meta-sep {
+  color: var(--pa-faint);
+  opacity: 0.55;
+}
+
+.pa-message-copy.ant-btn {
+  width: 22px;
+  min-width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--pa-border);
+  border-radius: 6px;
+  color: var(--pa-muted);
+  background: var(--pa-panel);
+  box-shadow: 0 4px 10px var(--pa-shadow);
+}
+
+.pa-message-copy.ant-btn:hover {
+  color: var(--pa-accent);
+  background: var(--pa-panel);
 }
 
 /* Markdown 排版：对话内容与计划文档（方案文件）共用同一套样式，保证展示一致 */
@@ -1436,8 +1517,8 @@ select {
 
 .pa-scroll-latest {
   position: absolute;
+  right: max(18px, calc((100% - 860px) / 2));
   bottom: calc(100% + 10px);
-  left: 50%;
   z-index: 4;
   display: flex;
   width: 32px;
@@ -1445,7 +1526,6 @@ select {
   align-items: center;
   justify-content: center;
   padding: 0;
-  transform: translateX(-50%);
   border-color: var(--pa-border-strong);
   border-radius: 999px;
   box-shadow: 0 8px 28px var(--pa-shadow);
@@ -1750,11 +1830,18 @@ select {
   gap: 8px;
 }
 
-.pa-composer-left,
+.pa-composer-left {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+
 .pa-composer-right {
   display: flex;
   min-width: 0;
   align-items: center;
+  justify-content: flex-end;
   gap: 6px;
 }
 
@@ -1841,17 +1928,181 @@ select {
   white-space: nowrap;
 }
 
-.pa-composer-right {
-  justify-content: flex-end;
+/* 模型/推理等级选择：输入框内摘要按钮（截图样式），点击弹出列表式浮层 */
+.pa-model-summary {
+  display: inline-flex;
+  max-width: min(320px, 42vw);
+  min-width: 0;
+  min-height: 28px;
+  padding: 4px 8px 5px 10px;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--pa-muted);
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1.4;
+  cursor: pointer;
+  transition:
+    background 140ms,
+    border-color 140ms;
 }
 
-.pa-model-select {
-  min-width: 180px;
-  max-width: min(480px, 50vw);
+.pa-model-summary:hover:not(:disabled) {
+  border-color: var(--pa-border);
+  background: var(--pa-panel-soft);
 }
 
-.pa-reasoning-select {
-  width: 78px;
+.pa-model-summary:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.pa-model-summary-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pa-model-summary-effort {
+  margin-left: 4px;
+  color: var(--pa-faint);
+}
+
+.pa-model-summary-arrow {
+  flex: 0 0 auto;
+  color: var(--pa-faint);
+  font-size: 9px;
+}
+
+/* 模型/推理等级浮层：圆角卡片，列表式参数行 + 二级选项列表 */
+.pa-model-picker-overlay.ant-dropdown {
+  padding: 0;
+  border: 1px solid var(--pa-border-strong);
+  border-radius: 12px;
+  background: var(--pa-panel);
+  box-shadow: 0 18px 60px var(--pa-shadow);
+}
+
+.pa-model-picker {
+  display: flex;
+  min-width: 260px;
+  max-width: min(360px, 80vw);
+  flex-direction: column;
+  padding: 6px;
+}
+
+.pa-model-picker-row {
+  display: flex;
+  width: 100%;
+  padding: 9px 10px;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--pa-text);
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.pa-model-picker-row:hover {
+  background: color-mix(in srgb, var(--pa-accent), transparent 92%);
+}
+
+.pa-model-picker-label {
+  flex: 0 0 auto;
+  color: var(--pa-muted);
+}
+
+.pa-model-picker-value {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--pa-text);
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pa-model-picker-chevron {
+  flex: 0 0 auto;
+  color: var(--pa-faint);
+  font-size: 10px;
+}
+
+.pa-model-picker-back {
+  display: flex;
+  width: 100%;
+  margin-bottom: 4px;
+  padding: 6px 10px 8px;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  border-bottom: 1px solid var(--pa-border);
+  background: transparent;
+  color: var(--pa-text);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+}
+
+.pa-model-picker-back:hover {
+  color: var(--pa-accent);
+}
+
+.pa-model-picker-group-label {
+  padding: 6px 10px 2px;
+  color: var(--pa-faint);
+  font-size: 10px;
+}
+
+.pa-model-picker-option {
+  display: flex;
+  width: 100%;
+  padding: 7px 10px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--pa-text);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.pa-model-picker-option:hover {
+  background: color-mix(in srgb, var(--pa-accent), transparent 92%);
+}
+
+.pa-model-picker-option-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 选中项：右侧黑色对勾（截图样式），不改变文字颜色 */
+.pa-model-picker-check {
+  flex: 0 0 auto;
+  color: var(--pa-text);
+  font-size: 12px;
+}
+
+.pa-model-picker-empty {
+  padding: 18px 10px;
+  color: var(--pa-faint);
+  font-size: 12px;
+  text-align: center;
 }
 
 /* 执行中的停止按钮：主题色圆形 + 面板色空心矩形（呼吸光晕 + 双脉冲扩散环，强化「正在执行」的感知） */
@@ -1952,14 +2203,30 @@ select {
 
 .pa-plan-heading {
   display: flex;
+  min-width: 0;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 10px;
+}
+
+.pa-plan-heading strong {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  color: var(--pa-text);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .pa-plan-heading span {
-  color: var(--pa-muted);
-  font-size: 10px;
+  flex: 0 0 auto;
+  color: var(--pa-accent);
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 
 .pa-inspector-list {
@@ -1995,24 +2262,80 @@ select {
   line-height: 1.5;
 }
 
-.pa-plan-step.pending {
+/* 执行计划：步骤列表排版（去掉硬分隔线，改为悬停高亮，文字层次区分主/次） */
+.pa-plan-steps {
+  margin-top: 4px;
+}
+
+.pa-plan-steps .pa-inspector-list-item {
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  margin: 0 -8px;
+  border-radius: 8px;
+  border-block-end: 0;
+  transition:
+    background-color 140ms ease,
+    opacity 140ms ease;
+}
+
+.pa-plan-steps .pa-inspector-list-item + .pa-inspector-list-item {
+  margin-top: 2px;
+}
+
+.pa-plan-steps .pa-inspector-list-item:hover {
+  background: var(--pa-panel-soft);
+}
+
+.pa-plan-steps .pa-inspector-list-copy {
+  display: flex;
+  min-height: 24px;
+  align-items: center;
+}
+
+.pa-plan-steps .pa-inspector-list-title {
+  color: var(--pa-text);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.5;
+}
+
+/* 待办步骤：文字弱化为次级色 */
+.pa-plan-steps .pa-inspector-list-item.pending .pa-inspector-list-title {
   color: var(--pa-muted);
+  font-weight: 400;
+}
+
+/* 步骤状态图标：待办/当前为数字圆圈，完成/失败为 antd 状态图标 */
+.pa-plan-step {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.pa-plan-step .anticon {
+  font-size: 15px;
+}
+
+.pa-plan-step.pending {
+  color: var(--pa-faint);
   background: var(--pa-panel-soft);
 }
 
 .pa-plan-step.in_progress {
-  color: var(--pa-text);
+  color: var(--pa-panel);
   background: var(--pa-accent);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--pa-accent), transparent 55%);
 }
 
 .pa-plan-step.completed {
-  color: #fff;
-  background: var(--pa-accent);
+  color: #52c41a;
+  background: transparent;
 }
 
 .pa-plan-step.failed {
-  color: #fff;
-  background: var(--pa-danger);
+  color: var(--pa-danger);
+  background: transparent;
 }
 
 .pa-metadata-list {
@@ -2171,6 +2494,16 @@ select {
   height: 44px;
   object-fit: cover;
   border-radius: 5px;
+  transition: filter 0.15s ease;
+}
+
+/* 输入框缩略图：无遮罩，hover 轻微压暗提示可点击放大预览 */
+.pa-composer-image .ant-image {
+  cursor: zoom-in;
+}
+
+.pa-composer-image .ant-image:hover img {
+  filter: brightness(0.9);
 }
 
 .pa-composer-image > span {
@@ -2447,14 +2780,19 @@ select {
 .pa-model-list-head,
 .pa-model-row {
   display: grid;
-  grid-template-columns: minmax(140px, 1.4fr) minmax(110px, 0.8fr) minmax(110px, 0.8fr) 32px;
+  grid-template-columns: minmax(110px, 1.4fr) minmax(90px, 0.8fr) minmax(90px, 0.8fr) minmax(32px, auto);
   gap: 8px;
   align-items: center;
 }
 
 .pa-model-list-ollama .pa-model-list-head,
 .pa-model-list-ollama .pa-model-row {
-  grid-template-columns: minmax(130px, 1.3fr) minmax(100px, 0.75fr) minmax(100px, 0.75fr) 68px 32px;
+  grid-template-columns: minmax(96px, 1.3fr) minmax(72px, 0.75fr) minmax(72px, 0.75fr) 64px minmax(96px, 1.2fr) minmax(32px, auto);
+}
+
+/* 允许 grid 子项收缩，避免内容固有宽度把删除按钮列挤出可视区域 */
+.pa-model-row > * {
+  min-width: 0;
 }
 
 .pa-model-list-head {
@@ -2711,6 +3049,10 @@ select {
     padding-inline: 12px;
   }
 
+  .pa-scroll-latest {
+    right: 12px;
+  }
+
   .pa-permission-floating {
     right: 12px;
     left: 12px;
@@ -2744,16 +3086,12 @@ select {
     min-height: calc(100vh - 220px);
   }
 
-  .pa-debug-metadata,
-  .pa-debug-json-grid {
-    grid-template-columns: 1fr;
-  }
-
   .pa-debug-metadata {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .pa-debug-json-grid {
+    grid-template-columns: 1fr;
     overflow-y: auto;
   }
 
@@ -2784,6 +3122,12 @@ select {
 
   .pa-settings-content {
     padding: 18px 16px;
+  }
+
+  /* 窄屏：模型配置行允许横向滚动，避免删除按钮被裁切 */
+  .pa-model-list {
+    overflow-x: auto;
+    padding-bottom: 2px;
   }
 
   .pa-provider-card .ant-card-body,
@@ -2854,6 +3198,10 @@ select {
     padding: 0 8px 8px;
   }
 
+  .pa-scroll-latest {
+    right: 8px;
+  }
+
   .pa-permission-floating {
     right: 8px;
     left: 8px;
@@ -2897,13 +3245,9 @@ select {
     flex: 1;
   }
 
-  .pa-model-select {
-    min-width: 0;
+  .pa-model-summary {
+    max-width: none;
     flex: 1;
-  }
-
-  .pa-reasoning-select {
-    width: 76px;
   }
 }
 
@@ -3000,10 +3344,6 @@ select {
 }
 .pa-settings-general .ant-form-item:last-child {
   margin-bottom: 0;
-}
-/* Settings general panel */
-.pa-settings-general .pa-settings-heading {
-  margin-bottom: 16px;
 }
 .pa-settings-general {
   display: flex;

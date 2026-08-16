@@ -196,10 +196,16 @@ export class SubAgentManager {
         ),
       });
 
+      // 最近一次模型请求的输入 token 数（API 上报口径）：由下方 AgentLoop 的
+      // onModelCallEnd 钩子持续更新，供 TokenBudget 压缩判断使用，与主对话
+      // 上下文仪表盘同一口径；首轮尚无请求时返回 undefined，TokenBudget 兜底
+      // 使用字符估算。
+      const lastInputTokensRef: { current: number | undefined } = { current: undefined };
       const tokenBudget = new TokenBudget(
         config.contextTokens ?? 100000,
         8192,
         createLlmContextSummarizer(config.provider, this.prompts),
+        () => lastInputTokensRef.current,
       );
       const maxTurns = config.maxTurns ?? 50;
 
@@ -212,6 +218,11 @@ export class SubAgentManager {
         tokenBudget,
         toolDefinitions,
         maxTurns,
+        onModelCallEnd: (call) => {
+          if (call.status === 'completed' && call.response.usage) {
+            lastInputTokensRef.current = call.response.usage.inputTokens;
+          }
+        },
         executeTool: async (name, input, signal) => {
           if (!allowedTools.has(name)) {
             return {
