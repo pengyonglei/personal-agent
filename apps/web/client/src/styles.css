@@ -2306,15 +2306,12 @@ select {
   font-weight: 400;
 }
 
-/* 步骤状态图标：待办/当前为数字圆圈，完成/失败为 antd 状态图标 */
+/* 步骤状态图标：待办/当前为数字圆圈，完成/失败为 antd 状态图标。
+   数字与图标统一 14px 保证视觉大小一致；数字不加粗（antd 图标继承同字号）。 */
 .pa-plan-step {
   flex: 0 0 auto;
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.pa-plan-step .anticon {
-  font-size: 15px;
+  font-size: 14px;
+  font-weight: 400;
 }
 
 .pa-plan-step.pending {

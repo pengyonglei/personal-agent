@@ -196,8 +196,13 @@ export class AgentLoop {
         // 任务执行中通过 inject_user_message 注入的补充消息在本轮开始前写入历史，
         // 本轮模型调用即可看到（作为 user 消息引导模型思考方向）。
         const injectedMessages = this.config.drainPendingUserMessages?.() ?? [];
-        for (const injectedText of injectedMessages) {
-          this.config.contextAssembler.addMessage({ role: 'user', content: injectedText });
+        if (injectedMessages.length > 0) {
+          for (const injectedText of injectedMessages) {
+            this.config.contextAssembler.addMessage({ role: 'user', content: injectedText });
+          }
+          // 通知前端：注入消息已写入历史、模型即将在本轮回应它，
+          // 前端应开启新的一轮回复展示（而不是合并进上一轮回复）。
+          yield { type: 'inject_user_message_applied', turnNumber: this.turnCount };
         }
 
         // ---- 3a. 检查 Token 预算，必要时压缩历史 ----
@@ -403,6 +408,12 @@ export class AgentLoop {
                         content: injectedText,
                       });
                     }
+                    // 通知前端：注入消息已写入历史，下一轮模型将回应它，
+                    // 前端应开启新的一轮回复展示。
+                    yield {
+                      type: 'inject_user_message_applied',
+                      turnNumber: this.turnCount,
+                    };
                     // 标记注入延续：跳过下方 3e 收尾（assistant 消息/turn_end 已产出）
                     injectedTurnPending = true;
                     break;

@@ -196,6 +196,11 @@ export type ServerMessage =
   | { type: 'session_changed'; sessionId: string; isNew: boolean }
   | { type: 'busy'; busy: boolean; taskId?: string }
   | { type: 'turn_start'; turnNumber: number; taskId?: string }
+  /**
+   * 任务执行中注入的用户消息（inject_user_message）已被写入对话历史，模型
+   * 将在当前/下一轮开始回应它。前端应开启新的一轮回复展示。
+   */
+  | { type: 'inject_user_message_applied'; turnNumber: number; taskId?: string }
   | { type: 'llm_call_start'; call: ModelCallDebugStart; taskId?: string }
   | { type: 'llm_call_end'; call: ModelCallDebugEnd; taskId?: string }
   | { type: 'thinking_delta'; thinking: string; turnNumber: number; taskId?: string }

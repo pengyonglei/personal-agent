@@ -2010,6 +2010,10 @@ When you need the user to make a decision, call ask_user with the question and u
       case 'turn_start':
         this.emit(event);
         break;
+      case 'inject_user_message_applied':
+        // 注入的用户消息已写入历史：转发给前端开启新的一轮回复展示。
+        this.emit(event);
+        break;
       case 'assistant_thinking_delta':
         this.emit({
           type: 'thinking_delta',

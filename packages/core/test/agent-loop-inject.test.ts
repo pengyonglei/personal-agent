@@ -137,6 +137,12 @@ test('injected user messages are drained at the next turn and carried into the m
     userTexts.some((text) => text.includes('请重点检查测试覆盖')),
     '第二次模型调用应携带注入的补充消息',
   );
+  // 注入消息写入历史后应产出 inject_user_message_applied 事件（前端据此开启新的一轮回复展示）
+  const appliedEvents = events.filter(
+    (event) => event.type === 'inject_user_message_applied',
+  ) as Extract<AgentEvent, { type: 'inject_user_message_applied' }>[];
+  assert.equal(appliedEvents.length, 1, '注入消息生效时应恰好产出一次 inject_user_message_applied 事件');
+  assert.equal(appliedEvents[0].turnNumber, 2, 'applied 事件应落在注入消息被吸取的那一轮');
   const done = events.find((event) => event.type === 'done') as Extract<
     AgentEvent,
     { type: 'done' }
@@ -197,6 +203,12 @@ test('injection arriving during the final end_turn keeps the loop running instea
     userTexts.some((text) => text.includes('请再说明一下影响范围')),
     '延续轮次的模型调用应携带注入消息',
   );
+  // end_turn 后吸取注入消息延续循环：同样应产出 inject_user_message_applied 事件
+  const appliedEvents = events.filter(
+    (event) => event.type === 'inject_user_message_applied',
+  ) as Extract<AgentEvent, { type: 'inject_user_message_applied' }>[];
+  assert.equal(appliedEvents.length, 1, '注入消息生效时应恰好产出一次 inject_user_message_applied 事件');
+  assert.equal(appliedEvents[0].turnNumber, 1, 'end_turn 分支吸取注入消息时 applied 事件落在当前轮');
   const done = events.filter((event) => event.type === 'done');
   assert.equal(done.length, 1, '最终只应产出一次 done 事件');
   assert.equal((done[0] as Extract<AgentEvent, { type: 'done' }>).totalTurns, 2);

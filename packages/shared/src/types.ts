@@ -297,6 +297,11 @@ export interface ModelInfo {
 
 export type AgentEvent =
   | { type: 'turn_start'; turnNumber: number }
+  /**
+   * 执行期间注入的用户消息已被吸取并写入对话历史，模型将在当前/下一轮
+   * 开始回应它。前端可据此开启新的一轮回复展示（而不是合并进上一轮回复）。
+   */
+  | { type: 'inject_user_message_applied'; turnNumber: number }
   | { type: 'assistant_thinking_delta'; thinkingDelta: string; turnNumber: number }
   | { type: 'assistant_text_delta'; textDelta: string; turnNumber: number }
   | {

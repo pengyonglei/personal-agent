@@ -1892,6 +1892,22 @@ function AgentWorkspace({
         }
         case 'turn_start':
           break;
+        case 'inject_user_message_applied': {
+          // 任务执行中注入的用户消息已被服务端写入历史、模型即将回应它。
+          // 递增 response sequence，让后续 thinking_delta / assistant_delta /
+          // tool_start 等事件定位到新的一轮回复气泡（而不是合并进上一轮回复），
+          // 与刷新后 history 重放（注入 user 消息后的 assistant 回复为独立消息）保持一致。
+          const eventTaskId = incoming.taskId ?? stateRef.current.activeTaskId;
+          if (eventTaskId && eventTaskId !== stateRef.current.activeTaskId) {
+            const data = taskDataRef.current[eventTaskId] ?? emptyTaskSnapshot();
+            data.responseSeq += 1;
+            taskDataRef.current[eventTaskId] = data;
+            break;
+          }
+          responseSequenceRef.current += 1;
+          activeResponseSequenceRef.current = responseSequenceRef.current;
+          break;
+        }
         case 'context_compacting': {
           const eventTaskId = incoming.taskId ?? stateRef.current.activeTaskId;
           if (!eventTaskId || eventTaskId === stateRef.current.activeTaskId) {
@@ -8161,6 +8177,8 @@ function Inspector({
                       <CheckCircleFilled />
                     ) : step.status === 'failed' ? (
                       <CloseCircleFilled />
+                    ) : step.status === 'in_progress' ? (
+                      <LoadingOutlined spin />
                     ) : (
                       step.order
                     )}
