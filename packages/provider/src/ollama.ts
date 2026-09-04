@@ -9,6 +9,7 @@ import {
   type UnifiedContentBlock,
   type UnifiedMessage,
   type UnifiedResponse,
+  type UsageInfo,
   type UnifiedStreamEvent,
   type UnifiedToolDefinition,
 } from '@personal-agent/shared';
@@ -27,6 +28,8 @@ interface OllamaChatResponse {
   done?: boolean;
   done_reason?: string;
   prompt_eval_count?: number;
+  /** 命中 KV 缓存的 prompt token 数（较新 Ollama 版本才有，旧版本不返回）。 */
+  prompt_eval_cached_count?: number;
   eval_count?: number;
 }
 
@@ -104,7 +107,7 @@ export class OllamaProvider extends BaseLLMProvider {
 
     let buffer = '';
     let toolCount = 0;
-    let usage = { inputTokens: 0, outputTokens: 0 };
+    let usage: UsageInfo = { inputTokens: 0, outputTokens: 0, cacheHitTokens: null };
     for await (const chunk of response.body.pipeThrough(new TextDecoderStream())) {
       buffer += chunk;
       const lines = buffer.split('\n');
@@ -135,6 +138,7 @@ export class OllamaProvider extends BaseLLMProvider {
           usage = {
             inputTokens: event.prompt_eval_count ?? 0,
             outputTokens: event.eval_count ?? 0,
+            cacheHitTokens: event.prompt_eval_cached_count ?? null,
           };
           yield {
             type: 'message_end',
@@ -160,6 +164,7 @@ export class OllamaProvider extends BaseLLMProvider {
           usage: {
             inputTokens: event.prompt_eval_count ?? usage.inputTokens,
             outputTokens: event.eval_count ?? usage.outputTokens,
+            cacheHitTokens: event.prompt_eval_cached_count ?? null,
           },
         };
       }
@@ -216,6 +221,7 @@ export class OllamaProvider extends BaseLLMProvider {
       usage: {
         inputTokens: result.prompt_eval_count ?? 0,
         outputTokens: result.eval_count ?? 0,
+        cacheHitTokens: result.prompt_eval_cached_count ?? null,
       },
     };
   }

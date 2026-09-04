@@ -51,6 +51,8 @@ export class SessionManager {
         tokensUsedByModel: {},
         lastInputTokens: 0,
         lastInputTokensByModel: {},
+        lastOutputTokens: 0,
+        lastOutputTokensByModel: {},
         lastCacheHitTokens: 0,
         lastCacheHitTokensByModel: {},
       },
@@ -177,6 +179,43 @@ export class SessionManager {
     );
   }
 
+  /** Record the output token count of the most recent model request. */
+  setLastOutputTokens(output: number): void {
+    const key = this.modelKey();
+    this.currentSession.metadata.lastOutputTokens = output;
+    this.currentSession.metadata.lastOutputTokensByModel = {
+      ...(this.currentSession.metadata.lastOutputTokensByModel ?? {}),
+      [key]: output,
+    };
+    this.currentSession.updatedAt = new Date();
+  }
+
+  /**
+   * Output tokens of the most recent model request (0 if none yet).
+   * 与 getLastInputTokens 同口径：按当前模型返回。
+   */
+  getLastOutputTokens(): number {
+    const key = this.modelKey();
+    return (
+      this.currentSession.metadata.lastOutputTokensByModel?.[key] ??
+      this.currentSession.metadata.lastOutputTokens ??
+      0
+    );
+  }
+
+  /**
+   * 会话「已使用 token 数量」= 最近一次模型请求的
+   * `usage.inputTokens + usage.outputTokens`（用户定义的统计口径）。
+   *
+   * 各供应商返回的 token 结果不同：Ollama 本地部署的模型只分别上报
+   * prompt_eval_count / eval_count（思考 token 计入输出），本地思考模型的
+   * 输出 token 可能远超输入，只计输入会严重低估已用 token，必须两者相加。
+   * 该值即上下文仪表盘展示的 usedTokens 与 TokenBudget 压缩判断的来源。
+   */
+  getLastUsedTokens(): number {
+    return this.getLastInputTokens() + this.getLastOutputTokens();
+  }
+
   /** Record the cache-hit input token count of the most recent model request. */
   setLastCacheHitTokens(input: number): void {
     const key = this.modelKey();
@@ -233,6 +272,8 @@ export class SessionManager {
         tokensUsedByModel: snapshot.metadata.tokensUsedByModel ?? {},
         lastInputTokens: snapshot.metadata.lastInputTokens ?? 0,
         lastInputTokensByModel: snapshot.metadata.lastInputTokensByModel ?? {},
+        lastOutputTokens: snapshot.metadata.lastOutputTokens ?? 0,
+        lastOutputTokensByModel: snapshot.metadata.lastOutputTokensByModel ?? {},
         lastCacheHitTokens: snapshot.metadata.lastCacheHitTokens ?? 0,
         lastCacheHitTokensByModel: snapshot.metadata.lastCacheHitTokensByModel ?? {},
       },
@@ -277,6 +318,8 @@ export class SessionManager {
           tokensUsedByModel: raw.metadata.tokensUsedByModel ?? {},
           lastInputTokens: raw.metadata.lastInputTokens ?? 0,
           lastInputTokensByModel: raw.metadata.lastInputTokensByModel ?? {},
+          lastOutputTokens: raw.metadata.lastOutputTokens ?? 0,
+          lastOutputTokensByModel: raw.metadata.lastOutputTokensByModel ?? {},
           lastCacheHitTokens: raw.metadata.lastCacheHitTokens ?? 0,
           lastCacheHitTokensByModel: raw.metadata.lastCacheHitTokensByModel ?? {},
         },

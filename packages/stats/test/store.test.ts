@@ -111,8 +111,8 @@ test('getBySession filters by session', { skip: !available }, () => {
 test('querySummary aggregates counts/tokens/duration', { skip: !available }, () => {
   const { store, dir } = makeStore();
   const base = Date.now();
-  store.insert(sampleRecord({ timestamp: base, status: 'completed', inputTokens: 100, outputTokens: 50, durationMs: 1000 }));
-  store.insert(sampleRecord({ timestamp: base + 1000, status: 'error', inputTokens: 200, outputTokens: 100, durationMs: 3000 }));
+  store.insert(sampleRecord({ timestamp: base, status: 'completed', inputTokens: 100, outputTokens: 50, durationMs: 1000, cacheHitInputTokens: 40 }));
+  store.insert(sampleRecord({ timestamp: base + 1000, status: 'error', inputTokens: 200, outputTokens: 100, durationMs: 3000, cacheReadInputTokens: 30 }));
   store.insert(sampleRecord({ timestamp: base + 2000, status: 'interrupted', inputTokens: 300, outputTokens: 0, durationMs: 500 }));
 
   const summary = store.querySummary(base - 1, base + 3000);
@@ -121,6 +121,8 @@ test('querySummary aggregates counts/tokens/duration', { skip: !available }, () 
   assert.equal(summary.interruptedCount, 1);
   assert.equal(summary.inputTokens, 600);
   assert.equal(summary.outputTokens, 150);
+  // 缓存命中 = cache_hit_input_tokens + cache_read_input_tokens（各供应商分列存储）。
+  assert.equal(summary.cacheHitInputTokens, 70);
   assert.equal(summary.avgDurationMs, 1500);
 
   // Out-of-window records are excluded
@@ -330,7 +332,60 @@ test('legacy schema is migrated to schema v4 with data preserved and renumbered'
   assert.match(row.sql, /模型请求统计明细/);
   assert.match(row.sql, /-- 输入 token 数/);
   assert.match(row.sql, /response\s+TEXT/);
+  assert.match(row.sql, /cache_hit_input_tokens\s+INTEGER/);
   inspectDb.close();
+  store.close();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('v4 schema is upgraded in place by adding cache_hit_input_tokens', { skip: !available }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pa-stats-'));
+  const dbPath = join(dir, 'v4.db');
+  const ctor = loadDatabaseSync();
+  assert.ok(ctor);
+  const v4Db = new ctor(dbPath);
+  // v4 形态：已有 response JSON 列与两个缓存列，但无 cache_hit_input_tokens。
+  v4Db.exec(
+    `CREATE TABLE model_requests (
+       id INTEGER PRIMARY KEY AUTOINCREMENT, created_at INTEGER NOT NULL,
+       session_id TEXT, timestamp INTEGER NOT NULL, provider TEXT NOT NULL,
+       model TEXT NOT NULL, turn_number INTEGER, status TEXT NOT NULL,
+       stop_reason TEXT, duration_ms INTEGER,
+       input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
+       cache_creation_input_tokens INTEGER, cache_read_input_tokens INTEGER,
+       request_messages TEXT, request_tools TEXT, request_options TEXT,
+       response TEXT, error TEXT
+     );`,
+  );
+  v4Db.prepare(
+    `INSERT INTO model_requests (created_at, timestamp, provider, model, status, input_tokens, output_tokens, cache_read_input_tokens)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(1000, 1000, 'ollama', 'qwen3:8b', 'completed', 12, 4, 0);
+  v4Db.close();
+
+  const store = new UsageStore({ dbPath });
+  store.initialize();
+
+  // 旧数据保留；新列对旧行为 NULL。
+  const [record] = store.getRecent(1);
+  assert.equal(record.inputTokens, 12);
+  assert.equal(record.cacheHitInputTokens, null);
+  assert.equal(record.cacheReadInputTokens, 0);
+
+  // 新插入可以写入缓存命中；汇总为两列之和（旧行 0 + 新行 10）。
+  store.insert(
+    sampleRecord({
+      timestamp: 2000,
+      provider: 'ollama',
+      model: 'qwen3:8b',
+      inputTokens: 20,
+      outputTokens: 6,
+      cacheHitInputTokens: 10,
+    }),
+  );
+  const summary = store.querySummary(0, 10 * 365 * 24 * 60 * 60 * 1000);
+  assert.equal(summary.count, 2);
+  assert.equal(summary.cacheHitInputTokens, 10);
   store.close();
   rmSync(dir, { recursive: true, force: true });
 });

@@ -164,6 +164,19 @@ function mergeEnvVars(config: AppConfig): AppConfig {
         'doubao-seed-1-6-250615',
         'doubao-seed-thinking-250615',
       ];
+    } else if (path === 'zhipu_api_key') {
+      result.providers.zhipu = result.providers.zhipu || {};
+      result.providers.zhipu.apiKey = value;
+      result.providers.zhipu.baseURL =
+        result.providers.zhipu.baseURL || 'https://open.bigmodel.cn/api/paas/v4';
+      result.providers.zhipu.defaultModel = result.providers.zhipu.defaultModel || 'glm-4.6';
+      result.providers.zhipu.models = result.providers.zhipu.models || [
+        'glm-4.6',
+        'glm-4.5',
+        'glm-4.5-air',
+        'glm-4.5-flash',
+      ];
+      result.providers.zhipu.thinkingEffort = result.providers.zhipu.thinkingEffort || 'high';
     } else if (path === 'model') {
       // Set as default on the active provider if not already set
       // The CLI layer picks which provider this applies to

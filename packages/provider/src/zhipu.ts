@@ -22,101 +22,112 @@ import {
 } from './openai-compat';
 
 // ---------------------------------------------------------------------------
-// Volcano Ark (火山方舟) model definitions
+// Zhipu AI (智谱) model definitions
 // ---------------------------------------------------------------------------
-// The platform is OpenAI-compatible (https://ark.cn-beijing.volces.com/api/v3).
-// Models are referenced either by inference endpoint id (ep-xxxx) or by model
-// name; both work interchangeably, so the list below is only a convenience —
-// any custom id can be configured.
+// The open platform is OpenAI-compatible (https://open.bigmodel.cn/api/paas/v4).
+// GLM-4.5/4.6 系列 hybrid-thinking models reply with `reasoning_content` in the
+// delta and take a boolean `thinking: { type: 'enabled' | 'disabled' }` request
+// field — no effort levels (unlike DeepSeek), so any non-off effort simply
+// enables thinking.
 
-const VOLCANO_ARK_MODELS: ModelInfo[] = [
+const ZHIPU_MODELS: ModelInfo[] = [
   {
-    id: 'doubao-seed-1-6-250615',
-    displayName: '豆包 Seed 1.6',
-    provider: 'volcano',
-    contextWindow: 256_000,
-    maxOutputTokens: 16_384,
-    features: [
-      ProviderFeature.Streaming,
-      ProviderFeature.ToolCalling,
-      ProviderFeature.ParallelToolCalls,
-    ],
-  },
-  {
-    id: 'doubao-1-5-pro-32k-250115',
-    displayName: '豆包 1.5 Pro 32K',
-    provider: 'volcano',
-    contextWindow: 32_000,
-    maxOutputTokens: 4_096,
-    features: [
-      ProviderFeature.Streaming,
-      ProviderFeature.ToolCalling,
-      ProviderFeature.ParallelToolCalls,
-    ],
-  },
-  {
-    id: 'doubao-seed-thinking-250615',
-    displayName: '豆包 Seed Thinking',
-    provider: 'volcano',
-    contextWindow: 256_000,
-    maxOutputTokens: 16_384,
+    id: 'glm-4.6',
+    displayName: 'GLM-4.6',
+    provider: 'zhipu',
+    contextWindow: 200_000,
+    maxOutputTokens: 128_000,
     features: [
       ProviderFeature.Streaming,
       ProviderFeature.ToolCalling,
       ProviderFeature.ParallelToolCalls,
       ProviderFeature.Thinking,
+      ProviderFeature.PromptCaching,
     ],
+    pricing: {
+      inputPer1k: 0.0006,
+      outputPer1k: 0.0022,
+    },
   },
   {
-    id: 'deepseek-v3-250324',
-    displayName: 'DeepSeek V3（火山方舟）',
-    provider: 'volcano',
-    contextWindow: 64_000,
-    maxOutputTokens: 8_192,
-    features: [
-      ProviderFeature.Streaming,
-      ProviderFeature.ToolCalling,
-      ProviderFeature.ParallelToolCalls,
-    ],
-  },
-  {
-    id: 'deepseek-r1-250528',
-    displayName: 'DeepSeek R1（火山方舟）',
-    provider: 'volcano',
-    contextWindow: 64_000,
-    maxOutputTokens: 8_192,
+    id: 'glm-4.5',
+    displayName: 'GLM-4.5',
+    provider: 'zhipu',
+    contextWindow: 131_072,
+    maxOutputTokens: 98_304,
     features: [
       ProviderFeature.Streaming,
       ProviderFeature.ToolCalling,
       ProviderFeature.ParallelToolCalls,
       ProviderFeature.Thinking,
+      ProviderFeature.PromptCaching,
     ],
+    pricing: {
+      inputPer1k: 0.0006,
+      outputPer1k: 0.0022,
+    },
+  },
+  {
+    id: 'glm-4.5-air',
+    displayName: 'GLM-4.5-Air',
+    provider: 'zhipu',
+    contextWindow: 131_072,
+    maxOutputTokens: 98_304,
+    features: [
+      ProviderFeature.Streaming,
+      ProviderFeature.ToolCalling,
+      ProviderFeature.ParallelToolCalls,
+      ProviderFeature.Thinking,
+      ProviderFeature.PromptCaching,
+    ],
+    pricing: {
+      inputPer1k: 0.0001,
+      outputPer1k: 0.0003,
+    },
+  },
+  {
+    id: 'glm-4.5-flash',
+    displayName: 'GLM-4.5-Flash',
+    provider: 'zhipu',
+    contextWindow: 131_072,
+    maxOutputTokens: 98_304,
+    features: [
+      ProviderFeature.Streaming,
+      ProviderFeature.ToolCalling,
+      ProviderFeature.ParallelToolCalls,
+      ProviderFeature.Thinking,
+      ProviderFeature.PromptCaching,
+    ],
+    pricing: {
+      inputPer1k: 0,
+      outputPer1k: 0,
+    },
   },
 ];
 
 const MODEL_DEFAULTS = {
-  contextWindow: 256_000,
-  maxOutputTokens: 16_384,
+  contextWindow: 131_072,
+  maxOutputTokens: 98_304,
   features: [
     ProviderFeature.Streaming,
     ProviderFeature.ToolCalling,
     ProviderFeature.ParallelToolCalls,
+    ProviderFeature.Thinking,
   ],
 } satisfies Omit<ModelInfo, 'id' | 'displayName' | 'provider'>;
 
-/** Volcano Ark extra request fields (OpenAI-compatible API). */
-interface VolcanoThinkingOptions {
+/** Zhipu extra request fields (OpenAI-compatible API). */
+interface ZhipuThinkingOptions {
   thinking: { type: 'enabled' | 'disabled' };
-  reasoning_effort?: 'low' | 'medium' | 'high';
 }
 
 // ---------------------------------------------------------------------------
 // Adapter
 // ---------------------------------------------------------------------------
 
-export class VolcanoArkProvider extends BaseLLMProvider {
-  readonly providerId = 'volcano';
-  readonly displayName = '火山方舟';
+export class ZhipuProvider extends BaseLLMProvider {
+  readonly providerId = 'zhipu';
+  readonly displayName = '智谱AI';
 
   private client: OpenAI | null = null;
   private readonly apiKey: string;
@@ -124,14 +135,14 @@ export class VolcanoArkProvider extends BaseLLMProvider {
 
   constructor(
     apiKey: string,
-    defaultModel = 'doubao-seed-1-6-250615',
-    baseURL = 'https://ark.cn-beijing.volces.com/api/v3',
+    defaultModel = 'glm-4.6',
+    baseURL = 'https://open.bigmodel.cn/api/paas/v4',
     configuredModels: Array<string | ModelConfig> = [],
   ) {
     super(defaultModel);
     this.apiKey = apiKey;
     this.baseURL = baseURL.replace(/\/+$/, '');
-    this.initModelList(VOLCANO_ARK_MODELS, configuredModels, (modelId, config) =>
+    this.initModelList(ZHIPU_MODELS, configuredModels, (modelId, config) =>
       createModelInfo(modelId, this.providerId, MODEL_DEFAULTS, config),
     );
   }
@@ -164,7 +175,7 @@ export class VolcanoArkProvider extends BaseLLMProvider {
     if (!this.client) throw new Error('Provider not initialized. Call initialize() first.');
 
     const model = options.model ?? this.currentModel;
-    const thinking = getVolcanoThinkingOptions(options.reasoningEffort);
+    const thinking = getZhipuThinkingOptions(options.reasoningEffort);
 
     const openaiMessages = buildOpenAIMessages(messages, options.systemPrompt, true);
     const openaiTools = buildOpenAITools(tools);
@@ -179,7 +190,7 @@ export class VolcanoArkProvider extends BaseLLMProvider {
         stream: true,
         stream_options: { include_usage: true },
         ...thinking,
-      } as OpenAI.Chat.ChatCompletionCreateParamsStreaming & VolcanoThinkingOptions);
+      } as OpenAI.Chat.ChatCompletionCreateParamsStreaming & ZhipuThinkingOptions);
 
       let accumulatedToolCalls: Map<number, { id: string; name: string; arguments: string }> =
         new Map();
@@ -248,6 +259,7 @@ export class VolcanoArkProvider extends BaseLLMProvider {
               ? {
                   inputTokens: usage.prompt_tokens,
                   outputTokens: usage.completion_tokens,
+                  cacheHitTokens: usage.prompt_tokens_details?.cached_tokens ?? null,
                 }
               : null,
           };
@@ -274,7 +286,7 @@ export class VolcanoArkProvider extends BaseLLMProvider {
     if (!this.client) throw new Error('Provider not initialized. Call initialize() first.');
 
     const model = options?.model ?? this.currentModel;
-    const thinking = getVolcanoThinkingOptions(options?.reasoningEffort);
+    const thinking = getZhipuThinkingOptions(options?.reasoningEffort);
 
     const openaiMessages = buildOpenAIMessages(messages, options?.systemPrompt, true);
     const openaiTools = tools && tools.length > 0 ? buildOpenAITools(tools) : undefined;
@@ -286,7 +298,7 @@ export class VolcanoArkProvider extends BaseLLMProvider {
       messages: openaiMessages,
       tools: openaiTools,
       ...thinking,
-    } as OpenAI.Chat.ChatCompletionCreateParamsNonStreaming & VolcanoThinkingOptions);
+    } as OpenAI.Chat.ChatCompletionCreateParamsNonStreaming & ZhipuThinkingOptions);
 
     const choice = response.choices[0];
     const content: UnifiedContentBlock[] = [];
@@ -329,6 +341,7 @@ export class VolcanoArkProvider extends BaseLLMProvider {
         ? {
             inputTokens: response.usage.prompt_tokens,
             outputTokens: response.usage.completion_tokens,
+            cacheHitTokens: response.usage.prompt_tokens_details?.cached_tokens ?? null,
           }
         : { inputTokens: 0, outputTokens: 0 },
     };
@@ -340,20 +353,15 @@ export class VolcanoArkProvider extends BaseLLMProvider {
 // -----------------------------------------------------------------------
 
 /**
- * Volcano Ark thinking control. Unlike DeepSeek, ordinary Doubao models
- * reject the `thinking` parameter, so it is only sent when the caller
- * explicitly enables thinking; 'off' (or no effort) leaves the model's
- * default behavior untouched.
- *
- * Effort mapping: 'low' | 'medium' | 'high' pass through; 'max' and 'xhigh'
- * are not exposed by the API and map to 'high'.
+ * Zhipu GLM-4.5/4.6 thinking is a pure on/off toggle — the API does not expose
+ * effort levels. 'off' explicitly disables thinking; any other effort (or the
+ * runtime default) enables it. When thinking is enabled the temperature
+ * parameter is omitted, mirroring the DeepSeek adapter (the API fixes sampling
+ * parameters in deep-thinking mode).
  */
-function getVolcanoThinkingOptions(
+function getZhipuThinkingOptions(
   effort: ReasoningEffort | undefined,
-): VolcanoThinkingOptions | undefined {
-  if (!effort || effort === 'off') return undefined;
-  return {
-    thinking: { type: 'enabled' },
-    reasoning_effort: effort === 'max' || effort === 'xhigh' ? 'high' : effort,
-  };
+): ZhipuThinkingOptions | undefined {
+  if (!effort) return undefined;
+  return { thinking: { type: effort === 'off' ? 'disabled' : 'enabled' } };
 }

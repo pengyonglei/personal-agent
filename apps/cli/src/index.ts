@@ -148,7 +148,7 @@ program
   .option('-m, --model <model>', 'Model to use')
   .option(
     '-p, --provider <provider>',
-    'Provider to use (anthropic, openai, ollama, deepseek, volcano, lmstudio)',
+    'Provider to use (anthropic, openai, ollama, deepseek, volcano, zhipu, lmstudio)',
   )
   .option('--max-turns <n>', 'Maximum turns per prompt', parseInt)
   .option('--temperature <n>', 'Temperature for generation', parseFloat)
@@ -396,9 +396,10 @@ program
       resolveCliContextWindow(provider),
       8192,
       createLlmContextSummarizer(provider, promptOverrides),
-      // 压缩判断使用 API 上报的最近一次模型请求输入 token 数（与 Web 端
-      // 上下文仪表盘同一口径），由 onModelCallEnd 钩子持续更新。
-      () => session.getLastInputTokens(),
+      // 压缩判断使用 API 上报的最近一次模型请求已使用 token 数（输入 + 输出，
+      // 与 Web 端上下文仪表盘同一口径：Ollama 本地模型只分别上报输入/输出，
+      // 必须两者相加），由 onModelCallEnd 钩子持续更新。
+      () => session.getLastUsedTokens(),
     );
     const planEngine = new PlanModeEngine();
     const planModeState: PlanModeState = { active: false };
@@ -440,10 +441,12 @@ program
       onModelCallStart: (call) => statsRecorder?.onModelCallStart(call),
       onModelCallEnd: (call) => {
         statsRecorder?.onModelCallEnd(call);
-        // 记录最近一次请求的输入 token 数，供 TokenBudget 压缩判断使用
-        // （与 Web 端上下文仪表盘一致的 API 上报口径）。
+        // 记录最近一次请求的已使用 token 数（输入 + 输出），供 TokenBudget
+        // 压缩判断使用（与 Web 端上下文仪表盘一致的 API 上报口径；
+        // Ollama 本地模型只分别上报输入/输出，必须两者相加）。
         if (call.status === 'completed' && call.response.usage) {
           session.setLastInputTokens(call.response.usage.inputTokens);
+          session.setLastOutputTokens(call.response.usage.outputTokens);
         }
       },
       provider,

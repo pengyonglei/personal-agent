@@ -12,6 +12,7 @@ export const PROVIDER_IDS = [
   'ollama',
   'deepseek',
   'volcano',
+  'zhipu',
   'lmstudio',
 ] as const;
 

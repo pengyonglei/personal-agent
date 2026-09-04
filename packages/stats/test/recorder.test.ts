@@ -46,7 +46,7 @@ function fakeEnd(overrides: Partial<ModelCallDebugEnd> = {}): ModelCallDebugEnd 
       thinking: 'thinking...',
       toolCalls: [{ id: 'tc1', name: 'read_file', arguments: { path: 'a.ts' } }],
       stopReason: 'tool_use',
-      usage: { inputTokens: 120, outputTokens: 40 },
+      usage: { inputTokens: 120, outputTokens: 40, cacheHitTokens: 96 },
     },
     ...overrides,
   };
@@ -83,6 +83,7 @@ test('completed call maps all fields', { skip: !available }, () => {
   assert.equal(record.timestamp, Date.parse('2026-08-04T10:00:00.000Z'));
   assert.equal(record.inputTokens, 120);
   assert.equal(record.outputTokens, 40);
+  assert.equal(record.cacheHitInputTokens, 96);
   assert.equal(record.response?.text, 'Hello there!');
   assert.equal(record.response?.thinking, 'thinking...');
   assert.deepEqual(record.response?.toolCalls, [

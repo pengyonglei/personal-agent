@@ -36,6 +36,8 @@ export interface ModelRequestRecord {
   outputTokens: number;
   cacheCreationInputTokens?: number | null;
   cacheReadInputTokens?: number | null;
+  /** 命中缓存的输入 token（Ollama prompt_eval_cached_count / DeepSeek prompt_cache_hit_tokens 等，可空）。 */
+  cacheHitInputTokens?: number | null;
   /** Full request messages (JSON-serialized). Only when recordPayloads=true. */
   requestMessages?: unknown;
   /** Tool definitions sent with the request. Only when recordPayloads=true. */
@@ -62,6 +64,8 @@ export interface RequestSummary {
   interruptedCount: number;
   inputTokens: number;
   outputTokens: number;
+  /** 窗口内缓存命中输入 token 合计（含 Anthropic cache_read_input_tokens 与其他供应商的 cacheHitTokens）。 */
+  cacheHitInputTokens: number;
   avgDurationMs: number;
   costUsd?: number;
 }
@@ -72,6 +76,7 @@ export interface ModelAggregate {
   count: number;
   inputTokens: number;
   outputTokens: number;
+  cacheHitInputTokens: number;
   errorCount: number;
   costUsd?: number;
 }
@@ -82,4 +87,5 @@ export interface DayAggregate {
   count: number;
   inputTokens: number;
   outputTokens: number;
+  cacheHitInputTokens: number;
 }

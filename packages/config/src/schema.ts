@@ -124,7 +124,7 @@ const statsConfigSchema = z.object({
 /** 全局视觉模型配置，由 Web 设置面板管理。 */
 const visionConfigSchema = z.object({
   enabled: z.boolean().default(false),
-  provider: z.enum(['anthropic', 'openai', 'ollama', 'deepseek', 'volcano', 'lmstudio']).optional(),
+  provider: z.enum(['anthropic', 'openai', 'ollama', 'deepseek', 'volcano', 'zhipu', 'lmstudio']).optional(),
   model: z.string().min(1).max(256).optional(),
 });
 
@@ -132,7 +132,7 @@ export const appConfigSchema = z.object({
   providers: z
     .object({
       active: z
-        .enum(['anthropic', 'openai', 'ollama', 'deepseek', 'volcano', 'lmstudio'])
+        .enum(['anthropic', 'openai', 'ollama', 'deepseek', 'volcano', 'zhipu', 'lmstudio'])
         .optional(),
       anthropic: providerConfigSchema.optional(),
       openai: providerConfigSchema.optional(),
@@ -143,6 +143,7 @@ export const appConfigSchema = z.object({
         .optional(),
       deepseek: providerConfigSchema.optional(),
       volcano: providerConfigSchema.optional(),
+      zhipu: providerConfigSchema.optional(),
       lmstudio: providerConfigSchema
         .extend({
           baseURL: z.string().default('http://localhost:1234/v1'),

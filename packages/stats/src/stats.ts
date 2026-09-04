@@ -125,6 +125,13 @@ export function formatStatsText(
   lines.push(
     `Tokens: ${fmtNumber(summary.inputTokens)} in / ${fmtNumber(summary.outputTokens)} out`,
   );
+  if (summary.cacheHitInputTokens > 0) {
+    const pct =
+      summary.inputTokens > 0
+        ? ` (${((summary.cacheHitInputTokens / summary.inputTokens) * 100).toFixed(2)}% of input)`
+        : '';
+    lines.push(`Cache hit: ${fmtNumber(summary.cacheHitInputTokens)} tokens${pct}`);
+  }
   lines.push(`Avg duration: ${fmtDuration(summary.avgDurationMs)}  Est. cost: ${fmtCost(summary.costUsd)}`);
 
   if (byModel.length > 0) {
@@ -133,6 +140,7 @@ export function formatStatsText(
       lines.push(
         `  ${agg.provider}/${agg.model.padEnd(24)} ${fmtNumber(agg.count).padStart(5)} calls  ` +
           `${fmtNumber(agg.inputTokens)} in / ${fmtNumber(agg.outputTokens)} out  ` +
+          (agg.cacheHitInputTokens > 0 ? `cache ${fmtNumber(agg.cacheHitInputTokens)}  ` : '') +
           (agg.errorCount > 0 ? `${agg.errorCount} err  ` : '') +
           fmtCost(agg.costUsd),
       );
@@ -144,7 +152,8 @@ export function formatStatsText(
     for (const agg of byDay) {
       lines.push(
         `  ${agg.day}  ${fmtNumber(agg.count).padStart(5)} calls  ` +
-          `${fmtNumber(agg.inputTokens)} in / ${fmtNumber(agg.outputTokens)} out`,
+          `${fmtNumber(agg.inputTokens)} in / ${fmtNumber(agg.outputTokens)} out` +
+          (agg.cacheHitInputTokens > 0 ? `  cache ${fmtNumber(agg.cacheHitInputTokens)}` : ''),
       );
     }
   }
@@ -181,6 +190,9 @@ export function formatRecentText(records: ModelRequestRecord[]): string {
     lines.push(
       `[${time}] ${record.provider || '?'}/${record.model || '?'}  ${status}  ` +
         `${fmtNumber(record.inputTokens)} in / ${fmtNumber(record.outputTokens)} out  ` +
+        ((record.cacheHitInputTokens ?? 0) > 0
+          ? `cache ${fmtNumber(record.cacheHitInputTokens ?? 0)}  `
+          : '') +
         `${record.durationMs !== undefined ? fmtDuration(record.durationMs) : '-'}`,
     );
     const snippet = excerpt(record.response?.text) || record.error;

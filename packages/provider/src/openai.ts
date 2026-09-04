@@ -112,11 +112,7 @@ export class OpenAIProvider extends BaseLLMProvider {
     super(defaultModel);
     this.apiKey = apiKey;
     this.baseURL = baseURL;
-    this.models = [...OPENAI_MODELS];
-    this.addConfiguredModels(configuredModels, (modelId, config) =>
-      createModelInfo(modelId, this.providerId, MODEL_DEFAULTS, config),
-    );
-    this.addConfiguredModels([defaultModel], (modelId, config) =>
+    this.initModelList(OPENAI_MODELS, configuredModels, (modelId, config) =>
       createModelInfo(modelId, this.providerId, MODEL_DEFAULTS, config),
     );
   }

@@ -8,9 +8,10 @@ import { WebSocket } from 'ws';
 import { createWebServer } from '../src/server';
 
 /**
- * 模拟「发出一次请求 → 刷新页面」：预置一个带 lastInputTokens / lastCacheHitTokens
- * 的会话，通过带 task 参数的 WS 连接模拟刷新重连，断言最终收到的 context_usage
- * 恢复为持久化的值（而不是 0）——缓存命中的持久化口径与已使用 tokens 保持一致。
+ * 模拟「发出一次请求 → 刷新页面」：预置一个带 lastInputTokens / lastOutputTokens /
+ * lastCacheHitTokens 的会话，通过带 task 参数的 WS 连接模拟刷新重连，断言最终
+ * 收到的 context_usage 恢复为持久化的值（而不是 0）——已使用 tokens（输入+输出）
+ * 与缓存命中的持久化口径保持一致。
  */
 test('refresh restores the persisted context usage instead of resetting it to 0', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'personal-agent-web-context-'));
@@ -37,13 +38,14 @@ test('refresh restores the persisted context usage instead of resetting it to 0'
     'utf8',
   );
 
-  // 预置带历史消息与已用上下文（最近一次模型调用输入 token / 缓存命中 token）的会话
+  // 预置带历史消息与已用上下文（最近一次模型调用输入/输出 token、缓存命中 token）的会话
   const sessions = new SessionManager(workspace, 'gpt-4o-mini', 'openai', sessionsDirectory);
   sessions.replaceMessages([
     { role: 'user', content: '之前发过一次请求' },
     { role: 'assistant', content: '这是回复。' },
   ]);
   sessions.setLastInputTokens(12345);
+  sessions.setLastOutputTokens(6789);
   sessions.setLastCacheHitTokens(4321);
   const sessionId = await sessions.save();
 
@@ -105,9 +107,13 @@ test('refresh restores the persisted context usage instead of resetting it to 0'
     );
 
   try {
-    // 第一次“刷新”：恢复的上下文用量应为持久化的 12345，而不是 0
+    // 第一次“刷新”：恢复的已使用 tokens = 持久化的输入 12345 + 输出 6789，而不是 0
     const first = await connectAndReadUsage();
-    assert.equal(first.usedTokens, 12345, `首次刷新后 usedTokens 应为 12345，实际为 ${first.usedTokens}`);
+    assert.equal(
+      first.usedTokens,
+      12345 + 6789,
+      `首次刷新后 usedTokens 应为 ${12345 + 6789}，实际为 ${first.usedTokens}`,
+    );
     // 缓存命中与已使用 tokens 同一持久化口径：恢复为 4321
     assert.equal(
       first.cacheHitTokens,
@@ -119,7 +125,11 @@ test('refresh restores the persisted context usage instead of resetting it to 0'
 
     // 再次“刷新”：结果一致，且会话文件中的持久化值未被破坏
     const second = await connectAndReadUsage();
-    assert.equal(second.usedTokens, 12345, `二次刷新后 usedTokens 应为 12345，实际为 ${second.usedTokens}`);
+    assert.equal(
+      second.usedTokens,
+      12345 + 6789,
+      `二次刷新后 usedTokens 应为 ${12345 + 6789}，实际为 ${second.usedTokens}`,
+    );
     assert.equal(
       second.cacheHitTokens,
       4321,
@@ -132,12 +142,17 @@ test('refresh restores the persisted context usage instead of resetting it to 0'
       metadata: {
         lastInputTokens: number;
         lastInputTokensByModel: Record<string, number>;
+        lastOutputTokens: number;
+        lastOutputTokensByModel: Record<string, number>;
         lastCacheHitTokens: number;
         lastCacheHitTokensByModel: Record<string, number>;
       };
     };
     assert.equal(sessionFile.metadata.lastInputTokens, 12345);
     assert.equal(sessionFile.metadata.lastInputTokensByModel['openai:gpt-4o-mini'], 12345);
+    // 输出 tokens 同样落盘（全局 + 按模型）：已使用 = 输入 + 输出
+    assert.equal(sessionFile.metadata.lastOutputTokens, 6789);
+    assert.equal(sessionFile.metadata.lastOutputTokensByModel['openai:gpt-4o-mini'], 6789);
     // 缓存命中同样落盘（全局 + 按模型），与已使用 tokens 保持一致
     assert.equal(sessionFile.metadata.lastCacheHitTokens, 4321);
     assert.equal(sessionFile.metadata.lastCacheHitTokensByModel['openai:gpt-4o-mini'], 4321);

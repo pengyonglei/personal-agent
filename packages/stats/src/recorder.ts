@@ -86,6 +86,7 @@ export class ModelRequestRecorder {
       outputTokens: usage?.outputTokens ?? 0,
       cacheCreationInputTokens: usage?.cacheCreationInputTokens ?? null,
       cacheReadInputTokens: usage?.cacheReadInputTokens ?? null,
+      cacheHitInputTokens: usage?.cacheHitTokens ?? null,
       requestMessages: start ? start.request.messages : undefined,
       requestTools: start ? start.request.tools : undefined,
       requestOptions: start ? start.request.options : undefined,

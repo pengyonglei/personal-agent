@@ -34,6 +34,7 @@ test('OllamaProvider parses native NDJSON streaming responses and tool calls', a
           done: true,
           done_reason: 'stop',
           prompt_eval_count: 12,
+          prompt_eval_cached_count: 8,
           eval_count: 4,
         }),
       ].join('\n'),
@@ -85,7 +86,8 @@ test('OllamaProvider parses native NDJSON streaming responses and tool calls', a
   assert.equal(end?.type, 'message_end');
   if (end?.type === 'message_end') {
     assert.equal(end.stopReason, 'tool_use');
-    assert.deepEqual(end.usage, { inputTokens: 12, outputTokens: 4 });
+    assert.deepEqual(end.usage, { inputTokens: 12, outputTokens: 4, cacheHitTokens: 8 });
+    assert.equal(end.usage.cacheHitTokens, 8); // prompt_eval_cached_count → cacheHitTokens
   }
 });
 

@@ -1541,6 +1541,49 @@ select {
   background: var(--pa-panel);
 }
 
+/* 项目上下文条：紧贴输入框上方，让使用者知道当前任务/Agent 所属的项目 */
+.pa-composer-project {
+  display: flex;
+  min-width: 0;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 8px;
+  color: var(--pa-muted);
+  font-size: 11px;
+}
+
+.pa-composer-project-icon {
+  flex: 0 0 auto;
+  color: var(--pa-accent);
+  font-size: 12px;
+}
+
+.pa-composer-project-label {
+  flex: 0 0 auto;
+  color: var(--pa-faint);
+}
+
+.pa-composer-project-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--pa-text);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pa-composer-project-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin-left: auto;
+  overflow: hidden;
+  color: var(--pa-faint);
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .pa-permission-floating {
   position: absolute;
   right: max(18px, calc((100% - 860px) / 2));
@@ -2868,11 +2911,34 @@ select {
   }
 }
 
+/* 高度自适应窗口：整个对话框（含 antd 默认 100px 顶部偏移与头部/底部）
+   上限为视口高度，body 用 flex 填充剩余空间；调用列表与 JSON 面板在内部
+   独立滚动，对话框层不再出现垂直滚动条。 */
+.pa-debug-modal {
+  top: 24px;
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 48px);
+}
+
+.pa-debug-modal .ant-modal-container,
+.pa-debug-modal .ant-modal-content {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  max-height: 100%;
+}
+
+.pa-debug-modal .ant-modal-header,
+.pa-debug-modal .ant-modal-footer {
+  flex: none;
+}
+
 .pa-debug-modal .ant-modal-body {
   display: flex;
-  min-height: 570px;
-  max-height: calc(100vh - 210px);
   flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
   gap: 14px;
   overflow: hidden;
 }
@@ -3077,10 +3143,6 @@ select {
 @media (max-width: 640px) {
   .pa-debug-modal {
     max-width: calc(100vw - 20px);
-  }
-
-  .pa-debug-modal .ant-modal-body {
-    min-height: calc(100vh - 220px);
   }
 
   .pa-debug-metadata {

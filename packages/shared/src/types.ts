@@ -163,7 +163,12 @@ export interface UsageInfo {
   outputTokens: number;
   cacheCreationInputTokens?: number | null;
   cacheReadInputTokens?: number | null;
-  /** 命中缓存的输入 token 数（如 DeepSeek 的 prompt_cache_hit_tokens）。其他模型不提供该字段。 */
+  /**
+   * 命中缓存的输入 token 数（占位为 null 表示该供应商/版本未上报）。
+   * Ollama 的 prompt_eval_cached_count（较新版本才有）、DeepSeek 的
+   * prompt_cache_hit_tokens、智谱的 prompt_tokens_details.cached_tokens 等
+   * 语义相同的字段统一映射到这里；未上报时保持 null，不要填 0 与"未上报"区分。
+   */
   cacheHitTokens?: number | null;
 }
 
@@ -366,7 +371,10 @@ export interface SessionMetadata {
   tokensUsedByModel?: Record<string, ModelTokenUsage>;
   /**
    * Input tokens of the most recent model request within this session.
-   * Used as the "used context" indicator (persisted so it survives restarts).
+   * Part of the "used context" indicator: used = input + output of the
+   * most recent request (persisted so it survives restarts).
+   * 注意：各供应商上报口径不同（如 Ollama 只报 prompt_eval_count / eval_count，
+   * 本地思考模型的思考 token 计入 output），已使用 tokens 必须两者相加。
    */
   lastInputTokens?: number;
   /**
@@ -375,6 +383,17 @@ export interface SessionMetadata {
    * 刷新/重启后按当前模型恢复，而不是显示别的模型的值或 0。
    */
   lastInputTokensByModel?: Record<string, number>;
+  /**
+   * Output tokens of the most recent model request within this session.
+   * Recorded together with lastInputTokens — 「已使用 tokens」=
+   * lastInputTokens + lastOutputTokens（最近一次模型请求的输入+输出）。
+   */
+  lastOutputTokens?: number;
+  /**
+   * 每个模型最近一次请求的输出 tokens，keyed by `${provider}:${model}`，
+   * 与 lastInputTokensByModel 对称：切换模型后按当前模型恢复各自的值。
+   */
+  lastOutputTokensByModel?: Record<string, number>;
   /**
    * 最近一次模型请求中命中缓存的输入 tokens（仅 deepseek 等模型提供），
    * 与 lastInputTokens 一同持久化，刷新/重启后上下文仪表盘的缓存命中占比不丢失。

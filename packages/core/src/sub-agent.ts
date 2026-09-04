@@ -196,16 +196,16 @@ export class SubAgentManager {
         ),
       });
 
-      // 最近一次模型请求的输入 token 数（API 上报口径）：由下方 AgentLoop 的
-      // onModelCallEnd 钩子持续更新，供 TokenBudget 压缩判断使用，与主对话
-      // 上下文仪表盘同一口径；首轮尚无请求时返回 undefined，TokenBudget 兜底
-      // 使用字符估算。
-      const lastInputTokensRef: { current: number | undefined } = { current: undefined };
+      // 最近一次模型请求的已使用 token 数（API 上报口径，输入 + 输出）：
+      // 由下方 AgentLoop 的 onModelCallEnd 钩子持续更新，供 TokenBudget 压缩
+      // 判断使用，与主对话上下文仪表盘同一口径；首轮尚无请求时返回 undefined，
+      // TokenBudget 兜底使用字符估算。
+      const usedTokensRef: { current: number | undefined } = { current: undefined };
       const tokenBudget = new TokenBudget(
         config.contextTokens ?? 100000,
         8192,
         createLlmContextSummarizer(config.provider, this.prompts),
-        () => lastInputTokensRef.current,
+        () => usedTokensRef.current,
       );
       const maxTurns = config.maxTurns ?? 50;
 
@@ -220,7 +220,10 @@ export class SubAgentManager {
         maxTurns,
         onModelCallEnd: (call) => {
           if (call.status === 'completed' && call.response.usage) {
-            lastInputTokensRef.current = call.response.usage.inputTokens;
+            // 已使用 token = 输入 + 输出：Ollama 等本地模型只分别上报输入/输出
+            // （思考 token 计入输出，可能远超输入），必须两者相加
+            usedTokensRef.current =
+              call.response.usage.inputTokens + call.response.usage.outputTokens;
           }
         },
         executeTool: async (name, input, signal) => {

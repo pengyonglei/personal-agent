@@ -92,11 +92,7 @@ export class DeepSeekProvider extends BaseLLMProvider {
     super(normalizeDeepSeekModel(defaultModel));
     this.apiKey = apiKey;
     this.baseURL = baseURL.replace(/\/+$/, '');
-    this.models = [...DEEPSEEK_MODELS];
-    this.addConfiguredModels(configuredModels, (modelId, config) =>
-      createModelInfo(modelId, this.providerId, MODEL_DEFAULTS, config),
-    );
-    this.addConfiguredModels([this.currentModel], (modelId, config) =>
+    this.initModelList(DEEPSEEK_MODELS, configuredModels, (modelId, config) =>
       createModelInfo(modelId, this.providerId, MODEL_DEFAULTS, config),
     );
   }

@@ -30,8 +30,13 @@ export interface PromptImageInput {
  * total context window.
  */
 export interface ContextUsage {
-  /** Cumulative tokens consumed by this session (API input + output). */
+  /**
+   * 「已使用 tokens」= 最近一次模型请求的 `usage.inputTokens + usage.outputTokens`
+   * （用户定义的统计口径：Ollama 本地模型只分别上报输入/输出，必须两者相加）。
+   */
   usedTokens: number;
+  /** 最近一次模型请求的输入 tokens（缓存命中是输入的子集，命中率以其为分母）。 */
+  inputTokens?: number;
   /** Total context window length of the active model. */
   totalTokens: number;
   /** Tokens reserved for model output (not available for context). */

@@ -294,9 +294,11 @@ export class TokenBudget {
   private reservedForOutput: number;
   private summarizer?: ContextSummarizer;
   /**
-   * 权威的「已使用 token」来源（例如会话记录的最近一次模型请求输入 token 数，
-   * 即上下文仪表盘展示的 usedTokens）。提供后，压缩判断与仪表盘口径一致，
-   * 不再依赖本地字符估算；仅在未提供或返回 undefined 时兜底使用字符估算
+   * 权威的「已使用 token」来源（例如会话记录的最近一次模型请求已使用 token 数，
+   * 即 `usage.inputTokens + usage.outputTokens`，上下文仪表盘展示的 usedTokens）。
+   * 各供应商上报口径不同（Ollama 只分别上报输入/输出，思考 token 计入输出），
+   * 已使用必须两者相加，只取输入会严重低估。提供后，压缩判断与仪表盘口径
+   * 一致，不再依赖本地字符估算；仅在未提供或返回 undefined 时兜底使用字符估算
    * （如子 agent 首轮尚无任何模型请求）。
    */
   private getUsedTokens?: () => number | undefined;

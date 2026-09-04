@@ -1399,6 +1399,7 @@ function parseProviderSettings(value: unknown): ProviderSettingsInput {
     input.provider !== 'ollama' &&
     input.provider !== 'deepseek' &&
     input.provider !== 'volcano' &&
+    input.provider !== 'zhipu' &&
     input.provider !== 'lmstudio'
   ) {
     throw new Error('provider 格式无效。');
@@ -1409,6 +1410,7 @@ function parseProviderSettings(value: unknown): ProviderSettingsInput {
     input.provider !== 'ollama' &&
     input.provider !== 'deepseek' &&
     input.provider !== 'volcano' &&
+    input.provider !== 'zhipu' &&
     input.provider !== 'lmstudio'
   ) {
     throw new Error('不支持的 Provider。');
@@ -1491,6 +1493,7 @@ function parseVisionSettings(value: unknown): VisionSettingsInput {
     input.provider !== 'ollama' &&
     input.provider !== 'deepseek' &&
     input.provider !== 'volcano' &&
+    input.provider !== 'zhipu' &&
     input.provider !== 'lmstudio'
   ) {
     throw new Error('不支持的视觉模型供应商。');
@@ -1512,6 +1515,7 @@ function parseProviderId(value: string): ProviderSettingsInput['provider'] {
     value !== 'ollama' &&
     value !== 'deepseek' &&
     value !== 'volcano' &&
+    value !== 'zhipu' &&
     value !== 'lmstudio'
   ) {
     throw new Error('不支持的 Provider。');
@@ -1531,6 +1535,7 @@ function parseRuntimeModelSettings(value: unknown): RuntimeModelSettingsInput {
     input.provider !== 'ollama' &&
     input.provider !== 'deepseek' &&
     input.provider !== 'volcano' &&
+    input.provider !== 'zhipu' &&
     input.provider !== 'lmstudio'
   ) {
     throw new Error('provider 格式无效。');

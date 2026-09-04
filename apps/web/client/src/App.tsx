@@ -161,7 +161,7 @@ const { TextArea } = Input;
 
 type ColorMode = 'light' | 'dark';
 type ConnectionState = 'connecting' | 'online' | 'offline';
-type ProviderId = 'openai' | 'anthropic' | 'deepseek' | 'ollama' | 'volcano' | 'lmstudio';
+type ProviderId = 'openai' | 'anthropic' | 'deepseek' | 'ollama' | 'volcano' | 'zhipu' | 'lmstudio';
 type PlanMessage = Extract<ServerMessage, { type: 'plan' }>;
 type PermissionRequest = Extract<ServerMessage, { type: 'permission_request' }>;
 type AskUserRequest = Extract<ServerMessage, { type: 'ask_user_request' }>;
@@ -516,6 +516,7 @@ const providerLabels: Record<ProviderId, string> = {
   deepseek: 'DeepSeek',
   ollama: 'Ollama（本地）',
   volcano: '火山方舟',
+  zhipu: '智谱AI',
   lmstudio: 'LM Studio（本地）',
 };
 
@@ -526,6 +527,7 @@ const providerIcons: Partial<Record<ProviderId, string>> = {
   deepseek: '/icons/deepseek-color.svg',
   ollama: '/icons/ollama.svg',
   volcano: '/icons/volcengine-color.svg',
+  zhipu: '/icons/zhipu-color.svg',
   lmstudio: '/icons/lmstudio.svg',
 };
 
@@ -1938,7 +1940,9 @@ function AgentWorkspace({
             modelCallsRef.current = next;
             return next;
           });
-          setSelectedModelCallId(incoming.call.callId);
+          // 注意：新调用开始时不改变选中项 —— 用户正在查看某次历史调用时，
+          // 不应被自动跳转到最新一次。未手动选中时调试对话框的回退逻辑
+          // （calls.at(-1)）仍会默认展示最新调用。
           break;
         }
         case 'llm_call_end': {
@@ -3429,6 +3433,8 @@ function AgentWorkspace({
             images={promptImages}
             enabled={composerEnabled}
             skills={availableSkills}
+            projectName={activeProject?.name}
+            projectRootPath={activeProject?.rootPath}
             busy={state.busy}
             creatingTask={state.creatingTask}
             planActive={state.planActive}
@@ -4031,6 +4037,7 @@ function AgentWorkspace({
                   </Form.Item>
                   {(selectedProvider === 'deepseek' ||
                     selectedProvider === 'volcano' ||
+                    selectedProvider === 'zhipu' ||
                     selectedProvider === 'lmstudio') && (
                     <Form.Item
                       name="thinkingEffort"
@@ -4040,7 +4047,9 @@ function AgentWorkspace({
                           ? 'DeepSeek 支持 off / low / high / max；medium 不支持，将按 low 处理。'
                           : selectedProvider === 'lmstudio'
                             ? 'LM Studio 上 Qwen3 类模型支持 xhigh（默认）/ medium / low 三档思考强度，选择「关闭」可关闭思考模式。'
-                            : '火山方舟仅深度思考模型（如 doubao-seed-thinking）支持思考，普通模型请选择「关闭」。'
+                            : selectedProvider === 'zhipu'
+                              ? '智谱 GLM-4.5/4.6 仅支持开启/关闭深度思考：High 表示开启，关闭则不思考。'
+                              : '火山方舟仅深度思考模型（如 doubao-seed-thinking）支持思考，普通模型请选择「关闭」。'
                       }
                     >
                       <Select
@@ -4049,7 +4058,9 @@ function AgentWorkspace({
                             ? ['off', 'low', 'high', 'max']
                             : selectedProvider === 'lmstudio'
                               ? ['off', 'low', 'medium', 'xhigh']
-                              : ['off', 'low', 'medium', 'high'],
+                              : selectedProvider === 'zhipu'
+                                ? ['off', 'high']
+                                : ['off', 'low', 'medium', 'high'],
                         )}
                       />
                     </Form.Item>
@@ -5516,6 +5527,8 @@ function Composer({
   images,
   enabled,
   skills,
+  projectName,
+  projectRootPath,
   busy,
   creatingTask,
   planActive,
@@ -5558,6 +5571,10 @@ function Composer({
   images: PromptImageInput[];
   enabled: boolean;
   skills: SkillInfo[];
+  /** 当前任务所属的项目名称（显示在输入框上方，让使用者知道当前 Agent 处于哪个项目）。 */
+  projectName?: string;
+  /** 项目根目录，作为名称旁的辅助提示展示。 */
+  projectRootPath?: string;
   busy: boolean;
   creatingTask: boolean;
   planActive: boolean;
@@ -6101,6 +6118,21 @@ function Composer({
           </div>
         </div>
       )}
+      {projectName && (
+        <div
+          className="pa-composer-project"
+          title={projectRootPath ? `${projectName} · ${projectRootPath}` : `项目 ${projectName}`}
+        >
+          <FolderOpenOutlined className="pa-composer-project-icon" aria-hidden="true" />
+          <span className="pa-composer-project-label">项目</span>
+          <span className="pa-composer-project-name">{projectName}</span>
+          {projectRootPath && (
+            <span className="pa-composer-project-path" title={projectRootPath}>
+              {projectRootPath}
+            </span>
+          )}
+        </div>
+      )}
       <div className="pa-composer">
         <div className="pa-md-toolbar">
           <div className="pa-md-toolbar-left">
@@ -6604,6 +6636,8 @@ interface StatsSummaryData {
   interruptedCount: number;
   inputTokens: number;
   outputTokens: number;
+  /** 缓存命中输入 token 合计（含 Anthropic cache_read_input_tokens）。 */
+  cacheHitInputTokens?: number;
   avgDurationMs: number;
 }
 
@@ -6614,6 +6648,7 @@ interface StatsByModelRow {
   errorCount: number;
   inputTokens: number;
   outputTokens: number;
+  cacheHitInputTokens?: number;
 }
 
 interface StatsByDayRow {
@@ -6621,6 +6656,7 @@ interface StatsByDayRow {
   count: number;
   inputTokens: number;
   outputTokens: number;
+  cacheHitInputTokens?: number;
 }
 
 interface StatsRecordRow {
@@ -6630,6 +6666,8 @@ interface StatsRecordRow {
   model: string;
   inputTokens: number;
   outputTokens: number;
+  /** 该行记录的缓存命中 token（NULL/0 表示未命中或未上报）。 */
+  cacheHitInputTokens?: number | null;
   requestMessages?: unknown;
   response?: {
     text?: string;
@@ -6648,6 +6686,15 @@ interface StatsModalResponse {
   byDay?: StatsByDayRow[];
   total?: number;
   records?: StatsRecordRow[];
+}
+
+/** 缓存命中列渲染：0/null（未命中或未上报）显示占位符，命中则展示数值。 */
+function renderCacheHitTokens(value: number | null | undefined): ReactNode {
+  return value && value > 0
+    ? value.toLocaleString('en-US')
+    : (
+        <Text type="secondary">-</Text>
+      );
 }
 
 function StatsModal({ open, onClose }: { open: boolean; onClose: () => void }) {
@@ -6760,6 +6807,11 @@ function StatsModal({ open, onClose }: { open: boolean; onClose: () => void }) {
                       <Statistic title="输入 tokens" value={data.summary.inputTokens} />
                       <Statistic title="输出 tokens" value={data.summary.outputTokens} />
                       <Statistic
+                        title="缓存命中 tokens"
+                        value={data.summary.cacheHitInputTokens ?? 0}
+                        valueStyle={{ color: '#389e0d' }}
+                      />
+                      <Statistic
                         title="平均耗时"
                         value={
                           data.summary.avgDurationMs >= 1000
@@ -6782,6 +6834,12 @@ function StatsModal({ open, onClose }: { open: boolean; onClose: () => void }) {
                         { title: '错误', dataIndex: 'errorCount', align: 'right' },
                         { title: '输入 tokens', dataIndex: 'inputTokens', align: 'right' },
                         { title: '输出 tokens', dataIndex: 'outputTokens', align: 'right' },
+                        {
+                          title: '缓存命中',
+                          dataIndex: 'cacheHitInputTokens',
+                          align: 'right',
+                          render: renderCacheHitTokens,
+                        },
                       ]}
                     />
 
@@ -6797,6 +6855,12 @@ function StatsModal({ open, onClose }: { open: boolean; onClose: () => void }) {
                         { title: '次数', dataIndex: 'count', align: 'right' },
                         { title: '输入 tokens', dataIndex: 'inputTokens', align: 'right' },
                         { title: '输出 tokens', dataIndex: 'outputTokens', align: 'right' },
+                        {
+                          title: '缓存命中',
+                          dataIndex: 'cacheHitInputTokens',
+                          align: 'right',
+                          render: renderCacheHitTokens,
+                        },
                       ]}
                     />
                   </>
@@ -6835,6 +6899,12 @@ function StatsModal({ open, onClose }: { open: boolean; onClose: () => void }) {
                       { title: '模型', dataIndex: 'model' },
                       { title: '输入 tokens', dataIndex: 'inputTokens', align: 'right' },
                       { title: '输出 tokens', dataIndex: 'outputTokens', align: 'right' },
+                      {
+                        title: '缓存命中',
+                        dataIndex: 'cacheHitInputTokens',
+                        align: 'right',
+                        render: renderCacheHitTokens,
+                      },
                       {
                         title: '请求入参',
                         render: (value: unknown) =>
@@ -8733,12 +8803,12 @@ function formatTokens(value: number): string {
 }
 
 /**
- * 缓存命中 token 占已使用 token 的百分比（分母为「已使用」= 最后一次模型调用的输入 token）。
- * 统一保留两位小数。
+ * 缓存命中 token 占输入 token 的百分比（缓存命中是输入 tokens 的子集，
+ * 分母取最后一次模型调用的输入 token 数；统一保留两位小数）。
  */
-function cacheHitPercentage(cacheHitTokens: number, usedTokens: number): string {
-  if (usedTokens <= 0) return '0%';
-  const percentage = (cacheHitTokens / usedTokens) * 100;
+function cacheHitPercentage(cacheHitTokens: number, inputTokens: number): string {
+  if (inputTokens <= 0) return '0%';
+  const percentage = (cacheHitTokens / inputTokens) * 100;
   return `${percentage.toFixed(2)}%`;
 }
 
@@ -8772,11 +8842,11 @@ function ContextUsagePanel({ usage, footer }: { usage?: ContextUsage; footer?: R
       {typeof usage.cacheHitTokens === 'number' && usage.cacheHitTokens > 0 && (
         <div className="pa-context-tip-row">
           <span>缓存命中</span>
-          <b>{cacheHitPercentage(usage.cacheHitTokens, usage.usedTokens)}</b>
+          <b>{cacheHitPercentage(usage.cacheHitTokens, usage.inputTokens ?? usage.usedTokens)}</b>
         </div>
       )}
       <div className="pa-context-tip-hint">
-        <div>已使用：最后一次模型调用的输入Token</div>
+        <div>已使用：最后一次模型调用的输入Token + 输出Token</div>
         <div>预留输出：{formatTokens(usage.reservedOutputTokens)} tokens</div>
         <div>自动压缩阈值：0.75</div>
       </div>
@@ -8866,6 +8936,7 @@ function isProviderId(value: string): value is ProviderId {
     value === 'deepseek' ||
     value === 'ollama' ||
     value === 'volcano' ||
+    value === 'zhipu' ||
     value === 'lmstudio'
   );
 }

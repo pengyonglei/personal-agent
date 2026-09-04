@@ -38,6 +38,7 @@ import {
   OpenAIProvider,
   ProviderRegistry,
   VolcanoArkProvider,
+  ZhipuProvider,
   type LLMProvider,
 } from '@personal-agent/provider';
 import type {
@@ -510,6 +511,7 @@ export class WebAgentRuntime {
       'ollama',
       'deepseek',
       'volcano',
+      'zhipu',
       'lmstudio',
     ];
     const providers = Object.fromEntries(
@@ -533,12 +535,13 @@ export class WebAgentRuntime {
             ),
             thinkingEffort:
               configured?.thinkingEffort ??
-              (id === 'deepseek' || id === 'volcano' || id === 'lmstudio'
+              (id === 'deepseek' || id === 'volcano' || id === 'zhipu' || id === 'lmstudio'
                 ? defaults.thinkingEffort
                 : 'off'),
             reasoningSupported:
               id === 'deepseek' ||
               id === 'volcano' ||
+              id === 'zhipu' ||
               id === 'lmstudio' ||
               // Ollama：只要有一个模型显式配置了 reasoningOptions 即视为支持思考
               (id === 'ollama' &&
@@ -648,7 +651,10 @@ export class WebAgentRuntime {
     );
     const thinkingEffort = normalizeRuntimeReasoningEffort(
       input.provider,
-      input.provider === 'deepseek' || input.provider === 'volcano' || input.provider === 'lmstudio'
+      input.provider === 'deepseek' ||
+        input.provider === 'volcano' ||
+        input.provider === 'zhipu' ||
+        input.provider === 'lmstudio'
         ? (input.thinkingEffort ?? defaults.thinkingEffort)
         : 'off',
     );
@@ -1094,6 +1100,9 @@ export class WebAgentRuntime {
       case 'volcano':
         instance = new VolcanoArkProvider(apiKey ?? 'volcano', model, baseURL, models);
         break;
+      case 'zhipu':
+        instance = new ZhipuProvider(apiKey ?? 'zhipu', model, baseURL, models);
+        break;
       case 'lmstudio':
         instance = new LMStudioProvider(apiKey ?? 'lm-studio', model, baseURL, models);
         break;
@@ -1522,6 +1531,8 @@ export class WebConversation {
       const lastUsage = this.agentLoop.getLastUsage();
       if (lastUsage) {
         this.session.setLastInputTokens(lastUsage.inputTokens);
+        // 已使用 = 输入 + 输出（Ollama 本地模型只分别上报，需单独记录输出）
+        this.session.setLastOutputTokens(lastUsage.outputTokens);
         this.session.setLastCacheHitTokens(lastUsage.cacheHitTokens ?? 0);
       }
       this.session.incrementTurnCount();
@@ -1915,9 +1926,11 @@ When you need the user to make a decision, call ask_user with the question and u
       TOKEN_BUDGET_RESERVED_OUTPUT,
       createLlmContextSummarizer(this.provider, this.runtime.promptOverrides),
       // 压缩判断使用上下文仪表盘同源的「已使用 tokens」：会话记录的最近一次
-      // 模型请求输入 token 数（API 上报，刷新/重启后从磁盘恢复），而不是
-      // 本地字符估算，保证仪表盘显示的用量与触发压缩的阈值判断一致。
-      () => this.session.getLastInputTokens(),
+      // 模型请求已使用 token 数（API 上报的输入 + 输出，刷新/重启后从磁盘
+      // 恢复），而不是本地字符估算，保证仪表盘显示的用量与触发压缩的阈值判断
+      // 一致。Ollama 本地模型只分别上报输入/输出（思考 token 计入输出），
+      // 已使用必须两者相加，只取输入会严重低估。
+      () => this.session.getLastUsedTokens(),
     );
     this.agentLoop = new AgentLoop({
       provider: this.provider,
@@ -1949,6 +1962,9 @@ When you need the user to make a decision, call ask_user with the question and u
         // 会循环调用多次模型，UI 上的 token 数也能实时更新。
         if (call.status === 'completed' && call.response.usage) {
           this.session.setLastInputTokens(call.response.usage.inputTokens);
+          // 已使用 = 输入 + 输出：Ollama 本地模型只分别上报输入/输出
+          // （思考 token 计入输出），必须单独记录输出后再相加
+          this.session.setLastOutputTokens(call.response.usage.outputTokens);
           this.session.setLastCacheHitTokens(call.response.usage.cacheHitTokens ?? 0);
           this.publishContextUsage();
         }
@@ -1980,15 +1996,18 @@ When you need the user to make a decision, call ask_user with the question and u
 
   /**
    * Push the current conversation's context usage to the client.
-   * "Used" tokens reflect the input tokens of the most recent model request,
-   * i.e. the exact context size the last request was sent with.
+   * "Used" tokens = `usage.inputTokens + usage.outputTokens` of the most
+   * recent model request — the total tokens the model actually consumed.
+   * Ollama 本地部署的模型与云端供应商的上报结果不同（只分别上报输入/输出，
+   * 思考 token 计入输出），已使用 tokens 必须输入 + 输出相加，只取输入会
+   * 严重低估（如本地思考模型输出可达数万 token）。
    */
   private publishContextUsage(): void {
     try {
-      // Use the API-reported input token count of the most recent model
-      // request, instead of a cumulative total or a local character-based
+      // Use the API-reported token usage (input + output) of the most recent
+      // model request, instead of a cumulative total or a local character-based
       // estimate.
-      const usedTokens = this.session.getLastInputTokens();
+      const usedTokens = this.session.getLastUsedTokens();
       const totalTokens = this.getTotalContextWindow();
       const percentage = totalTokens > 0 ? Math.min(100, (usedTokens / totalTokens) * 100) : 0;
       const usage: ContextUsage = {
@@ -1996,6 +2015,8 @@ When you need the user to make a decision, call ask_user with the question and u
         totalTokens,
         reservedOutputTokens: TOKEN_BUDGET_RESERVED_OUTPUT,
         percentage,
+        // 最近一次请求的输入 tokens：缓存命中是输入的子集，命中率以其为分母
+        inputTokens: this.session.getLastInputTokens(),
         // 与 usedTokens 同一持久化来源（会话 metadata），刷新/重启后按当前模型恢复
         cacheHitTokens: this.session.getLastCacheHitTokens(),
       };
@@ -2122,6 +2143,13 @@ function getProviderDefaults(provider: ProviderId): {
         ],
         thinkingEffort: 'off',
       };
+    case 'zhipu':
+      return {
+        baseURL: 'https://open.bigmodel.cn/api/paas/v4',
+        defaultModel: 'glm-4.6',
+        models: ['glm-4.6', 'glm-4.5', 'glm-4.5-air', 'glm-4.5-flash'],
+        thinkingEffort: 'high',
+      };
     case 'lmstudio':
       return {
         baseURL: 'http://localhost:1234/v1',
@@ -2139,6 +2167,7 @@ function isProviderId(value: string): value is ProviderId {
     value === 'ollama' ||
     value === 'deepseek' ||
     value === 'volcano' ||
+    value === 'zhipu' ||
     value === 'lmstudio'
   );
 }
@@ -2147,6 +2176,7 @@ function supportsRuntimeReasoning(providerId: ProviderId, model?: ModelInfo): bo
   return (
     (providerId === 'deepseek' ||
       providerId === 'volcano' ||
+      providerId === 'zhipu' ||
       providerId === 'lmstudio' ||
       providerId === 'ollama') &&
     Boolean(model?.features.includes(ProviderFeature.Thinking))
@@ -2167,6 +2197,8 @@ function reasoningOptionsForModel(providerId: ProviderId, model?: ModelInfo): Re
 function reasoningOptionsForProvider(providerId: ProviderId): ReasoningEffort[] {
   if (providerId === 'deepseek') return ['off', 'low', 'high', 'max'];
   if (providerId === 'volcano') return ['off', 'low', 'medium', 'high'];
+  // 智谱 GLM-4.5/4.6 只有开/关深度思考两态，high 表示开启
+  if (providerId === 'zhipu') return ['off', 'high'];
   // LM Studio 上 Qwen3 类 GGUF 模型的思考强度档位：xhigh（默认）/ medium / low
   if (providerId === 'lmstudio') return ['off', 'low', 'medium', 'xhigh'];
   return ['off'];
@@ -2209,10 +2241,20 @@ function resolveProviderReasoningEffort(
   providerId: ProviderId,
   providerConfig: AppConfig['providers'][ProviderId],
 ): ReasoningEffort {
-  if (providerId !== 'deepseek' && providerId !== 'volcano' && providerId !== 'lmstudio') {
+  if (
+    providerId !== 'deepseek' &&
+    providerId !== 'volcano' &&
+    providerId !== 'zhipu' &&
+    providerId !== 'lmstudio'
+  ) {
     return 'off';
   }
-  const fallback = providerId === 'deepseek' ? 'high' : providerId === 'lmstudio' ? 'xhigh' : 'off';
+  const fallback =
+    providerId === 'deepseek' || providerId === 'zhipu'
+      ? 'high'
+      : providerId === 'lmstudio'
+        ? 'xhigh'
+        : 'off';
   return normalizeRuntimeReasoningEffort(providerId, providerConfig?.thinkingEffort ?? fallback);
 }
 
@@ -2235,6 +2277,11 @@ function normalizeRuntimeReasoningEffort(
     // Volcano Ark exposes low/medium/high; 'max' and 'xhigh' are not supported.
     if (effort === 'max' || effort === 'xhigh') return 'high';
     return effort;
+  }
+  if (providerId === 'zhipu') {
+    // 智谱 GLM 只有开/关深度思考两态：off 关闭，其余档位统一视为开启（high）。
+    if (effort === 'off') return 'off';
+    return 'high';
   }
   if (providerId === 'lmstudio') {
     // LM Studio 上的 Qwen3 类模型只暴露 xhigh / medium / low 三档（外加
@@ -2319,6 +2366,7 @@ function providerLabel(provider: ProviderId): string {
     ollama: 'Ollama',
     deepseek: 'DeepSeek',
     volcano: '火山方舟',
+    zhipu: '智谱AI',
     lmstudio: 'LM Studio',
   }[provider];
 }

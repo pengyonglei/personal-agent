@@ -106,20 +106,7 @@ export class AnthropicProvider extends BaseLLMProvider {
     super(defaultModel);
     this.apiKey = apiKey;
     this.baseURL = baseURL;
-    this.models = [...ANTHROPIC_MODELS];
-    this.addConfiguredModels(configuredModels, (modelId, config) => ({
-      id: modelId,
-      displayName: modelId,
-      provider: this.providerId,
-      contextWindow: config?.contextWindow ?? 200_000,
-      maxOutputTokens: config?.maxOutputTokens ?? 32_768,
-      features: [
-        ProviderFeature.Streaming,
-        ProviderFeature.ToolCalling,
-        ProviderFeature.ParallelToolCalls,
-      ],
-    }));
-    this.addConfiguredModels([defaultModel], (modelId, config) => ({
+    this.initModelList(ANTHROPIC_MODELS, configuredModels, (modelId, config) => ({
       id: modelId,
       displayName: modelId,
       provider: this.providerId,

@@ -33,7 +33,7 @@ const DEFAULT_DB_PATH = resolve(homedir(), '.personal-agent', 'stats', 'model-re
 const SCHEMA_COMMENT_MARKER = '模型请求统计明细';
 
 // ---------------------------------------------------------------------------
-// Schema v4 (table + column comments are stored in sqlite_master.sql)
+// Schema v5 (table + column comments are stored in sqlite_master.sql)
 //
 // `id` is an auto-increment primary key — the stable sort key (insertion
 // order). `created_at` is the row write time, `timestamp` the request start
@@ -41,7 +41,16 @@ const SCHEMA_COMMENT_MARKER = '模型请求统计明细';
 // Request payloads (request_messages/tools/options) and the full response
 // (`response` JSON) are only meaningful when recordPayloads is enabled; the
 // response JSON holds { text, thinking, toolCalls, messageId }.
+//
+// v5（相对 v4）：新增 cache_hit_input_tokens 列，记录命中缓存的输入 token
+// （Ollama prompt_eval_cached_count / DeepSeek prompt_cache_hit_tokens /
+// 智谱 cached_tokens 等）。Anthropic 的缓存命中仍存于既有
+// cache_read_input_tokens 列；两列语义重叠，汇总时相加即为总命中。
 // ---------------------------------------------------------------------------
+
+/** SQL 表达式：行级缓存命中 token（Anthropic read 列 + 其他供应商 hit 列之和）。 */
+const CACHE_HIT_SUM_SQL =
+  'COALESCE(SUM(COALESCE(cache_hit_input_tokens, 0) + COALESCE(cache_read_input_tokens, 0)), 0) AS cacheHitInputTokens';
 
 const CREATE_TABLE_SQL = `
 CREATE TABLE IF NOT EXISTS model_requests ( -- ${SCHEMA_COMMENT_MARKER}
@@ -58,7 +67,8 @@ CREATE TABLE IF NOT EXISTS model_requests ( -- ${SCHEMA_COMMENT_MARKER}
   input_tokens                INTEGER NOT NULL DEFAULT 0, -- 输入 token 数
   output_tokens               INTEGER NOT NULL DEFAULT 0, -- 输出 token 数
   cache_creation_input_tokens INTEGER,                    -- Prompt 缓存写入 token（可空）
-  cache_read_input_tokens     INTEGER,                    -- Prompt 缓存读取 token（可空）
+  cache_read_input_tokens     INTEGER,                    -- Prompt 缓存读取 token（可空，Anthropic）
+  cache_hit_input_tokens      INTEGER,                    -- 命中缓存的输入 token（Ollama prompt_eval_cached_count 等，可空）
   request_messages            TEXT,                       -- 请求入参 messages（JSON，仅 recordPayloads=true 时写入）
   request_tools               TEXT,                       -- 请求入参工具定义（JSON，同上）
   request_options             TEXT,                       -- 请求入参选项（JSON，同上）
@@ -68,8 +78,9 @@ CREATE TABLE IF NOT EXISTS model_requests ( -- ${SCHEMA_COMMENT_MARKER}
 `;
 
 /**
- * Copy legacy rows into the v4 schema. `id` is intentionally omitted so the
- * auto-increment column renumbers rows in the legacy insertion order
+ * Copy legacy rows into the current (v5) schema. `id` is intentionally
+ * omitted so the auto-increment column renumbers rows in the legacy
+ * insertion order
  * (`ORDER BY rowid`). The response JSON is assembled from the legacy
  * flat response columns via the JSON1 `json_object` function.
  *
@@ -100,6 +111,38 @@ ORDER BY rowid ASC
 `;
 }
 
+/**
+ * Rebuild a pre-v4 `model_requests` table (flat response_* columns) on the
+ * current (v5) schema inside a transaction; all rows are copied over and
+ * renumbered in the legacy insertion order (rowid). New v5 columns
+ * (cache_hit_input_tokens) default to NULL for legacy rows.
+ */
+function migrateToCurrentSchema(db: DatabaseSyncLike, existingSql: string): void {
+  // v3 introduced `created_at`; v1/v2 fall back to `timestamp`.
+  const legacyRow = db
+    .prepare(
+      `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'model_requests_legacy'`,
+    )
+    .get() as { sql?: string } | undefined;
+  const legacySql = legacyRow?.sql ?? existingSql;
+  const createdAtExpression = legacySql.includes('created_at')
+    ? 'created_at'
+    : 'timestamp';
+
+  log.info('Migrating model_requests table to schema v5…');
+  db.exec('BEGIN;');
+  try {
+    db.exec('ALTER TABLE model_requests RENAME TO model_requests_legacy;');
+    db.exec(CREATE_TABLE_SQL);
+    db.exec(migrateInsertSql(createdAtExpression));
+    db.exec('DROP TABLE model_requests_legacy;');
+    db.exec('COMMIT;');
+  } catch (error) {
+    db.exec('ROLLBACK;');
+    throw error;
+  }
+}
+
 const CREATE_INDEXES_SQL = [
   'CREATE INDEX IF NOT EXISTS idx_model_requests_ts ON model_requests(timestamp);',
   'CREATE INDEX IF NOT EXISTS idx_model_requests_session ON model_requests(session_id);',
@@ -110,9 +153,9 @@ const INSERT_SQL = `
 INSERT INTO model_requests (
   created_at, session_id, timestamp, provider, model, turn_number, status,
   stop_reason, duration_ms, input_tokens, output_tokens,
-  cache_creation_input_tokens, cache_read_input_tokens, request_messages,
-  request_tools, request_options, response, error
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  cache_creation_input_tokens, cache_read_input_tokens, cache_hit_input_tokens,
+  request_messages, request_tools, request_options, response, error
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `;
 
 export interface UsageStoreOptions {
@@ -166,7 +209,7 @@ export class UsageStore {
   /**
    * Open (or re-open) the database, create the table/indexes and enable WAL.
    * Idempotent — safe to call multiple times. Databases created with older
-   * schemas (v1/v2/v3) are migrated to v4 in place.
+   * schemas (v1/v2/v3/v4) are migrated to v5 in place.
    */
   initialize(): void {
     if (this.db) return;
@@ -205,6 +248,7 @@ export class UsageStore {
       record.outputTokens ?? 0,
       record.cacheCreationInputTokens ?? null,
       record.cacheReadInputTokens ?? null,
+      record.cacheHitInputTokens ?? null,
       this.recordPayloads ? jsonOrNull(record.requestMessages) : null,
       this.recordPayloads ? jsonOrNull(record.requestTools) : null,
       this.recordPayloads ? jsonOrNull(record.requestOptions) : null,
@@ -257,6 +301,7 @@ export class UsageStore {
          COALESCE(SUM(CASE WHEN status = 'interrupted' THEN 1 ELSE 0 END), 0) AS interruptedCount,
          COALESCE(SUM(input_tokens), 0) AS inputTokens,
          COALESCE(SUM(output_tokens), 0) AS outputTokens,
+         ${CACHE_HIT_SUM_SQL},
          COALESCE(AVG(duration_ms), 0) AS avgDurationMs
        FROM model_requests WHERE timestamp >= ? AND timestamp <= ?`,
     ).get(from, to) as Record<string, unknown> | undefined;
@@ -266,6 +311,7 @@ export class UsageStore {
       interruptedCount: Number(row?.interruptedCount ?? 0),
       inputTokens: Number(row?.inputTokens ?? 0),
       outputTokens: Number(row?.outputTokens ?? 0),
+      cacheHitInputTokens: Number(row?.cacheHitInputTokens ?? 0),
       avgDurationMs: Number(row?.avgDurationMs ?? 0),
     };
   }
@@ -277,6 +323,7 @@ export class UsageStore {
          COUNT(*) AS count,
          COALESCE(SUM(input_tokens), 0) AS inputTokens,
          COALESCE(SUM(output_tokens), 0) AS outputTokens,
+         ${CACHE_HIT_SUM_SQL},
          COALESCE(SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END), 0) AS errorCount
        FROM model_requests
        WHERE timestamp >= ? AND timestamp <= ?
@@ -289,6 +336,7 @@ export class UsageStore {
       count: Number(row.count ?? 0),
       inputTokens: Number(row.inputTokens ?? 0),
       outputTokens: Number(row.outputTokens ?? 0),
+      cacheHitInputTokens: Number(row.cacheHitInputTokens ?? 0),
       errorCount: Number(row.errorCount ?? 0),
     }));
   }
@@ -299,7 +347,8 @@ export class UsageStore {
       `SELECT strftime('%Y-%m-%d', timestamp / 1000, 'unixepoch') AS day,
          COUNT(*) AS count,
          COALESCE(SUM(input_tokens), 0) AS inputTokens,
-         COALESCE(SUM(output_tokens), 0) AS outputTokens
+         COALESCE(SUM(output_tokens), 0) AS outputTokens,
+         ${CACHE_HIT_SUM_SQL}
        FROM model_requests
        WHERE timestamp >= ? AND timestamp <= ?
        GROUP BY day
@@ -310,6 +359,7 @@ export class UsageStore {
       count: Number(row.count ?? 0),
       inputTokens: Number(row.inputTokens ?? 0),
       outputTokens: Number(row.outputTokens ?? 0),
+      cacheHitInputTokens: Number(row.cacheHitInputTokens ?? 0),
     }));
   }
 
@@ -343,41 +393,28 @@ export class UsageStore {
 
   /**
    * Tables created before schema v4 (flat response_* columns) are rebuilt in
-   * place inside a transaction with the v4 schema; all rows are copied over
-   * and renumbered in the legacy insertion order.
+   * place inside a transaction with the current (v5) schema; all rows are
+   * copied over and renumbered in the legacy insertion order.
+   *
+   * v4 tables (missing `cache_hit_input_tokens`) are upgraded in place with
+   * an additive ALTER TABLE ADD COLUMN — no data movement required.
    */
   private migrateSchemaIfNeeded(db: DatabaseSyncLike): void {
     const row = db
       .prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'model_requests'`)
       .get() as { sql?: string } | undefined;
     const existingSql = row?.sql ?? '';
-    // v4 has a single `response` JSON column; older schemas have flat
+    // v4/v5 have a single `response` JSON column; older schemas have flat
     // response_text / response_thinking / response_tool_calls columns.
-    if (!existingSql.includes('response_tool_calls')) return;
-
-    // v3 introduced `created_at`; v1/v2 fall back to `timestamp`.
-    const legacyRow = db
-      .prepare(
-        `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'model_requests_legacy'`,
-      )
-      .get() as { sql?: string } | undefined;
-    const legacySql = legacyRow?.sql ?? existingSql;
-    const createdAtExpression = legacySql.includes('created_at')
-      ? 'created_at'
-      : 'timestamp';
-
-    log.info('Migrating model_requests table to schema v4…');
-    db.exec('BEGIN;');
-    try {
-      db.exec('ALTER TABLE model_requests RENAME TO model_requests_legacy;');
-      db.exec(CREATE_TABLE_SQL);
-      db.exec(migrateInsertSql(createdAtExpression));
-      db.exec('DROP TABLE model_requests_legacy;');
-      db.exec('COMMIT;');
-    } catch (error) {
-      db.exec('ROLLBACK;');
-      throw error;
+    if (existingSql.includes('response_tool_calls')) {
+      // v3 or earlier: full rebuild on the current (v5) schema.
+      migrateToCurrentSchema(db, existingSql);
+      return;
     }
+    if (existingSql.includes('cache_hit_input_tokens')) return; // already v5
+
+    log.info('Migrating model_requests to schema v5 (adding cache_hit_input_tokens)…');
+    db.exec('ALTER TABLE model_requests ADD COLUMN cache_hit_input_tokens INTEGER;');
   }
 
   private prepare(sql: string): StatementSyncLike {
@@ -426,6 +463,7 @@ function rowToRecord(row: Record<string, unknown>): ModelRequestRecord {
     outputTokens: Number(row.output_tokens ?? 0),
     cacheCreationInputTokens: (row.cache_creation_input_tokens as number | null) ?? null,
     cacheReadInputTokens: (row.cache_read_input_tokens as number | null) ?? null,
+    cacheHitInputTokens: (row.cache_hit_input_tokens as number | null) ?? null,
     requestMessages: parseJson(row.request_messages),
     requestTools: parseJson(row.request_tools),
     requestOptions: parseJson(row.request_options),

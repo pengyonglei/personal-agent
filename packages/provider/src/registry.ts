@@ -4,6 +4,7 @@ import { AnthropicProvider } from './anthropic';
 import { OpenAIProvider } from './openai';
 import { DeepSeekProvider, normalizeDeepSeekModel } from './deepseek';
 import { VolcanoArkProvider } from './volcano';
+import { ZhipuProvider } from './zhipu';
 import { OllamaProvider } from './ollama';
 import { LMStudioProvider, DEFAULT_LMSTUDIO_BASE_URL } from './lmstudio';
 import { createLogger } from '@personal-agent/shared';
@@ -86,6 +87,19 @@ export class ProviderRegistry {
         providers.volcano.defaultModel,
         providers.volcano.baseURL,
         providers.volcano.models,
+      );
+      await provider.initialize();
+      registry.register(provider);
+    }
+
+    // Zhipu AI (智谱)
+    if (providers.zhipu) {
+      log.info('Registering Zhipu provider');
+      const provider = new ZhipuProvider(
+        providers.zhipu.apiKey ?? 'zhipu',
+        providers.zhipu.defaultModel,
+        providers.zhipu.baseURL,
+        providers.zhipu.models,
       );
       await provider.initialize();
       registry.register(provider);
